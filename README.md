@@ -165,7 +165,8 @@ curl -X POST 'http://127.0.0.1:8000/api/ips/refresh-unknown?limit=100'
 
 Refresh the local Tor exit list safely. The command uses ETag and
 Last-Modified when available, validates that the response contains public IPs,
-and atomically replaces the old file only after validation succeeds:
+rejects an abrupt count drop, and atomically replaces the old file only after
+validation succeeds:
 
 ```bash
 python -m app.tools.tor_refresh
@@ -174,8 +175,23 @@ python -m app.tools.tor_refresh
 The refresh job never contacts or changes a monitored website. If the download
 fails or is empty, the previous Tor list remains in place.
 
-Automatic scheduling is intentionally deferred until the deployment target is
-known. No cron, systemd, or launchd job is registered by this repository yet.
+Run one scheduler hourly from cron, systemd, or launchd. It checks Tor every 6
+hours and World Bank every 30 days; task failures are isolated:
+
+```bash
+python -m app.tools.data_scheduler
+```
+
+Example cron:
+
+```bash
+0 * * * * cd /path/to/project && .venv/bin/python -m app.tools.data_scheduler >> logs/data_scheduler.log 2>&1
+```
+
+The scheduler stores due-state in `data/update_state.json` and uses
+`data/data_scheduler.lock` to skip overlapping runs. World Bank updates keep
+`Data.last-good.csv`, write raw responses to `Data.raw.json`, and trigger
+`market_refresh` only after validated data changes. Comtrade is not touched.
 
 To calibrate classification with real traffic, export the current predictions:
 

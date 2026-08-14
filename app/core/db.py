@@ -84,6 +84,7 @@ _seed_lock = threading.RLock()
 _seed_cache: dict[tuple[str, str], tuple[int, int]] = {}
 
 IP_PROFILE_COLUMNS = {
+    "country_code": "TEXT",
     "timezone": "TEXT",
     "network_type": "TEXT",
     "ip_prefix": "TEXT",
@@ -181,6 +182,7 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_profiles_country_code ON ip_profiles(country_code)")
     _seed_region_profiles(conn)
     conn.commit()
     return conn

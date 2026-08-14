@@ -1,11 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import asyncio
 import ipaddress
 import json
 import time
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from .config.settings import APP_DIR, SAMPLE_LOG
 from .core.db import connect, decode, region_profile
 from .core.logs import effective_risk, import_apache_lines
@@ -19,6 +22,7 @@ from .services.profiles import (
 )
 
 app = FastAPI(title="Remote Web Monitoring Hub - IP Intelligence")
+app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8000", "http://localhost:8000", "null"],
@@ -90,6 +94,7 @@ def dashboard():
           const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
           throw new Error(detail);
         }
+        if (window.invalidateHubCache) window.invalidateHubCache();
 
         const count = payload && payload.unique_ips != null ? payload.unique_ips : '?';
         const ai = payload && payload.ai_scoring ? payload.ai_scoring : {};
@@ -134,6 +139,7 @@ def dashboard():
           }
         }
 
+        if (window.invalidateHubCache) window.invalidateHubCache();
         window.setTimeout(() => window.location.reload(), 350);
       } catch (error) {
         console.error('Log upload failed:', error);
@@ -184,6 +190,98 @@ def region_profile_page(country_code: str):
 def health():
     connect().close()
     return {"status": "ok", "mode": "read_only"}
+
+@app.get("/api/analytics/traffic")
+def traffic_analytics():
+    """Return imported traffic timeline and top access dimensions."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT e.timestamp, e.path, e.status, p.country_code, p.country
+            FROM events e LEFT JOIN ip_profiles p ON p.ip = e.src_ip
+            WHERE e.timestamp IS NOT NULL
+            ORDER BY e.timestamp ASC
+            """
+        ).fetchall()
+        parsed = []
+        for row in rows:
+            try:
+                stamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                parsed.append((stamp.astimezone(timezone.utc), row))
+            except (TypeError, ValueError):
+                continue
+        if not parsed:
+            return {"series": [], "top_paths": [], "top_countries": [], "total_requests": 0}
+        span_seconds = (parsed[-1][0] - parsed[0][0]).total_seconds()
+        bucket_seconds = 3600 if span_seconds > 7 * 86400 else 900
+        buckets = defaultdict(lambda: {"requests": 0, "errors": 0})
+        paths, countries = Counter(), Counter()
+        for stamp, row in parsed:
+            epoch = int(stamp.timestamp())
+            bucket = datetime.fromtimestamp(epoch - epoch % bucket_seconds, timezone.utc)
+            item = buckets[bucket.isoformat().replace("+00:00", "Z")]
+            item["requests"] += 1
+            if int(row["status"] or 0) >= 400:
+                item["errors"] += 1
+            if row["path"]:
+                paths[str(row["path"])] += 1
+            country = row["country_code"] or "Unknown"
+            countries[(str(country), str(row["country"] or country))] += 1
+        series = [{"timestamp": key, **buckets[key]} for key in sorted(buckets)]
+        return {
+            "series": series,
+            "bucket": "hour" if bucket_seconds == 3600 else "15min",
+            "top_paths": [{"path": key, "requests": value} for key, value in paths.most_common(8)],
+            "top_countries": [{"country_code": key[0], "country": key[1], "requests": value} for key, value in countries.most_common(8)],
+            "total_requests": len(parsed),
+        }
+    finally:
+        conn.close()
+
+@app.get("/api/ip/{ip}/paths")
+def ip_path_activity(ip: str, limit: int = 12):
+    """Return the most visited paths for one IP, without enrichment side effects."""
+    try:
+        address = str(ipaddress.ip_address(ip))
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid IP address") from exc
+
+    limit = min(max(limit, 1), 50)
+    conn = connect()
+    try:
+        total = conn.execute(
+            """SELECT COUNT(*) FROM events
+               WHERE src_ip = ? AND path IS NOT NULL AND path != ''""",
+            (address,),
+        ).fetchone()[0]
+        rows = conn.execute(
+            """SELECT path,
+                      COUNT(*) AS requests,
+                      SUM(CASE WHEN COALESCE(status, 0) >= 400 THEN 1 ELSE 0 END) AS errors,
+                      MIN(timestamp) AS first_seen,
+                      MAX(timestamp) AS last_seen
+                 FROM events
+                WHERE src_ip = ? AND path IS NOT NULL AND path != ''
+                GROUP BY path
+                ORDER BY requests DESC, path ASC
+                LIMIT ?""",
+            (address, limit),
+        ).fetchall()
+        total = int(total or 0)
+        paths = []
+        for row in rows:
+            item = dict(row)
+            item["requests"] = int(item["requests"] or 0)
+            item["errors"] = int(item["errors"] or 0)
+            item["share"] = round(item["requests"] / total, 4) if total else 0
+            paths.append(item)
+        return {"ip": address, "total_requests": total, "paths": paths}
+    finally:
+        conn.close()
+
 
 @app.get("/api/ip/{ip}")
 async def ip_details(ip: str, refresh: bool = False):

@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log Console</title>
+<style>
+  :root {
+    --void: #0a0d12;
+    --panel: #10151d;
+    --panel-2: #141b25;
+    --border: #1e2733;
+    --text: #d7dee7;
+    --muted: #97a3b0;
+    --dim: #6b7684;
+    --green: #39d98a;
+    --amber: #e8a33d;
+    --red: #e5484d;
+    --blue: #4c8ef7;
+    --violet: #a970ff;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    --sans: -apple-system, 'Segoe UI', Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--void);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ---------- Sidebar ---------- */
+  #sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  .brand {
+    padding: 16px 16px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand-mark {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-mark .glyph {
+    width: 18px; height: 18px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, var(--green), var(--blue));
+    flex-shrink: 0;
+  }
+  .brand-mark span {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+  }
+  .brand small {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+
+  .side-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .side-label {
+    font-size: 10px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 10px;
+    font-weight: 700;
+  }
+
+  .source-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 2px;
+    transition: background 0.12s, color 0.12s;
+  }
+  .source-item:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+  .source-item.active {
+    background: rgba(76,142,247,0.12);
+    color: var(--text);
+    border-left: 2px solid var(--blue);
+    padding-left: 8px;
+  }
+  .source-item .count {
+    font-size: 10px;
+    color: var(--dim);
+    background: rgba(255,255,255,0.04);
+    padding: 1px 6px;
+    border-radius: 10px;
+  }
+
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 5px 0;
+    font-family: var(--mono);
+  }
+  .stat-row .k { color: var(--muted); font-size: 11px; }
+  .stat-row .v { font-size: 13px; font-weight: 600; }
+  .v.green { color: var(--green); }
+  .v.red { color: var(--red); }
+
+  /* pulse sparkline */
+  #pulse {
+    display: block;
+    margin-top: 10px;
+    width: 100%;
+    height: 34px;
+  }
+
+  .side-section.grow { flex: 1; overflow-y: auto; }
+
+  .connect-box { padding: 14px 16px; border-top: 1px solid var(--border); }
+  .field-label {
+    font-size: 10px;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+    display: block;
+  }
+  input[type=password], input[type=text] {
+    width: 100%;
+    background: var(--void);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 9px;
+    border-radius: 5px;
+    margin-bottom: 10px;
+  }
+  input:focus { outline: none; border-color: var(--blue); }
+
+  button {
+    cursor: pointer;
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 12px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    padding: 8px 10px;
+  }
+  #connectBtn {
+    width: 100%;
+    background: var(--blue);
+    color: #fff;
+  }
+  #connectBtn:hover { background: #6aa1ff; }
+  #connectBtn.stop { background: var(--panel-2); color: var(--red); border-color: var(--red); }
+  #connectBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #watchModeToggle {
+    width: 100%;
+    margin-bottom: 10px;
+  }
+  #watchModeToggle button {
+    flex: 1;
+    text-align: center;
+    padding: 7px 6px;
+    font-size: 10.5px;
+  }
+  #watchModeToggle button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .mode-hint {
+    font-size: 10.5px;
+    color: var(--dim);
+    margin: -4px 0 10px;
+    line-height: 1.4;
+  }
+
+  /* ---------- Main ---------- */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-width: 0;
+  }
+  #topbar {
+    height: 54px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.off { background: var(--red); }
+  .dot.connecting { background: var(--amber); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: 0.3; } }
+
+  #search {
+    flex: 1;
+    max-width: 340px;
+  }
+  #search input {
+    margin: 0;
+    padding: 7px 10px;
+  }
+
+  .level-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .level-toggle button {
+    background: var(--void);
+    color: var(--muted);
+    border: none;
+    border-radius: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 7px 10px;
+    border-right: 1px solid var(--border);
+  }
+  .level-toggle button:last-child { border-right: none; }
+  .level-toggle button.active { background: var(--panel-2); color: var(--text); }
+  .level-toggle button[data-lvl="ERROR"].active { color: var(--red); }
+  .level-toggle button[data-lvl="WARN"].active { color: var(--amber); }
+  .level-toggle button[data-lvl="INFO"].active { color: var(--green); }
+
+  .icon-btn {
+    background: var(--void);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 7px 9px;
+  }
+  .icon-btn:hover { color: var(--text); }
+  .icon-btn.on { color: var(--amber); border-color: var(--amber); }
+
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 0 40px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+  }
+  .line {
+    display: flex;
+    gap: 10px;
+    padding: 2px 16px;
+    border-left: 2px solid transparent;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .line:hover { background: rgba(255,255,255,0.025); }
+  .line .ts { color: var(--muted); flex-shrink: 0; }
+  .line .badge {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 3px;
+    height: 16px;
+    line-height: 16px;
+  }
+  .line.INFO { border-left-color: transparent; }
+  .line.WARN { border-left-color: var(--amber); background: rgba(232,163,61,0.05); }
+  .line.ERROR { border-left-color: var(--red); background: rgba(229,72,77,0.06); }
+  .line.SYS .msg { color: var(--blue); }
+  .badge.INFO { background: rgba(57,217,138,0.14); color: var(--green); }
+  .badge.WARN { background: rgba(232,163,61,0.16); color: var(--amber); }
+  .badge.ERROR { background: rgba(229,72,77,0.16); color: var(--red); }
+  .badge.SYS { background: rgba(76,142,247,0.16); color: var(--blue); }
+  .msg mark { background: rgba(255,208,0,0.35); color: inherit; border-radius: 2px; }
+
+  .line.backlog { opacity: 0.55; }
+  .badge.backlog-tag {
+    background: rgba(91,102,115,0.18);
+    color: var(--muted);
+    font-weight: 700;
+  }
+
+  #empty {
+    color: var(--dim);
+    padding: 40px 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  #bottombar {
+    height: 30px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--dim);
+  }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+  /* ---------- View tabs ---------- */
+  #viewTabs {
+    height: 42px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .view-tab {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 12.5px;
+    padding: 8px 12px;
+    border-radius: 6px 6px 0 0;
+    border-bottom: 2px solid transparent;
+    position: relative;
+    top: 1px;
+  }
+  .view-tab:hover { color: var(--text); }
+  .view-tab.active { color: var(--text); border-bottom-color: var(--blue); }
+
+  /* ---------- Overview ---------- */
+  #overview {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 20px 40px;
+    display: none;
+  }
+  #overview.show { display: block; }
+  #log.hide { display: none; }
+
+  .ov-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .ov-header h2 {
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .ov-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ov-range-note {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--dim);
+  }
+  #rangeToggle button {
+    padding: 6px 8px;
+    font-size: 10.5px;
+  }
+
+  .ov-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .ov-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .ov-card .ov-label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .ov-card .ov-value-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .ov-card .ov-value {
+    font-size: 24px;
+    font-weight: 700;
+    font-family: var(--sans);
+  }
+  .ov-card .ov-delta { font-size: 11px; font-family: var(--mono); color: var(--muted); }
+  .ov-card .ov-note { font-size: 11px; color: var(--muted); }
+  .ov-card svg { display: block; width: 100%; height: 30px; }
+
+  .ov-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .ov-panel-title {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ov-panel-title .ov-total {
+    color: var(--text);
+    font-weight: 700;
+    font-family: var(--mono);
+  }
+  .ov-chart-wrap { position: relative; }
+  .ov-chart-wrap svg { display: block; width: 100%; height: 220px; cursor: crosshair; }
+  .ov-chart-wrap.short svg { height: 60px; }
+  .ov-axis-label { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+  .ov-grid-line { stroke: var(--border); stroke-width: 1; }
+
+  /* hover tooltip on charts */
+  .chart-tooltip {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    transform: translate(-50%, calc(-100% - 12px));
+    box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+    opacity: 0;
+    transition: opacity 0.08s ease;
+    z-index: 5;
+  }
+  .chart-tooltip.show { opacity: 1; }
+  .chart-tooltip .tt-label { color: var(--muted); margin-bottom: 3px; }
+  .chart-tooltip .tt-value { display: flex; align-items: center; gap: 6px; font-weight: 700; }
+  .chart-tooltip .tt-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+  .ov-status-legend {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .ov-status-legend .item { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .ov-status-legend .sw { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+  .ov-status-legend .item b { color: var(--text); }
+  .ov-status-bar {
+    display: flex;
+    height: 22px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--void);
+  }
+  .ov-status-bar .seg { height: 100%; }
+
+  @media (max-width: 900px) {
+    .ov-cards { grid-template-columns: 1fr; }
+    .ov-two-col { grid-template-columns: 1fr; }
+  }
+
+  .ov-empty {
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: center;
+    padding: 40px 20px;
+  }
+
+  .ov-two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .ov-list-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+  }
+  .ov-list-row .name {
+    flex: 0 0 42%;
+    max-width: 42%;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ov-list-row .bar-track {
+    flex: 1;
+    height: 6px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .ov-list-row .bar-fill {
+    display: block;
+    height: 100%;
+    background: var(--blue);
+    border-radius: 3px;
+    min-width: 2px;
+  }
+  .ov-list-row .count {
+    flex: 0 0 46px;
+    text-align: right;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<!-- ===================== SIDEBAR ===================== -->
+<div id="sidebar">
+  <div class="brand">
+    <div class="brand-mark">
+      <div class="glyph"></div>
+      <span>LOG CONSOLE</span>
+    </div>
+    <small id="domainLabel">logs.baquan.click</small>
+  </div>
+
+  <div class="side-section">
+    <div class="side-label">Nguồn log</div>
+    <div class="source-item active" data-key="access">
+      <span>access.log</span>
+      <span class="count" id="cnt-access">0</span>
+    </div>
+    <div class="source-item" data-key="error">
+      <span>error.log</span>
+      <span class="count" id="cnt-error">0</span>
+    </div>
+  </div>
+
+  <div class="side-section">
+    <div class="side-label">Trạng thái</div>
+    <div class="stat-row"><span class="k">Uptime</span><span class="v" id="uptime">00:00:00</span></div>
+    <div class="stat-row"><span class="k">Tổng dòng</span><span class="v" id="totalLines">0</span></div>
+    <div class="stat-row"><span class="k">Lỗi</span><span class="v red" id="errCount">0</span></div>
+    <div class="stat-row"><span class="k">Cảnh báo</span><span class="v" id="warnCount" style="color:var(--amber)">0</span></div>
+    <svg id="pulse" viewBox="0 0 220 34" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="side-section grow"></div>
+
+  <div class="connect-box">
+    <label class="field-label">Token</label>
+    <input type="password" id="token" placeholder="Nhập token truy cập">
+
+    <label class="field-label">Chế độ xem</label>
+    <div class="level-toggle" id="watchModeToggle">
+      <button class="active" data-mode="full">Toàn bộ log</button>
+      <button data-mode="liveOnly">Chỉ log mới</button>
+    </div>
+    <div class="mode-hint" id="modeHint">Tải lại lịch sử (hoặc phần còn thiếu từ lần trước) rồi theo dõi log mới.</div>
+
+    <button id="connectBtn">Kết nối</button>
+  </div>
+</div>
+
+<!-- ===================== MAIN ===================== -->
+<div id="main">
+  <div id="viewTabs">
+    <button class="view-tab active" data-view="stream">Nhật ký trực tiếp</button>
+    <button class="view-tab" data-view="overview">Tổng quan lưu lượng</button>
+  </div>
+
+  <div id="topbar">
+    <span class="status-pill">
+      <span class="dot off" id="statusDot"></span>
+      <span id="statusText">Chưa kết nối</span>
+    </span>
+
+    <div id="search" class="stream-only">
+      <input type="text" id="searchInput" placeholder="Tìm trong log... (vd: 500, timeout, /api/)">
+    </div>
+
+    <div class="level-toggle stream-only" id="levelToggle">
+      <button class="active" data-lvl="ALL">ALL</button>
+      <button data-lvl="INFO">INFO</button>
+      <button data-lvl="WARN">WARN</button>
+      <button data-lvl="ERROR">ERROR</button>
+    </div>
+
+    <button class="icon-btn stream-only" id="pauseBtn" title="Tạm dừng cuộn">⏸ Tạm dừng</button>
+    <button class="icon-btn stream-only" id="exportBtn" title="Tải log đang hiển thị">⭳ Xuất</button>
+    <button class="icon-btn stream-only" id="clearBtn" title="Xóa màn hình + xóa cache cục bộ">Xóa</button>
+    <button class="icon-btn overview-only" id="refreshOvBtn" title="Tính lại số liệu từ log hiện có" style="display:none;margin-left:auto;">↻ Làm mới</button>
+  </div>
+
+  <div id="log">
+    <div id="empty">Chưa có dữ liệu. Nhập token và nhấn "Kết nối" để bắt đầu theo dõi log.</div>
+  </div>
+
+  <div id="overview">
+    <div class="ov-header">
+      <h2 id="ovTitle">Tổng quan — access</h2>
+      <div class="ov-header-right">
+        <div class="level-toggle" id="rangeToggle">
+          <button data-range="30m">30p</button>
+          <button data-range="1h">1h</button>
+          <button data-range="6h">6h</button>
+          <button data-range="12h">12h</button>
+          <button class="active" data-range="1d">1 ngày</button>
+          <button data-range="3d">3 ngày</button>
+          <button data-range="7d">7 ngày</button>
+          <button data-range="30d">30 ngày</button>
+        </div>
+        <span class="ov-range-note" id="ovRangeNote">1 ngày gần nhất (theo log đã tải)</span>
+      </div>
+    </div>
+
+    <div id="ovBody"></div>
+  </div>
+
+  <div id="bottombar">
+    <span id="footStatus">Sẵn sàng</span>
+    <span id="footRate">0 dòng/phút</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  const REAL_DOMAIN = 'logs.baquan.click'; // domain thật, cần khớp Cloudflare Tunnel
+
+  const logEl = document.getElementById('log');
+  const emptyEl = document.getElementById('empty');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const footStatus = document.getElementById('footStatus');
+  const footRate = document.getElementById('footRate');
+  const connectBtn = document.getElementById('connectBtn');
+  const tokenInput = document.getElementById('token');
+  const searchInput = document.getElementById('searchInput');
+  const levelToggle = document.getElementById('levelToggle');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const pulseSvg = document.getElementById('pulse');
+  const watchModeToggle = document.getElementById('watchModeToggle');
+  const modeHint = document.getElementById('modeHint');
+
+  // watchMode: 'full'     -> resume từ offset đã lưu (hoặc toàn bộ file nếu
+  //                           chưa từng đồng bộ), rồi theo dõi log mới.
+  //            'liveOnly' -> bỏ qua toàn bộ lịch sử, chỉ theo dõi log MỚI
+  //                           phát sinh kể từ lúc kết nối.
+  let watchMode = 'full';
+
+  const MODE_HINTS = {
+    full: 'Tải lại lịch sử (hoặc phần còn thiếu từ lần trước) rồi theo dõi log mới.',
+    liveOnly: 'Bỏ qua lịch sử, chỉ hiển thị log phát sinh từ lúc bấm Kết nối.',
+  };
+
+  const sockets = { access: null, error: null }; // 1 WebSocket riêng cho mỗi nguồn, giữ song song
+  const connMeta = { access: { since: null }, error: { since: null } };
+  let activeKey = 'access';
+  let activeLevel = 'ALL';
+  let searchTerm = '';
+  let paused = false;
+  let pausedBuffer = 0;
+  let currentView = 'stream';
+  let ovDebounce = null;
+
+  // MAX_LINES: giới hạn số dòng render trong DOM (view "Nhật ký trực tiếp").
+  // Giữ nhỏ để trình duyệt không bị đơ khi có hàng trăm nghìn dòng log.
+  const MAX_LINES = 3000;
+  // STORAGE_MAX_LINES: giới hạn số dòng giữ trong bộ nhớ (store) để tính
+  // toán Overview + lưu IndexedDB. Lớn hơn nhiều so với MAX_LINES vì đây là
+  // dữ liệu cho biểu đồ/thống kê, không phải để render trực tiếp ra màn hình.
+  // 50,000 dòng access.log (~mỗi dòng ~150-250 byte) tương đương khoảng
+  // 8-12MB dữ liệu trong bộ nhớ — vẫn nhẹ nhàng cho trình duyệt.
+  const STORAGE_MAX_LINES = 50000;
+  const store = { access: [], error: [] }; // raw {ts, level, text, backlog} — dùng cho Overview + cache
+  const counts = { access: 0, error: 0 };
+  const stats = { total: 0, warn: 0, error: 0 };
+  const buckets = new Array(44).fill(0); // ~last 44s of activity for sparkline
+  let rateWindow = []; // timestamps of last minute
+
+  // ---- Offset resume: byte offset đã đồng bộ lần cuối cho mỗi nguồn log.
+  // Gửi lên server khi kết nối để chỉ nhận phần log MỚI, không phải toàn bộ
+  // file lại từ đầu mỗi lần reconnect. 0 = chưa từng đồng bộ (lấy toàn bộ).
+  let offsets = { access: 0, error: 0 };
+
+  function fmtTime(d) {
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString('vi-VN', { hour12: false });
+    return sameDay ? time : d.toLocaleDateString('vi-VN', { day:'2-digit', month:'2-digit' }) + ' ' + time;
+  }
+
+  // Apache/Nginx combined log format: [05/Aug/2026:04:09:03 +0000]
+  const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+  function parseLogTimestamp(text) {
+    const m = text.match(/\[(\d{2})\/(\w{3})\/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s([+-]\d{4})\]/);
+    if (!m) return null;
+    const [, dd, mon, yyyy, hh, mi, ss, tz] = m;
+    if (!(mon in MONTHS)) return null;
+    const sign = tz[0] === '-' ? -1 : 1;
+    const offMin = sign * (parseInt(tz.slice(1,3),10) * 60 + parseInt(tz.slice(3,5),10));
+    const utcMs = Date.UTC(+yyyy, MONTHS[mon], +dd, +hh, +mi, +ss) - offMin * 60000;
+    const d = new Date(utcMs);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function detectLevel(text) {
+    const t = text.toUpperCase();
+    if (/\bERROR\b|\b5\d\d\b|EXCEPTION|FAIL/.test(t)) return 'ERROR';
+    if (/\bWARN(ING)?\b|\b4\d\d\b/.test(t)) return 'WARN';
+    return 'INFO';
+  }
+
+  function highlight(text) {
+    const esc = escapeHtml(text);
+    if (!searchTerm) return esc;
+    try {
+      const re = new RegExp('(' + searchTerm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'ig');
+      return esc.replace(re, '<mark>$1</mark>');
+    } catch(e) { return esc; }
+  }
+
+  function passesFilter(entry) {
+    if (activeLevel !== 'ALL' && entry.level !== activeLevel) return false;
+    if (searchTerm && !entry.text.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+    return true;
+  }
+
+  function renderLine(entry) {
+    const div = document.createElement('div');
+    div.className = 'line ' + entry.level + (entry.backlog ? ' backlog' : '');
+    const dateBadge = entry.backlog
+      ? `<span class="badge backlog-tag" title="Dòng lịch sử — đến từ backlog/cache, không phải log mới">CŨ</span>`
+      : '';
+    div.title = entry.ts.toLocaleString('vi-VN');
+    div.innerHTML = `<span class="ts">[${fmtTime(entry.ts)}]</span>${dateBadge}<span class="badge ${entry.level}">${entry.level}</span><span class="msg">${highlight(entry.text)}</span>`;
+    return div;
+  }
+
+  function rerenderAll() {
+    logEl.innerHTML = '';
+    const list = store[activeKey].filter(passesFilter);
+    if (list.length === 0) {
+      logEl.appendChild(emptyEl);
+      emptyEl.textContent = store[activeKey].length === 0
+        ? 'Chưa có dữ liệu. Nhập token và nhấn "Kết nối" để bắt đầu theo dõi log.'
+        : 'Không có dòng nào khớp với bộ lọc hiện tại.';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    list.slice(-MAX_LINES).forEach(e => frag.appendChild(renderLine(e)));
+    logEl.appendChild(frag);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function appendEntry(key, entry) {
+    store[key].push(entry);
+    // Dùng STORAGE_MAX_LINES (không phải MAX_LINES) để store giữ đủ dữ liệu
+    // cho Overview/IndexedDB — MAX_LINES chỉ áp dụng khi render ra DOM bên dưới.
+    if (store[key].length > STORAGE_MAX_LINES) store[key].shift();
+    counts[key]++;
+    document.getElementById('cnt-' + key).textContent = counts[key];
+    queueSave(key); // lưu xuống IndexedDB (debounced), giữ cache luôn cập nhật
+
+    stats.total++;
+    if (entry.level === 'WARN') stats.warn++;
+    if (entry.level === 'ERROR') stats.error++;
+    document.getElementById('totalLines').textContent = stats.total.toLocaleString('vi-VN');
+    document.getElementById('errCount').textContent = stats.error;
+    document.getElementById('warnCount').textContent = stats.warn;
+
+    buckets[buckets.length - 1]++;
+    rateWindow.push(Date.now());
+
+    if (key === activeKey) queueOverviewRefresh();
+
+    if (key !== activeKey) return;
+    if (paused) { pausedBuffer++; footStatus.textContent = `Đang tạm dừng — ${pausedBuffer} dòng mới`; return; }
+    if (!passesFilter(entry)) return;
+
+    if (emptyEl.parentNode) logEl.removeChild(emptyEl);
+    logEl.appendChild(renderLine(entry));
+    while (logEl.children.length > MAX_LINES) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function pushSystem(key, text) {
+    appendEntry(key, { ts: new Date(), level: 'SYS', text });
+  }
+
+  function queueOverviewRefresh() {
+    if (currentView !== 'overview') return;
+    clearTimeout(ovDebounce);
+    ovDebounce = setTimeout(() => renderOverview(activeKey), 400);
+  }
+
+  // ================================================================
+  // IndexedDB cache: lưu log + offset đã đồng bộ cho mỗi nguồn (access/
+  // error) xuống trình duyệt. Nhờ vậy, lần mở dashboard sau (hoặc reconnect)
+  // không cần tải lại toàn bộ log từ đầu — chỉ cần phần mới kể từ offset.
+  // ================================================================
+  const DB_NAME = 'logConsoleDB';
+  const DB_VERSION = 1;
+  const STORE = 'logCache';
+
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE)) {
+          db.createObjectStore(STORE, { keyPath: 'source' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function loadCache(source) {
+    try {
+      const db = await openDB();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const req = tx.objectStore(STORE).get(source);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn('[cache] load thất bại:', e);
+      return null;
+    }
+  }
+
+  async function saveCache(source, offset, entries) {
+    try {
+      const db = await openDB();
+      const serializable = entries.map(e => ({
+        ts: e.ts.toISOString(), level: e.level, text: e.text, backlog: !!e.backlog
+      }));
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put({ source, offset, entries: serializable, savedAt: Date.now() });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[cache] lưu thất bại:', e);
+    }
+  }
+
+  const saveTimers = {};
+  function queueSave(key) {
+    clearTimeout(saveTimers[key]);
+    // debounce 1.5s để không ghi IndexedDB liên tục khi log dồn dập
+    saveTimers[key] = setTimeout(() => saveCache(key, offsets[key] || 0, store[key]), 1500);
+  }
+
+  async function initFromCache() {
+    connectBtn.disabled = true;
+    statusText.textContent = 'Đang tải dữ liệu đã lưu...';
+    footStatus.textContent = 'Đang tải dữ liệu đã lưu...';
+
+    for (const key of ['access', 'error']) {
+      const cached = await loadCache(key);
+      if (cached) {
+        offsets[key] = cached.offset || 0;
+        store[key] = (cached.entries || []).map(e => ({
+          ts: new Date(e.ts), level: e.level, text: e.text, backlog: true
+        }));
+        counts[key] = store[key].length;
+        document.getElementById('cnt-' + key).textContent = counts[key];
+        store[key].forEach(e => {
+          stats.total++;
+          if (e.level === 'WARN') stats.warn++;
+          if (e.level === 'ERROR') stats.error++;
+        });
+      }
+    }
+
+    document.getElementById('totalLines').textContent = stats.total.toLocaleString('vi-VN');
+    document.getElementById('errCount').textContent = stats.error;
+    document.getElementById('warnCount').textContent = stats.warn;
+    rerenderAll();
+    refreshConnectBtn();
+  }
+
+  // ---------- time range selector ----------
+  const RANGES = {
+    '30m': { ms: 30 * 60 * 1000,          stepMs: 1 * 60 * 1000,   label: '30 phút' },
+    '1h':  { ms: 60 * 60 * 1000,          stepMs: 2 * 60 * 1000,   label: '1 giờ' },
+    '6h':  { ms: 6 * 60 * 60 * 1000,      stepMs: 5 * 60 * 1000,   label: '6 giờ' },
+    '12h': { ms: 12 * 60 * 60 * 1000,     stepMs: 10 * 60 * 1000,  label: '12 giờ' },
+    '1d':  { ms: 24 * 60 * 60 * 1000,     stepMs: 15 * 60 * 1000,  label: '1 ngày' },
+    '3d':  { ms: 3 * 24 * 60 * 60 * 1000, stepMs: 60 * 60 * 1000,  label: '3 ngày' },
+    '7d':  { ms: 7 * 24 * 60 * 60 * 1000, stepMs: 2 * 60 * 60 * 1000, label: '7 ngày' },
+    '30d': { ms: 30 * 24 * 60 * 60 * 1000, stepMs: 6 * 60 * 60 * 1000, label: '30 ngày' },
+  };
+  let ovRangeKey = '1d';
+
+  // ---------- traffic overview (parse combined log format) ----------
+  function fmtNum(n) { return n.toLocaleString('vi-VN'); }
+  function fmtBytes(n) {
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  function parseLogFields(text) {
+    const m = text.match(/^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z]+)\s+(\S+)\s+[^"]*"\s+(\d{3})\s+(\d+|-)/);
+    if (!m) return null;
+    return { ip: m[1], method: m[2], path: m[3], status: parseInt(m[4], 10), bytes: m[5] === '-' ? 0 : parseInt(m[5], 10) };
+  }
+
+  function niceCeil(v) {
+    if (v <= 0) return 1;
+    const pow = Math.pow(10, Math.floor(Math.log10(v)));
+    const norm = v / pow;
+    const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+    return nice * pow;
+  }
+
+  function sparkPoints(values, w, h) {
+    const n = values.length;
+    if (n < 2) return { line: '', area: '' };
+    const max = Math.max(1, ...values);
+    const step = w / (n - 1);
+    const pts = values.map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * (h - 3) - 1.5).toFixed(1)}`);
+    return { line: pts.join(' '), area: `0,${h} ${pts.join(' ')} ${w},${h}` };
+  }
+
+  function svgSpark(values, color) {
+    const w = 200, h = 30;
+    const { line, area } = sparkPoints(values, w, h);
+    if (!line) return `<svg viewBox="0 0 ${w} ${h}"></svg>`;
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polygon points="${area}" fill="${color}" opacity="0.14"></polygon>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline>
+    </svg>`;
+  }
+
+  function computeTrafficStats(key, rangeKey) {
+    const range = RANGES[rangeKey] || RANGES['1d'];
+    const entries = store[key];
+    const nowReal = Date.now();
+    const WINDOW_MS = range.ms;
+    const bucketMs = range.stepMs;
+    const BUCKETS = Math.round(WINDOW_MS / bucketMs);
+    const gridEnd = Math.floor(nowReal / bucketMs) * bucketMs + bucketMs;
+
+    const reqBuckets = new Array(BUCKETS).fill(0);
+    const byteBuckets = new Array(BUCKETS).fill(0);
+    const errBuckets = new Array(BUCKETS).fill(0);
+    const ipSet = new Set();
+    const pathCounts = new Map();
+    const ipCounts = new Map();
+    const statusCount = { 2: 0, 3: 0, 4: 0, 5: 0, other: 0 };
+    let totalBytes = 0, totalReq = 0, parsedCount = 0;
+    let prevWindowReq = 0, prevWindowBytes = 0;
+
+    entries.forEach(e => {
+      if (e.level === 'SYS') return;
+      const f = parseLogFields(e.text);
+      if (!f) return;
+      parsedCount++;
+      const age = gridEnd - e.ts.getTime();
+      if (age < 0) return;
+
+      const sClass = Math.floor(f.status / 100);
+
+      if (age < WINDOW_MS) {
+        totalReq++;
+        totalBytes += f.bytes;
+        if (f.ip) { ipSet.add(f.ip); ipCounts.set(f.ip, (ipCounts.get(f.ip) || 0) + 1); }
+        if (f.path) pathCounts.set(f.path, (pathCounts.get(f.path) || 0) + 1);
+        if (statusCount[sClass] !== undefined) statusCount[sClass]++; else statusCount.other++;
+        const idx = Math.min(BUCKETS - 1, Math.floor(age / bucketMs));
+        const bi = BUCKETS - 1 - idx;
+        reqBuckets[bi]++;
+        byteBuckets[bi] += f.bytes;
+        if (sClass === 4 || sClass === 5) errBuckets[bi]++;
+      } else if (age < WINDOW_MS * 2) {
+        prevWindowReq++;
+        prevWindowBytes += f.bytes;
+      }
+    });
+
+    const topPaths = [...pathCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    const topIps = [...ipCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+    return {
+      totalReq, totalVisits: ipSet.size, totalBytes, statusCount, reqBuckets, byteBuckets, errBuckets,
+      parsedCount, prevWindowReq, prevWindowBytes, now: gridEnd, bucketMs, BUCKETS, topPaths, topIps,
+      rangeKey, rangeMs: WINDOW_MS, rangeLabel: range.label,
+    };
+  }
+
+  function deltaHtml(curr, prev) {
+    if (!prev) return `<span class="ov-delta">so với kỳ trước: chưa đủ dữ liệu</span>`;
+    const pct = ((curr - prev) / prev) * 100;
+    const arrow = pct > 1 ? '↑' : pct < -1 ? '↓' : '→';
+    return `<span class="ov-delta">${arrow} ${Math.abs(pct).toFixed(1)}% so với kỳ trước</span>`;
+  }
+
+  function formatAxisTime(t, rangeMs) {
+    if (rangeMs <= 12 * 3600 * 1000) {
+      return t.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+    if (rangeMs <= 7 * 24 * 3600 * 1000) {
+      return t.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' }) + ' '
+        + t.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+    return t.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
+  }
+
+  function pickAxisIndices(n) {
+    const count = Math.min(5, n);
+    if (n <= 1) return [0];
+    const idxs = [];
+    for (let i = 0; i < count; i++) idxs.push(Math.round(i * (n - 1) / (count - 1)));
+    return [...new Set(idxs)];
+  }
+
+  function buildAreaChartSvg(values, s, opts) {
+    const { w, h, padL, padR, padT, padB, color, id } = opts;
+    const showGrid = opts.showGrid !== false;
+    const showAxis = opts.showAxis !== false;
+    const innerW = w - padL - padR, innerH = h - padT - padB;
+    const max = niceCeil(Math.max(1, ...values));
+    const n = values.length;
+    const stepX = n > 1 ? innerW / (n - 1) : innerW;
+    const pts = values.map((v, i) => {
+      const x = padL + i * stepX;
+      const y = padT + innerH - (v / max) * innerH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    const line = pts.join(' ');
+    const area = `${padL},${padT + innerH} ${line} ${padL + innerW},${padT + innerH}`;
+
+    let grid = '';
+    if (showGrid) {
+      const GRID_N = 4;
+      for (let g = 0; g <= GRID_N; g++) {
+        const val = Math.round(max * g / GRID_N);
+        const y = padT + innerH - (val / max) * innerH;
+        grid += `<line class="ov-grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + innerW}" y2="${y.toFixed(1)}"></line>`;
+        grid += `<text class="ov-axis-label" x="${(padL - 8).toFixed(1)}" y="${(y + 3).toFixed(1)}" text-anchor="end">${val}</text>`;
+      }
+    }
+
+    let axisLabels = '';
+    if (showAxis) {
+      pickAxisIndices(n).forEach(bi => {
+        const t = new Date(s.now - (s.BUCKETS - 1 - bi) * s.bucketMs);
+        const x = padL + bi * stepX;
+        axisLabels += `<text class="ov-axis-label" x="${x.toFixed(1)}" y="${h - 4}" text-anchor="middle">${formatAxisTime(t, s.rangeMs)}</text>`;
+      });
+    }
+
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" id="${id}">
+      ${grid}
+      <polygon points="${area}" fill="${color}" opacity="0.12"></polygon>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+      ${axisLabels}
+      <line id="${id}-hoverline" x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="${color}" stroke-width="1" stroke-dasharray="3,3" opacity="0"></line>
+      <circle id="${id}-hoverdot" cx="${padL}" cy="${padT}" r="4" fill="${color}" stroke="var(--void)" stroke-width="2" opacity="0"></circle>
+    </svg>`;
+  }
+
+  function attachAreaChartHover(wrapId, chartId, values, s, opts) {
+    const wrap = document.getElementById(wrapId);
+    const svg = document.getElementById(chartId);
+    if (!wrap || !svg) return;
+
+    let tooltip = wrap.querySelector('.chart-tooltip');
+    if (!tooltip) {
+      tooltip = document.createElement('div');
+      tooltip.className = 'chart-tooltip';
+      wrap.appendChild(tooltip);
+    }
+    const hoverLine = svg.querySelector('#' + chartId + '-hoverline');
+    const hoverDot = svg.querySelector('#' + chartId + '-hoverdot');
+    const { w, h, padL, padR, padT, padB, color, label } = opts;
+    const innerW = w - padL - padR, innerH = h - padT - padB;
+    const n = values.length;
+    const stepX = n > 1 ? innerW / (n - 1) : innerW;
+    const max = niceCeil(Math.max(1, ...values));
+
+    function update(clientX, clientY) {
+      const rect = svg.getBoundingClientRect();
+      if (rect.width === 0) return;
+      const relX = clientX - rect.left;
+      const svgX = relX * (w / rect.width);
+      let idx = Math.round((svgX - padL) / stepX);
+      idx = Math.max(0, Math.min(n - 1, idx));
+      const val = values[idx];
+      const x = padL + idx * stepX;
+      const y = padT + innerH - (val / max) * innerH;
+
+      hoverLine.setAttribute('x1', x); hoverLine.setAttribute('x2', x); hoverLine.setAttribute('opacity', '0.6');
+      hoverDot.setAttribute('cx', x); hoverDot.setAttribute('cy', y); hoverDot.setAttribute('opacity', '1');
+
+      const t = new Date(s.now - (s.BUCKETS - 1 - idx) * s.bucketMs);
+      const dateStr = t.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' }) + ', '
+        + t.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', hour12: false });
+      tooltip.innerHTML = `<div class="tt-label">${dateStr}</div><div class="tt-value"><span class="tt-dot" style="background:${color}"></span>${label} ${fmtNum(val)}</div>`;
+
+      const wrapRect = wrap.getBoundingClientRect();
+      const px = (x / w) * wrapRect.width;
+      const py = (y / h) * wrapRect.height;
+      tooltip.style.left = px + 'px';
+      tooltip.style.top = py + 'px';
+      tooltip.classList.add('show');
+    }
+
+    function hide() {
+      hoverLine.setAttribute('opacity', '0');
+      hoverDot.setAttribute('opacity', '0');
+      tooltip.classList.remove('show');
+    }
+
+    wrap.onmousemove = (e) => update(e.clientX, e.clientY);
+    wrap.onmouseleave = hide;
+    wrap.ontouchmove = (e) => { if (e.touches[0]) update(e.touches[0].clientX, e.touches[0].clientY); };
+    wrap.ontouchend = hide;
+  }
+
+  function renderOverview(key) {
+    document.getElementById('ovTitle').textContent = 'Tổng quan lưu lượng — ' + key + '.log';
+    const ovBody = document.getElementById('ovBody');
+    const s = computeTrafficStats(key, ovRangeKey);
+    document.getElementById('ovRangeNote').textContent = s.rangeLabel + ' gần nhất (theo log đã tải)';
+
+    if (s.parsedCount === 0) {
+      ovBody.innerHTML = `<div class="ov-empty">Không đủ dữ liệu để phân tích lưu lượng cho nguồn "${key}".<br>Overview cần log ở định dạng combined: IP · thời gian · request · mã trạng thái · số byte.</div>`;
+      return;
+    }
+
+    const errRate = s.totalReq ? (((s.statusCount[4] + s.statusCount[5]) / s.totalReq) * 100).toFixed(1) + '%' : '0%';
+
+    const cards = [
+      { label: 'Tổng số request', value: fmtNum(s.totalReq), delta: deltaHtml(s.totalReq, s.prevWindowReq), spark: svgSpark(s.reqBuckets, 'var(--blue)') },
+      { label: 'Băng thông (body)', value: fmtBytes(s.totalBytes), delta: deltaHtml(s.totalBytes, s.prevWindowBytes), spark: svgSpark(s.byteBuckets, 'var(--violet)') },
+      { label: 'Tổng số IP truy cập', value: fmtNum(s.totalVisits), delta: `<span class="ov-delta">địa chỉ IP duy nhất, ${s.rangeLabel} qua</span>`, spark: svgSpark(s.reqBuckets, 'var(--green)') },
+    ];
+
+    const cardsHtml = cards.map(c => `
+      <div class="ov-card">
+        <div class="ov-label">${c.label}</div>
+        <div class="ov-value-row"><span class="ov-value">${c.value}</span></div>
+        ${c.delta || ''}
+        ${c.spark ? `<div style="margin-top:8px">${c.spark}</div>` : ''}
+      </div>
+    `).join('');
+
+    const statusDefs = [
+      { cls: 2, label: '2xx', color: 'var(--green)' },
+      { cls: 3, label: '3xx', color: 'var(--amber)' },
+      { cls: 4, label: '4xx', color: 'var(--red)' },
+      { cls: 5, label: '5xx', color: 'var(--violet)' },
+    ];
+    const statusTotal = Math.max(1, s.statusCount[2] + s.statusCount[3] + s.statusCount[4] + s.statusCount[5]);
+    const legendHtml = statusDefs.map(d => `<span class="item"><span class="sw" style="background:${d.color}"></span>${d.label} <b>${fmtNum(s.statusCount[d.cls])}</b></span>`).join('');
+    const barHtml = statusDefs.map(d => {
+      const pct = (s.statusCount[d.cls] / statusTotal) * 100;
+      return pct > 0 ? `<div class="seg" style="width:${pct.toFixed(2)}%;background:${d.color}" title="${d.label}: ${s.statusCount[d.cls]} (${pct.toFixed(1)}%)"></div>` : '';
+    }).join('');
+
+    const maxPathCount = Math.max(1, ...s.topPaths.map(p => p[1]));
+    const pathRowsHtml = s.topPaths.map(([path, count]) => `
+      <div class="ov-list-row" title="${path}">
+        <span class="name">${path}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${(count / maxPathCount * 100).toFixed(1)}%"></span></span>
+        <span class="count">${fmtNum(count)}</span>
+      </div>
+    `).join('') || `<div class="ov-note" style="padding:8px 0">Không có dữ liệu path.</div>`;
+
+    const maxIpCount = Math.max(1, ...s.topIps.map(p => p[1]));
+    const ipRowsHtml = s.topIps.map(([ip, count]) => `
+      <div class="ov-list-row" title="${ip}">
+        <span class="name">${ip}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${(count / maxIpCount * 100).toFixed(1)}%"></span></span>
+        <span class="count">${fmtNum(count)}</span>
+      </div>
+    `).join('') || `<div class="ov-note" style="padding:8px 0">Không có dữ liệu IP.</div>`;
+
+    const reqChartOpts = { w: 900, h: 220, padL: 40, padR: 10, padT: 12, padB: 22, color: 'var(--blue)', id: 'reqChartSvg' };
+    const errChartOpts = { w: 900, h: 60, padL: 10, padR: 10, padT: 6, padB: 6, color: 'var(--red)', id: 'errChartSvg', showGrid: false, showAxis: false };
+
+    ovBody.innerHTML = `
+      <div class="ov-cards">${cardsHtml}</div>
+      <div class="ov-panel">
+        <div class="ov-panel-title">Request theo thời gian &nbsp;<span class="ov-total">${fmtNum(s.totalReq)}</span></div>
+        <div class="ov-chart-wrap" id="reqChartWrap">${buildAreaChartSvg(s.reqBuckets, s, reqChartOpts)}</div>
+      </div>
+      <div class="ov-panel">
+        <div class="ov-panel-title">Mã trạng thái phản hồi</div>
+        <div class="ov-status-legend">${legendHtml}</div>
+        <div class="ov-status-bar">${barHtml}</div>
+      </div>
+      <div class="ov-two-col">
+        <div class="ov-panel">
+          <div class="ov-panel-title">Top Paths</div>
+          ${pathRowsHtml}
+        </div>
+        <div class="ov-panel">
+          <div class="ov-panel-title">Top IPs</div>
+          ${ipRowsHtml}
+        </div>
+      </div>
+      <div class="ov-panel">
+        <div class="ov-panel-title">Tỷ lệ lỗi (4xx/5xx) &nbsp;<span class="ov-total">${errRate}</span></div>
+        <div class="ov-chart-wrap short" id="errChartWrap">${buildAreaChartSvg(s.errBuckets, s, errChartOpts)}</div>
+      </div>
+    `;
+
+    attachAreaChartHover('reqChartWrap', 'reqChartSvg', s.reqBuckets, s, { ...reqChartOpts, label: 'Requests' });
+    attachAreaChartHover('errChartWrap', 'errChartSvg', s.errBuckets, s, { ...errChartOpts, label: 'Lỗi' });
+  }
+
+  // ---------- sparkline ----------
+  function drawPulse() {
+    const w = 220, h = 34, n = buckets.length;
+    const max = Math.max(1, ...buckets);
+    const step = w / (n - 1);
+    let pts = [];
+    for (let i = 0; i < n; i++) {
+      const x = i * step;
+      const y = h - (buckets[i] / max) * (h - 4) - 2;
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    const line = pts.join(' ');
+    const area = `0,${h} ${line} ${w},${h}`;
+    pulseSvg.innerHTML = `
+      <polygon points="${area}" fill="rgba(57,217,138,0.10)"></polygon>
+      <polyline points="${line}" fill="none" stroke="var(--green)" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"></polyline>
+    `;
+  }
+
+  setInterval(() => {
+    buckets.shift();
+    buckets.push(0);
+    drawPulse();
+    const now = Date.now();
+    rateWindow = rateWindow.filter(t => now - t < 60000);
+    footRate.textContent = rateWindow.length.toLocaleString('vi-VN') + ' dòng/phút';
+  }, 1000);
+  drawPulse();
+
+  function tickUptime() {
+    const since = connMeta[activeKey].since;
+    if (!since) { document.getElementById('uptime').textContent = '00:00:00'; return; }
+    const s = Math.floor((Date.now() - since) / 1000);
+    const hh = String(Math.floor(s / 3600)).padStart(2,'0');
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2,'0');
+    const ss = String(s % 60).padStart(2,'0');
+    document.getElementById('uptime').textContent = `${hh}:${mm}:${ss}`;
+  }
+  setInterval(tickUptime, 1000);
+
+  // ---------- connection (1 socket độc lập cho mỗi nguồn log) ----------
+  function setStatus(mode, label) {
+    statusDot.className = 'dot ' + mode;
+    statusText.textContent = label;
+    footStatus.textContent = label;
+  }
+
+  function refreshConnectBtn() {
+    const sock = sockets[activeKey];
+    const isOpen = sock && sock.readyState === WebSocket.OPEN;
+    const isConnecting = sock && sock.readyState === WebSocket.CONNECTING;
+    connectBtn.disabled = isConnecting;
+    connectBtn.textContent = isOpen ? 'Ngắt kết nối' : (isConnecting ? 'Đang kết nối...' : 'Kết nối');
+    connectBtn.classList.toggle('stop', isOpen);
+    if (isOpen) setStatus('on', 'Đã kết nối — ' + activeKey);
+    else if (isConnecting) setStatus('connecting', 'Đang kết nối...');
+    else setStatus('off', 'Chưa kết nối — ' + activeKey);
+
+    // Không cho đổi chế độ xem khi đang kết nối/đang kết nối dở — tránh
+    // nhầm lẫn giữa lựa chọn hiển thị và kết nối đang thực sự chạy.
+    const lockMode = isOpen || isConnecting;
+    watchModeToggle.querySelectorAll('button').forEach(b => b.disabled = lockMode);
+  }
+
+  const BACKLOG_THRESHOLD_MS = 10000; // >10s cũ hơn thời điểm nhận = coi là backlog, không phải live
+
+  function connect(key) {
+    const token = tokenInput.value.trim();
+    if (!token) { alert('Nhập token trước khi kết nối'); return; }
+    if (sockets[key]) return; // đã có kết nối cho nguồn này rồi, không mở thêm
+
+    // 'full'     -> gửi offset đã lưu (từ IndexedDB) để server chỉ trả về
+    //               phần log MỚI kể từ lần đồng bộ trước (hoặc toàn bộ file
+    //               nếu offset=0, tức chưa từng đồng bộ).
+    // 'liveOnly' -> gửi offset=latest, server bỏ qua toàn bộ backlog và chỉ
+    //               phát log MỚI phát sinh kể từ lúc kết nối này.
+    const isLiveOnly = watchMode === 'liveOnly';
+    const offsetParam = isLiveOnly ? 'latest' : (offsets[key] || 0);
+    const wsUrl = `wss://${REAL_DOMAIN}/?token=${encodeURIComponent(token)}&log=${key}&offset=${offsetParam}`;
+    const sock = new WebSocket(wsUrl);
+    sockets[key] = sock;
+    if (key === activeKey) refreshConnectBtn();
+
+    sock.onopen = () => {
+      connMeta[key].since = Date.now();
+      if (key === activeKey) refreshConnectBtn();
+      pushSystem(key, isLiveOnly
+        ? '--- Kết nối thành công (chỉ xem log mới từ bây giờ) ---'
+        : `--- Kết nối thành công (resume từ offset ${offsetParam}) ---`);
+    };
+
+    // Server gửi JSON: {type:'lines', items:[...], backlog} | {type:'offset', value} | {type:'backlog_done'}
+    sock.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch (e) { return; }
+
+      if (msg.type === 'lines' && Array.isArray(msg.items)) {
+        const nowMs = Date.now();
+        msg.items.forEach(text => {
+          const parsed = parseLogTimestamp(text);
+          const ts = parsed || new Date(nowMs);
+          const isBacklog = !!msg.backlog || (!!parsed && (nowMs - parsed.getTime() > BACKLOG_THRESHOLD_MS));
+          appendEntry(key, { ts, level: detectLevel(text), text, backlog: isBacklog });
+        });
+      } else if (msg.type === 'offset') {
+        offsets[key] = msg.value;
+        queueSave(key);
+      } else if (msg.type === 'backlog_done') {
+        pushSystem(key, '--- Đã đồng bộ toàn bộ log, đang theo dõi log mới ---');
+      }
+    };
+
+    sock.onerror = () => pushSystem(key, '--- Lỗi kết nối WebSocket ---');
+
+    sock.onclose = (e) => {
+      pushSystem(key, `--- Đã ngắt kết nối (code: ${e.code}) ---`);
+      sockets[key] = null;
+      connMeta[key].since = null;
+      if (key === activeKey) refreshConnectBtn();
+    };
+  }
+
+  function disconnect(key) { if (sockets[key]) sockets[key].close(); }
+
+  connectBtn.addEventListener('click', () => {
+    sockets[activeKey] ? disconnect(activeKey) : connect(activeKey);
+  });
+
+  watchModeToggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn || btn.disabled) return;
+    watchModeToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    watchMode = btn.dataset.mode;
+    modeHint.textContent = MODE_HINTS[watchMode];
+  });
+
+  // ---------- sidebar source switching ----------
+  document.querySelectorAll('.source-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (item.dataset.key === activeKey) return;
+      document.querySelectorAll('.source-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      activeKey = item.dataset.key;
+      document.getElementById('domainLabel').textContent = REAL_DOMAIN + '  ·  ' + activeKey;
+      rerenderAll();
+      refreshConnectBtn();
+      tickUptime();
+      if (currentView === 'overview') renderOverview(activeKey);
+    });
+  });
+
+  // ---------- view tabs (nhật ký trực tiếp <-> tổng quan lưu lượng) ----------
+  const viewTabs = document.querySelectorAll('.view-tab');
+  const streamOnlyEls = document.querySelectorAll('.stream-only');
+  const overviewOnlyEls = document.querySelectorAll('.overview-only');
+  const overviewEl = document.getElementById('overview');
+
+  function switchView(view) {
+    currentView = view;
+    viewTabs.forEach(t => t.classList.toggle('active', t.dataset.view === view));
+    if (view === 'stream') {
+      logEl.classList.remove('hide');
+      overviewEl.classList.remove('show');
+      streamOnlyEls.forEach(el => el.style.display = '');
+      overviewOnlyEls.forEach(el => el.style.display = 'none');
+    } else {
+      logEl.classList.add('hide');
+      overviewEl.classList.add('show');
+      streamOnlyEls.forEach(el => el.style.display = 'none');
+      overviewOnlyEls.forEach(el => el.style.display = '');
+      renderOverview(activeKey);
+    }
+  }
+
+  viewTabs.forEach(t => t.addEventListener('click', () => switchView(t.dataset.view)));
+  document.getElementById('refreshOvBtn').addEventListener('click', () => renderOverview(activeKey));
+
+  // ---------- range selector ----------
+  document.getElementById('rangeToggle').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    document.querySelectorAll('#rangeToggle button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    ovRangeKey = btn.dataset.range;
+    renderOverview(activeKey);
+  });
+
+  // ---------- level filter ----------
+  levelToggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    levelToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeLevel = btn.dataset.lvl;
+    rerenderAll();
+  });
+
+  // ---------- search ----------
+  let searchDebounce;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      searchTerm = searchInput.value.trim();
+      rerenderAll();
+    }, 150);
+  });
+
+  // ---------- pause ----------
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused;
+    pauseBtn.classList.toggle('on', paused);
+    pauseBtn.textContent = paused ? '▶ Tiếp tục' : '⏸ Tạm dừng';
+    if (!paused) {
+      pausedBuffer = 0;
+      rerenderAll();
+      refreshConnectBtn();
+    }
+  });
+
+  // ---------- export ----------
+  exportBtn.addEventListener('click', () => {
+    const list = store[activeKey].filter(passesFilter);
+    const content = list.map(e => `[${e.ts.toISOString()}] [${e.level}] ${e.text}`).join('\n');
+    const blob = new Blob([content || '// (không có dữ liệu)'], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${activeKey}-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.log.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // ---------- clear (xóa màn hình hiển thị + xóa cache cục bộ của nguồn này) ----------
+  // Lưu ý: KHÔNG reset offset về 0 — chỉ xóa nội dung đã cache. Nếu bạn muốn
+  // buộc tải lại toàn bộ log từ server lần kết nối tới, hãy xóa offsets[activeKey]
+  // về 0 nữa (bỏ comment dòng bên dưới).
+  clearBtn.addEventListener('click', () => {
+    store[activeKey] = [];
+    counts[activeKey] = 0;
+    document.getElementById('cnt-' + activeKey).textContent = 0;
+    rerenderAll();
+    // offsets[activeKey] = 0; // bỏ comment nếu muốn lần connect tới tải lại từ đầu
+    saveCache(activeKey, offsets[activeKey] || 0, []);
+  });
+
+  document.getElementById('domainLabel').textContent = REAL_DOMAIN + '  ·  ' + activeKey;
+
+  // Tải cache cục bộ (nếu có) trước khi cho phép kết nối, để dashboard hiển
+  // thị ngay log đã có mà không cần chờ server trả toàn bộ lại từ đầu.
+  initFromCache();
+})();
+</script>
+
+</body>
+</html>

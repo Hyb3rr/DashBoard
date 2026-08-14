@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -52,6 +53,7 @@ def refresh_tor_exit_list(
     output = Path(output_path)
     metadata = Path(metadata_path) if metadata_path else output.with_suffix(output.suffix + ".meta.json")
     headers = {"User-Agent": "SentinelHub-TorList/1.0"}
+    old_meta = {}
     if metadata.exists():
         try:
             old_meta = json.loads(metadata.read_text())
@@ -69,7 +71,11 @@ def refresh_tor_exit_list(
             response_headers = response.headers
     except HTTPError as exc:
         if exc.code == 304:
-            return {"status": "not_modified", "path": str(output)}
+            now = datetime.now(timezone.utc).isoformat()
+            old_meta["last_checked_at"] = now
+            old_meta["status"] = "not_modified"
+            metadata.write_text(json.dumps(old_meta, indent=2) + "\n", encoding="utf-8")
+            return {"status": "not_modified", "path": str(output), "count": old_meta.get("count", 0)}
         return {"status": "failed", "error": f"HTTP {exc.code}", "path": str(output)}
     except (TimeoutError, URLError, OSError) as exc:
         return {"status": "failed", "error": type(exc).__name__, "path": str(output)}
@@ -77,6 +83,9 @@ def refresh_tor_exit_list(
     ips = _valid_ips(payload)
     if not ips:
         return {"status": "failed", "error": "empty_or_invalid_list", "path": str(output)}
+    old_count = int(old_meta.get("count") or 0)
+    if old_count and len(ips) < old_count * 0.5:
+        return {"status": "failed", "error": "sanity_count_drop", "path": str(output), "count": len(ips)}
 
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
@@ -97,6 +106,9 @@ def refresh_tor_exit_list(
         "etag": response_headers.get("ETag"),
         "last_modified": response_headers.get("Last-Modified"),
         "count": len(ips),
+        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+        "last_updated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "updated",
     }
     metadata.write_text(json.dumps(new_meta, indent=2) + "\n", encoding="utf-8")
     return {"status": "updated", "count": len(ips), "path": str(output)}

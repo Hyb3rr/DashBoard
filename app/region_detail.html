@@ -22,4 +22,8 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
       document.documentElement.dataset.theme = event.newValue;
     }
   });
+</script><script>
+const formatRegionNumber=value=>{const n=Number(value);return Number.isFinite(n)?n.toLocaleString('en-US',{maximumFractionDigits:2}).replace(/,/g,' '):value};
+const formatRegionDetailNumbers=()=>document.querySelectorAll('.market strong,.effect,.item p').forEach(node=>{const text=node.firstChild;if(!text||text.nodeType!==3)return;const value=text.nodeValue.trim();if(node.matches('.item p')&&!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value))return;text.nodeValue=formatRegionNumber(value)});
+new MutationObserver(formatRegionDetailNumbers).observe(document.querySelector('#app'),{childList:true,subtree:true});
 </script></body></html>
