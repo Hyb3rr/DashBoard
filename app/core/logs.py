@@ -94,13 +94,11 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
         if legacy_events:
             upsert_buckets(conn, [dict(event) for event in legacy_events])
             rows = bucket_sums(conn, ips)
-    try:
-        lookback_hours = max(1, int(os.getenv("LOGS_BEHAVIOR_LOOKBACK_HOURS", "24")))
-    except ValueError:
-        lookback_hours = 24
-    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    recent_by_ip = bucket_sums(conn, ips, recent_cutoff)
-    one_hour_by_ip = bucket_sums(conn, ips, datetime.now(timezone.utc) - timedelta(hours=1))
+    # Detection windows are product semantics, not deployment configuration.
+    # LOGS_BEHAVIOR_LOOKBACK_HOURS must not make a 24h attack query include 48h.
+    window_now = datetime.now(timezone.utc)
+    recent_by_ip = bucket_sums(conn, ips, window_now - timedelta(hours=24))
+    one_hour_by_ip = bucket_sums(conn, ips, window_now - timedelta(hours=1))
     now = _now()
     behavior_columns = (
         "requests", "status_4xx", "status_5xx", "unique_paths", "wp_login_requests",
@@ -200,7 +198,7 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
                 encode(detections),
                 encode(recent_detections),
                 encode(recent_1h_detections),
-                encode(recent_24_detections + recent_1h_detections),
+                encode(recent_24_detections),
                 ruleset_hash(),
                 ruleset_hash(),
                 ruleset_hash(),

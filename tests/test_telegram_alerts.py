@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import asyncio
+import sqlite3
 
 from app.core import db
 from app.core.logs import import_apache_lines
@@ -90,4 +91,25 @@ def test_outbox_claim_prevents_concurrent_duplicate_delivery(isolated_db, monkey
     assert len(delivered) == 1
     conn = db.connect()
     assert conn.execute("SELECT status FROM alert_outbox").fetchone()["status"] == "delivered"
+    conn.close()
+
+
+def test_old_outbox_upgrade_deduplicates_and_adds_unique_index(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(path)
+    raw.execute("""CREATE TABLE alert_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
+        next_retry_at TEXT NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT,
+        idempotency_key TEXT)""")
+    raw.executemany("INSERT INTO alert_outbox(ip,event_type,payload_json,status,attempts,next_retry_at,created_at,idempotency_key) VALUES (?,?,?,?,?,?,?,?)", [
+        ("198.51.100.9", "classification_bad", "{}", "pending", 0, "now", "now", "same-transition"),
+        ("198.51.100.9", "classification_bad", "{}", "pending", 0, "now", "now", "same-transition"),
+    ])
+    raw.commit(); raw.close()
+    monkeypatch.setattr(db, "DB_PATH", path)
+    conn = db.connect()
+    assert conn.execute("SELECT COUNT(*) FROM alert_outbox WHERE idempotency_key='same-transition'").fetchone()[0] == 1
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO alert_outbox(ip,event_type,payload_json,status,attempts,next_retry_at,created_at,idempotency_key) VALUES (?,?,?,?,?,?,?,?)", ("x", "x", "{}", "pending", 0, "now", "now", "same-transition"))
     conn.close()

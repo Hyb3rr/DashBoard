@@ -80,10 +80,13 @@ def coverage_matrix(window: str = "24h") -> list[dict]:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=1 if window == "1h" else 24)
         result = []
+        active_hash = ruleset_hash()
         for rule in rules():
+            if rule.window != window:
+                continue
             row = conn.execute(
-                "SELECT COUNT(*) AS n, MAX(last_fired_at) AS last_fired_at FROM rule_firing_state WHERE rule_id=? AND window=?",
-                (rule.id, window),
+                "SELECT COUNT(*) AS n, MAX(last_fired_at) AS last_fired_at FROM rule_firing_state WHERE rule_id=? AND window=? AND ruleset_hash=?",
+                (rule.id, window, active_hash),
             ).fetchone()
             last = row["last_fired_at"]
             recent = False
@@ -103,7 +106,7 @@ def coverage_matrix(window: str = "24h") -> list[dict]:
                 "telemetry_ready": True,
                 "recently_observed": recent,
                 "last_fired_at": last,
-                "ruleset_hash": ruleset_hash(),
+                "ruleset_hash": active_hash,
             })
         return result
     finally:

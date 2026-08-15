@@ -134,5 +134,5 @@ def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:
     cluster = cluster_for_ip(conn, ip)
     classification = classify_ip(profile, observation, region, ai_profile, cluster)
     classification["ruleset_hash"] = observation.get("ruleset_hash_24h") or ruleset_hash()
-    classification["detections_recent"] = observation.get("detections_24h", observation.get("detections_recent", []))
+    classification["detections_recent"] = observation.get("detections_recent", [])
     return ClassificationSnapshot(ip, profile, observation, region, ai_profile, cluster, classification)

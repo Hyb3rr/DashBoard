@@ -102,9 +102,13 @@ def _validate_rule(raw: Any, filename: str) -> Rule:
     if not isinstance(raw["false_positive_notes"], list) or not raw["false_positive_notes"]:
         raise ValueError(f"{filename}: false_positive_notes must be a non-empty list")
     rule_type = str(raw["rule_type"])
+    if rule_type not in {"technique", "anomaly"}:
+        raise ValueError(f"{filename}: rule_type must be technique or anomaly")
     mitre = raw.get("mitre_technique")
     if rule_type == "technique" and not mitre:
         raise ValueError(f"{filename}: technique rule requires mitre_technique")
+    if rule_type == "anomaly" and mitre is not None:
+        raise ValueError(f"{filename}: anomaly rule must have null mitre_technique")
     if mitre is not None and not re.fullmatch(r"T\d{4}(?:\.\d{3})?", str(mitre)):
         raise ValueError(f"{filename}: invalid mitre_technique")
     _validate_condition(raw["condition"], filename, 0)
@@ -143,6 +147,16 @@ def _validate_condition(node: Any, filename: str, depth: int) -> None:
         raise ValueError(f"{filename}: unsupported condition field {node['field']}")
     if node["operator"] not in _OPERATORS:
         raise ValueError(f"{filename}: unsupported condition operator {node['operator']}")
+    value = node["value"]
+    numeric_field = node["field"] in _FIELDS
+    if numeric_field:
+        if node["operator"] == "contains":
+            raise ValueError(f"{filename}: contains is not valid for numeric field {node['field']}")
+        if node["operator"] == "in":
+            if not isinstance(value, list) or not value or any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+                raise ValueError(f"{filename}: in requires a non-empty numeric list")
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{filename}: numeric operator requires numeric value")
 
 
 def load_rules(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:

@@ -361,6 +361,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     }.items():
         if column not in outbox_columns:
             conn.execute(f"ALTER TABLE alert_outbox ADD COLUMN {column} {definition}")
+    # Older databases received idempotency_key as a nullable plain column.
+    # Remove duplicate legacy rows before adding the unique guarantee.
+    if "idempotency_key" in {row["name"] for row in conn.execute("PRAGMA table_info(alert_outbox)").fetchall()}:
+        conn.execute("""DELETE FROM alert_outbox
+                        WHERE id NOT IN (SELECT MIN(id) FROM alert_outbox
+                                         WHERE idempotency_key IS NOT NULL
+                                         GROUP BY idempotency_key)
+                          AND idempotency_key IS NOT NULL""")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_outbox_idempotency ON alert_outbox(idempotency_key) WHERE idempotency_key IS NOT NULL")
     observation_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_observations)").fetchall()}
     for column, definition in {
         "recent_first_seen": "TEXT",

@@ -59,7 +59,7 @@ def _save_consumer_cursor(conn, cursor: int, status: str = "active") -> None:
     )
 
 
-def _enqueue_alert(conn, ip: str, message: str, now: datetime) -> None:
+def _enqueue_alert(conn, ip: str, message: str, now: datetime, idempotency_key: str) -> None:
     existing = conn.execute(
         "SELECT id FROM alert_outbox WHERE ip=? AND event_type='classification_bad' AND status IN ('pending','sending') LIMIT 1",
         (ip,),
@@ -70,7 +70,7 @@ def _enqueue_alert(conn, ip: str, message: str, now: datetime) -> None:
                (ip,event_type,payload_json,status,attempts,next_retry_at,created_at,idempotency_key)
                VALUES (?, 'classification_bad', ?, 'pending', 0, ?, ?, ?)""",
             (ip, json.dumps({"message": message}), now.isoformat(), now.isoformat(),
-             f"classification_bad:{ip}:{now.isoformat()}"),
+             idempotency_key),
         )
 
 
@@ -202,7 +202,7 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
                     classification, profile, observation = _classification_for_ip(conn, ip)
                     alert = _record_state(conn, ip, classification, _now())
                     if alert and telegram_enabled():
-                        _enqueue_alert(conn, ip, format_bad_alert(ip, classification, profile, observation), _now())
+                        _enqueue_alert(conn, ip, format_bad_alert(ip, classification, profile, observation), _now(), f"classification_bad:{ip}:{next_cursor}")
                     elif alert:
                         _clear_alert_pending(conn, ip)
                 _save_consumer_cursor(conn, next_cursor)

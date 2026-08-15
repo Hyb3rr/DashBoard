@@ -50,19 +50,28 @@ def test_observation_score_matches_persisted_detection_points(tmp_path, monkeypa
 def test_windowed_detections_do_not_leak_old_burst_into_one_hour(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "hub.db")
     monkeypatch.setattr(db, "REGION_SEED_PATH", tmp_path / "missing.seed.json")
+    monkeypatch.setenv("LOGS_BEHAVIOR_LOOKBACK_HOURS", "48")
     conn = db.connect()
-    old = (datetime.now(timezone.utc) - timedelta(hours=23)).replace(second=0, microsecond=0)
+    old = (datetime.now(timezone.utc) - timedelta(hours=30)).replace(second=0, microsecond=0)
     upsert_buckets(conn, [
         {"src_ip": "198.51.100.20", "timestamp": old.isoformat(), "path": f"/scan/{i}", "status": 404, "user_agent": "curl"}
         for i in range(100)
     ])
+    recent = old + timedelta(hours=7)
+    upsert_buckets(conn, [
+        {"src_ip": "198.51.100.21", "timestamp": recent.isoformat(), "path": f"/scan/{i}", "status": 404, "user_agent": "curl"}
+        for i in range(100)
+    ])
     rebuild_observations(conn)
-    row = conn.execute("SELECT detections_1h_json,detections_24h_json FROM ip_observations WHERE ip=?", ("198.51.100.20",)).fetchone()
-    one_hour = {item["id"] for item in json.loads(row["detections_1h_json"])}
-    day = {item["id"] for item in json.loads(row["detections_24h_json"])}
+    old_row = conn.execute("SELECT detections_1h_json,detections_24h_json FROM ip_observations WHERE ip=?", ("198.51.100.20",)).fetchone()
+    recent_row = conn.execute("SELECT detections_24h_json FROM ip_observations WHERE ip=?", ("198.51.100.21",)).fetchone()
+    one_hour = {item["id"] for item in json.loads(old_row["detections_1h_json"])}
+    day = {item["id"] for item in json.loads(old_row["detections_24h_json"])}
+    recent_day = {item["id"] for item in json.loads(recent_row["detections_24h_json"])}
     assert "WEB-BURST-001" not in one_hour
     assert "WEB-BURST-001" not in day
-    assert "WEB-SCAN-001" in day
+    assert "WEB-SCAN-001" not in day
+    assert "WEB-SCAN-001" in recent_day
     conn.close()
 
 
