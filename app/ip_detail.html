@@ -39,7 +39,7 @@ nav{display:grid;gap:3px}
 .eyebrow{font:600 10px/1.2 monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--tertiary)}
 .online{display:flex;gap:7px;margin-top:7px;color:var(--secondary)}
 .dot{width:7px;height:7px;margin-top:5px;border-radius:50%;background:var(--green)}
-main{max-width:1280px;width:100%;padding:24px 32px 48px}
+main{min-width:0;width:100%;max-width:none;padding:24px 32px 48px}
 .back{display:inline-block;margin-bottom:24px;color:var(--tertiary);text-decoration:none}
 .back:hover{color:var(--cyan)}
 .hero{display:flex;justify-content:space-between;gap:24px;padding-bottom:24px;border-bottom:1px solid var(--line)}
@@ -49,6 +49,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
 .button{display:inline-flex;align-items:center;min-height:40px;padding:0 13px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);text-decoration:none;font-weight:700}
 .button:hover{color:var(--ink);background:var(--raised)}
 .button.primary{background:var(--cyan);border-color:transparent;color:#061013}
+button.button{font:700 13px/1 "Avenir Next",Avenir,"Segoe UI",sans-serif;cursor:pointer}
 
 .hero-grid{display:grid;grid-template-columns:1.5fr repeat(4,1fr);gap:1px;margin:24px 0;background:var(--line)}
 .stat{min-height:105px;padding:17px;background:var(--console)}
@@ -134,6 +135,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
 .decision.good .bar i{background:var(--green)}
 .decision.unknown .score{color:var(--secondary)}
 .decision.unknown .bar i{background:var(--tertiary)}
+.score-explainer{margin:16px 0;background:var(--console)}.score-explainer .body{padding:16px}.score-explainer-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.score-explainer-head h2{margin:0;font-size:14px}.score-explainer-head p{margin:4px 0 0;color:var(--tertiary);font-size:11px}.score-total{text-align:right;color:var(--cyan);font:700 20px monospace}.score-total small{display:block;margin-top:3px;color:var(--tertiary);font:10px sans-serif}.score-formula{margin:14px 0 12px;padding:9px 10px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font:11px monospace;line-height:1.6;overflow-wrap:anywhere}.score-components{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.score-component{min-height:122px;padding:12px;background:var(--console)}.score-component-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.score-component-code{color:var(--cyan);font:700 11px monospace}.score-component-points{font:700 14px monospace;color:var(--ink)}.score-component-points.negative{color:var(--green)}.score-component h3{margin:6px 0 4px;font-size:11px}.score-component p{min-height:30px;margin:0;color:var(--tertiary);font-size:10px;line-height:1.35}.score-component-reason{margin-top:8px;padding-top:7px;border-top:1px solid var(--line);color:var(--secondary);font-size:10px;line-height:1.35}.score-component-reason strong{color:var(--cyan)}.score-component-evidence{margin-top:6px;color:var(--secondary);font-size:10px;line-height:1.35}.score-component-evidence.muted{color:var(--disabled)}
 
 .pill{display:inline-block;padding:4px 8px;border:1px solid var(--line);border-radius:4px;color:var(--secondary);font:700 10px monospace;text-transform:uppercase}
 .pill.bad{color:var(--red);border-color:#ff766d55;background:rgba(255,118,109,.055)}
@@ -158,7 +160,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
 .path-bar i{display:block;height:100%;background:var(--cyan);border-radius:inherit}
 .path-dates{display:block;margin-top:6px;color:var(--tertiary);font-size:10px}
 .ip-traffic{margin:24px 0 16px}.ip-traffic-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ip-traffic-head h2{margin:0;font-size:14px}.ip-traffic-summary{margin-top:5px;color:var(--tertiary);font:11px monospace}.ip-range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:6px;background:var(--deck)}.ip-range button{min-height:27px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--tertiary);font:600 10px monospace;cursor:pointer}.ip-range button.active,.ip-range button:hover{color:var(--ink);background:var(--console)}.ip-traffic-chart{position:relative;height:240px;margin:15px 0}.ip-traffic-chart svg{width:100%;height:100%;display:block}.ip-traffic-chart .grid{stroke:var(--line);stroke-width:1}.ip-traffic-chart .axis{fill:var(--tertiary);font:10px monospace}.ip-traffic-chart .area{fill:rgba(89,216,230,.1)}.ip-traffic-chart .line{fill:none;stroke:var(--cyan);stroke-width:2;vector-effect:non-scaling-stroke}.ip-traffic-lower{display:grid;grid-template-columns:.8fr 1.2fr 1.2fr;gap:16px;padding-top:16px;border-top:1px solid var(--line)}.ip-traffic-block h3{margin:0 0 10px;font-size:12px}.status-list{display:grid;gap:8px}.status-row{display:grid;grid-template-columns:32px 1fr 42px;align-items:center;gap:8px;color:var(--secondary);font-size:11px}.status-row strong{font:600 11px monospace;text-align:right;color:var(--ink)}.status-track{height:7px;border-radius:99px;background:var(--deck);overflow:hidden}.status-track i{display:block;height:100%;background:var(--cyan)}.ip-top-paths{display:grid;gap:7px}.ip-top-path{display:flex;justify-content:space-between;gap:10px;color:var(--secondary);font:11px monospace}.ip-top-path span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ip-top-path strong{color:var(--ink)}.recent-list{display:grid;gap:6px;max-height:190px;overflow:auto}.recent-row{display:grid;grid-template-columns:62px 38px minmax(0,1fr) 32px;gap:7px;color:var(--secondary);font:10px monospace}.recent-row .recent-time{color:var(--tertiary)}.recent-row .recent-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row .status-4xx,.recent-row .status-5xx{color:var(--red)}
- .ip-time-filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.ip-time-filter label{display:grid;gap:4px;color:var(--tertiary);font-size:10px}.ip-time-filter input{height:32px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--void);color:var(--secondary);font:11px monospace}.ip-time-filter button{height:32px;padding:0 10px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font-weight:700;cursor:pointer}.ip-time-filter button:hover{color:var(--ink);background:var(--raised)}
+ .ip-time-filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.ip-time-filter label{display:grid;gap:4px;color:var(--tertiary);font:600 10px ui-monospace,monospace;letter-spacing:.03em}.ip-time-filter input{height:32px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--void);color:var(--secondary);font:11px monospace}.ip-time-filter button{height:32px;padding:0 10px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font-weight:700;cursor:pointer}.ip-time-filter button:hover{color:var(--ink);background:var(--raised)}.ip-traffic-chart{overflow:visible}.ip-traffic-tooltip{position:absolute;z-index:2;pointer-events:none;min-width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:5px;background:var(--console);box-shadow:0 8px 24px rgba(0,0,0,.25);opacity:0;transform:translateY(4px);transition:opacity 140ms ease-out,transform 140ms ease-out;font:10px monospace}.ip-traffic-tooltip.show{opacity:1;transform:none}.ip-traffic-tooltip .time{color:var(--tertiary);margin-bottom:5px}.ip-traffic-tooltip .value{display:flex;justify-content:space-between;gap:16px;color:var(--secondary)}.ip-traffic-tooltip strong{color:var(--ink)}
 .investigate-links{display:grid;gap:8px}
 .external-link{display:flex;justify-content:space-between;align-items:center;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--deck);color:var(--cyan);text-decoration:none;font-weight:700}
 .external-link:hover{border-color:#59d8e677;background:var(--raised)}
@@ -174,6 +176,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
   .stat:first-child{grid-column:1/-1}
   .layout{grid-template-columns:1fr}
   .ip-traffic-lower{grid-template-columns:1fr 1fr}
+  .score-components{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:560px){
   .hero{display:block}
@@ -183,6 +186,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
   .score{margin-top:18px}
   .breakdown{grid-template-columns:repeat(2,1fr)}
   .ip-traffic-head{display:block}.ip-range{margin-top:12px;overflow-x:auto}.ip-traffic-lower{grid-template-columns:1fr}
+  .score-explainer-head{display:block}.score-total{text-align:left;margin-top:12px}.score-components{grid-template-columns:1fr}
 }
 </style>
 
@@ -202,8 +206,6 @@ html[data-theme="light"]{
   --yellow:#9a6b00;
   --red:#b3423b
 }
-.theme-float{position:fixed;right:24px;bottom:24px;z-index:5;min-height:40px;padding:0 13px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font-weight:700;cursor:pointer}
-.theme-float:hover{color:var(--ink);background:var(--raised)}
 </style>
 
 <body>
@@ -270,9 +272,26 @@ function investigationLinks(value){
   const safe=encodeURIComponent(value);
   return `<div class="investigate-links"><a class="external-link" href="https://www.abuseipdb.com/check/${safe}" target="_blank" rel="noopener noreferrer">AbuseIPDB <span>↗</span></a><a class="external-link" href="https://app.crowdsec.net/cti/${safe}" target="_blank" rel="noopener noreferrer">CrowdSec CTI <span>↗</span></a></div>`
 }
+function scoreExplainer(b,c){
+  const parts=[
+    ['A','Behavior',Number(b.behavior_a||0),100,'Request behavior: bursts, probes, bot patterns, 4xx/5xx signals.'],
+    ['B','Network identity',Number(b.identity_b||0),25,'Tor, proxy, VPN and hosting signals. Identity contribution capped at +25.'],
+    ['C','Trust adjustment',Number(b.trust_c||0),20,'Trusted attributed network can reduce score when behavior risk is low.'],
+    ['D','Region signal',Number(b.region_d||0),5,'Conflict nudge. Only active when behavior signal exists.'],
+    ['E','AI anomaly',Number(b.ai_e||0),8,'AI anomaly bonus. Requires low rule score and enough scored windows.'],
+    ['F','Correlation',Number(b.correlation_f||0),5,'ASN/campaign correlation from shared IPs and sensitive paths.']
+  ];
+  const evidence=Array.isArray(c.evidence)?c.evidence:[],explanations=c.score_explanations||{};
+  const signed=value=>value>0?`+${value}`:String(value);
+  const cards=parts.map(([code,name,value,max,description])=>{const matches=evidence.filter(item=>String(item).startsWith(`${code} —`));return `<article class="score-component"><div class="score-component-head"><span class="score-component-code">${code}</span><span class="score-component-points ${value<0?'negative':''}">${signed(value)} <small>/ ${max}</small></span></div><h3>${name}</h3><p>${description}</p><div class="score-component-reason"><strong>Why:</strong> ${esc(explanations[code]||'No calculation note available.')}</div><div class="score-component-evidence ${matches.length?'':'muted'}">${matches.length?matches.map(item=>esc(item)).join('<br>'):'No direct evidence'}</div></article>`}).join('');
+  const formula=parts.map(([code,,value])=>`${code} ${signed(value)}`).join('  ');
+  return `<section class="card score-explainer"><div class="body"><div class="score-explainer-head"><div><h2>How this score is calculated</h2><p>Auditable rule groups. Positive values increase risk; negative values reduce it.</p></div><div class="score-total">${num(c.score??0)} / 100<small>clamped final score</small></div></div><div class="score-formula">${formula}  =  ${num(c.score??0)} final · range 0–100<br><span>${esc(explanations.final||'')}</span></div><div class="score-components">${cards}</div></div></section>`
+}
 
-let trafficRange='1h',trafficStart='',trafficEnd='';
+const IP_TRAFFIC_WINDOW_KEY=`hub:v2:ip-traffic:${ip}`;let trafficRange='1h',trafficStart='',trafficEnd='';
 function trafficClock(value){return new Date(value).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}
+function saveIpTrafficWindow(){try{sessionStorage.setItem(IP_TRAFFIC_WINDOW_KEY,JSON.stringify({range:trafficRange,start:trafficStart,end:trafficEnd}))}catch(_){} }
+function restoreIpTrafficWindow(){try{const saved=JSON.parse(sessionStorage.getItem(IP_TRAFFIC_WINDOW_KEY)||'null');if(saved){trafficRange=saved.range||trafficRange;trafficStart=saved.start||'';trafficEnd=saved.end||''}}catch(_){} }
 function renderIpTraffic(data){
   const chart=document.querySelector('#ip-traffic-chart'),series=data.series||[],max=Math.max(1,...series.map(x=>Number(x.requests||0))),w=1000,h=240,padL=42,padR=18,padT=14,padB=28,innerW=w-padL-padR,innerH=h-padT-padB;
   document.querySelector('#ip-traffic-summary').textContent=`${num(data.total_requests||0)} requests · ${data.range_label||''} · updated ${trafficClock(data.as_of)}`;
@@ -281,7 +300,9 @@ function renderIpTraffic(data){
     const pointValues=series.map(x=>`${xFor(x.timestamp)},${padT+innerH-(Number(x.requests||0)/max)*innerH}`);const lastPoint=series[series.length-1];if(new Date(lastPoint.timestamp)<end)pointValues.push(`${xFor(data.end)},${padT+innerH}`);const points=pointValues.join(' '),area=`${padL},${padT+innerH} ${points} ${xFor(data.end)},${padT+innerH}`;
     const grid=[0,.5,1].map(r=>{const y=padT+innerH-r*innerH;return `<line class="grid" x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}"></line><text class="axis" x="${padL-7}" y="${y+3}" text-anchor="end">${num(Math.round(max*r))}</text>`}).join('');
     const axis=[start,new Date((start.getTime()+end.getTime())/2),end].map((x,i)=>`<text class="axis" x="${[padL,padL+innerW/2,w-padR][i]}" y="${h-7}" text-anchor="${i===0?'start':i===2?'end':'middle'}">${i===2&&!trafficEnd?'Now · ':''}${trafficClock(x)}</text>`).join('');
-    chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<polygon class="area" points="${area}"></polygon><polyline class="line" points="${points}"></polyline>${axis}</svg>`;
+    const hitWidth=Math.max(10,Math.min(36,innerW/Math.max(series.length,1))),hits=series.map((x,i)=>`<rect class="traffic-hit" data-index="${i}" x="${Math.max(padL,xFor(x.timestamp)-hitWidth/2)}" y="${padT}" width="${hitWidth}" height="${innerH}" fill="transparent"></rect>`).join('');
+    chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<polygon class="area" points="${area}"></polygon><polyline class="line" points="${points}"></polyline>${axis}${hits}</svg><div class="ip-traffic-tooltip" id="ip-traffic-tooltip"></div>`;
+    const tooltip=document.querySelector('#ip-traffic-tooltip');chart.querySelectorAll('.traffic-hit').forEach(hit=>{hit.addEventListener('mouseenter',event=>{const item=series[Number(event.currentTarget.dataset.index)],rect=chart.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;tooltip.innerHTML=`<div class="time">${new Date(item.timestamp).toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div><div class="value"><span>Requests</span><strong>${num(item.requests||0)}</strong></div><div class="value"><span>Errors</span><strong>${num(item.errors||0)}</strong></div>`;tooltip.style.left=`${Math.max(8,Math.min(rect.width-145,x+10))}px`;tooltip.style.top=`${Math.max(8,y-64)}px`;tooltip.classList.add('show')});hit.addEventListener('mouseleave',()=>tooltip.classList.remove('show'))});
   }
   const codes=data.status_codes||{},codeMax=Math.max(1,...Object.values(codes).map(Number));
   document.querySelector('#ip-status-codes').innerHTML=['2xx','3xx','4xx','5xx'].map(code=>`<div class="status-row"><span>${code}</span><div class="status-track"><i style="width:${Number(codes[code]||0)/codeMax*100}%"></i></div><strong>${num(codes[code]||0)}</strong></div>`).join('');
@@ -290,9 +311,9 @@ function renderIpTraffic(data){
 }
 function localIso(value){return value?new Date(value).toISOString():''}
 function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
-function syncTrafficInputs(start,end){if(trafficStart||trafficEnd)return;const startInput=document.querySelector('#ip-traffic-start'),endInput=document.querySelector('#ip-traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end)}
+function syncTrafficInputs(start,end){const startInput=document.querySelector('#ip-traffic-start'),endInput=document.querySelector('#ip-traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end)}
 async function loadIpTraffic(){try{const params=new URLSearchParams({range:trafficRange});if(trafficStart)params.set('start',localIso(trafficStart));if(trafficEnd)params.set('end',localIso(trafficEnd));const res=await fetch(`/api/ip/${encodeURIComponent(ip)}/traffic?${params}`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const data=await res.json();syncTrafficInputs(data.start,data.end);renderIpTraffic(data)}catch(error){const chart=document.querySelector('#ip-traffic-chart');if(chart)chart.innerHTML=`<div class="state"><strong>Traffic unavailable</strong>${esc(error.message)}</div>`}}
-function applyTrafficWindow(){trafficStart=document.querySelector('#ip-traffic-start').value;trafficEnd=document.querySelector('#ip-traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notifyIpTraffic('End must be after start');return}loadIpTraffic()}
+function applyTrafficWindow(){trafficStart=document.querySelector('#ip-traffic-start').value;trafficEnd=document.querySelector('#ip-traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notifyIpTraffic('End must be after start');return}saveIpTrafficWindow();loadIpTraffic()}
 function notifyIpTraffic(message){const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent=message}
 
 async function load(){
@@ -330,6 +351,7 @@ async function load(){
           <a class="button" href="/regions/${encodeURIComponent(d.country_code||"unknown")}">Region profile</a>
           <a class="button" href="/#threats">Return to table</a>
           <a class="button primary" href="/api/ip/${encodeURIComponent(ip)}?refresh=true">Refresh enrichment</a>
+          <button id="theme-toggle" class="button" type="button">${initialTheme==='dark'?'Light mode':'Dark mode'}</button>
         </div>
       </section>
 
@@ -360,6 +382,8 @@ async function load(){
           <span class="note">${esc(d.fetched_at||'')}</span>
         </div>
       </section>
+
+      ${scoreExplainer(b,c)}
 
       <section class="card ip-traffic">
         <div class="body">
@@ -416,9 +440,12 @@ async function load(){
         </div>
       </div>
     `
-    document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item===button));loadIpTraffic()}));
+    document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item===button));saveIpTrafficWindow();loadIpTraffic()}));
     document.querySelector('#ip-traffic-apply').addEventListener('click',applyTrafficWindow);
-    document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';loadIpTraffic()});
+    document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{trafficStart='';trafficEnd='';trafficRange='1h';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));saveIpTrafficWindow();loadIpTraffic()});
+    document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));
+    syncTrafficInputs(trafficStart&&localIso(trafficStart)||new Date(Date.now()-3600000).toISOString(),trafficEnd&&localIso(trafficEnd)||new Date().toISOString());
+    const themeButton=document.querySelector('#theme-toggle');themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;localStorage.setItem('sentinel-theme',next);themeButton.textContent=next==='dark'?'Light mode':'Dark mode'});
     loadIpTraffic();
   }catch(e){
     document.querySelector('#app').innerHTML=`
@@ -428,20 +455,7 @@ async function load(){
       </div>`
   }
 }
-load();
-
-const themeButton=document.createElement('button');
-themeButton.id='theme-toggle';
-themeButton.className='theme-float';
-themeButton.type='button';
-themeButton.textContent=initialTheme==='dark'?'Light mode':'Dark mode';
-themeButton.onclick=()=>{
-  const next=document.documentElement.dataset.theme==='dark'?'light':'dark';
-  document.documentElement.dataset.theme=next;
-  localStorage.setItem('sentinel-theme',next);
-  themeButton.textContent=next==='dark'?'Light mode':'Dark mode'
-};
-document.body.prepend(themeButton);
+restoreIpTrafficWindow();load();
 </script>
 </body>
 </html>

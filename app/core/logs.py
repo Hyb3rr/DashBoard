@@ -125,7 +125,21 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
     recent_by_ip = bucket_sums(conn, ips, recent_cutoff)
     one_hour_by_ip = bucket_sums(conn, ips, datetime.now(timezone.utc) - timedelta(hours=1))
     now = _now()
+    behavior_columns = (
+        "requests", "status_4xx", "status_5xx", "unique_paths", "wp_login_requests",
+        "sensitive_probe_requests", "bot_requests",
+        "behavior_score", "behavior_level", "behavior_evidence_json", "detections_json",
+        "recent_requests", "recent_status_2xx", "recent_status_3xx", "recent_status_4xx",
+        "recent_status_5xx", "recent_unique_paths", "recent_wp_login_requests",
+        "recent_sensitive_probe_requests", "recent_bot_requests", "behavior_score_recent",
+        "behavior_level_recent", "behavior_evidence_recent_json",
+    )
     for ip, row in rows.items():
+        old_row = conn.execute(
+            "SELECT " + ", ".join(behavior_columns) + " FROM ip_observations WHERE ip=?",
+            (ip,),
+        ).fetchone()
+        old_behavior = tuple(old_row[column] for column in behavior_columns) if old_row else None
         one_hour = one_hour_by_ip.get(ip, {})
         ctx = BehaviorContext(
             requests_1h=one_hour.get("requests", 0), requests_24h=row["requests"],
@@ -197,6 +211,16 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
                 now,
             ),
         )
+        new_row = conn.execute(
+            "SELECT " + ", ".join(behavior_columns) + " FROM ip_observations WHERE ip=?",
+            (ip,),
+        ).fetchone()
+        new_behavior = tuple(new_row[column] for column in behavior_columns)
+        if old_behavior != new_behavior:
+            conn.execute(
+                "INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, 'behavior', ?)",
+                (ip, now),
+            )
     trim_buckets(conn)
 
 

@@ -93,6 +93,66 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
 
     base_score = group_a + group_b + group_c + group_d + group_f
     score = max(0, min(base_score + group_e, 100))
+    score_explanations = {
+        "A": (
+            f"A = {group_a}: recent behavior score from request patterns, probes, bots and response errors."
+            if group_a else
+            "A = 0: no behavior points from the current observation window."
+        ),
+        "B": (
+            f"B = {group_b}: raw identity contribution was {raw_identity}, capped at +25."
+            if raw_identity > group_b else
+            f"B = {group_b}: privacy or hosting identity signals contributed to the score."
+            if group_b else
+            "B = 0: no Tor, proxy, VPN or hosting signal was active."
+        ),
+        "C": "",
+        "D": "",
+        "E": "",
+        "F": "",
+    }
+    if group_c == -20:
+        score_explanations["C"] = f"C = -20: {profile.get('organization')} has confidence {org_confidence}%, is not hosting, and behavior A={group_a} is below 25."
+    elif not profile.get("organization"):
+        score_explanations["C"] = "C = 0: no attributed organization, so trusted-network reduction cannot activate."
+    elif org_confidence < 70:
+        score_explanations["C"] = f"C = 0: organization confidence is {org_confidence}%, below required 70%."
+    elif profile.get("is_hosting"):
+        score_explanations["C"] = "C = 0: hosting/datacenter identity is not eligible for trusted-network reduction."
+    else:
+        score_explanations["C"] = f"C = 0: trusted-network reduction is disabled because behavior A={group_a} is 25 or higher. High behavior overrides organization trust."
+
+    if group_a == 0:
+        score_explanations["D"] = "D = 0: region conflict nudge is behavior-gated and cannot create risk by itself."
+    elif group_d:
+        score_explanations["D"] = f"D = +{group_d}: behavior exists and region conflict context activated the nudge."
+    else:
+        score_explanations["D"] = "D = 0: no qualifying medium or high conflict indicator was active."
+
+    if not ai_profile:
+        score_explanations["E"] = "E = 0: no local AI score snapshot is available."
+    elif group_a >= 25:
+        score_explanations["E"] = f"E = 0: AI bonus requires A below 25; current behavior A={group_a}."
+    elif ai_score < 70:
+        score_explanations["E"] = f"E = 0: AI anomaly score is {ai_score}, below required 70."
+    elif windows_seen < 3:
+        score_explanations["E"] = f"E = 0: only {windows_seen} AI window(s) observed; minimum is 3."
+    else:
+        score_explanations["E"] = f"E = +8: AI anomaly score {ai_score} and {windows_seen} windows satisfied the gate."
+
+    if not cluster:
+        score_explanations["F"] = "F = 0: no ASN campaign correlation is available."
+    elif len(cluster.get("member_ips") or []) < 3:
+        score_explanations["F"] = f"F = 0: correlation has {len(cluster.get('member_ips') or [])} member IP(s); minimum is 3."
+    elif group_f == 0:
+        score_explanations["F"] = "F = 0: campaign exists, but campaign score is below the first +1 threshold."
+    else:
+        score_explanations["F"] = f"F = +{group_f}: ASN campaign correlation passed the member and campaign-score gates."
+
+    if score != base_score + group_e:
+        score_explanations["final"] = f"Final score clamped from {base_score + group_e} into 0–100."
+    else:
+        score_explanations["final"] = "Final score is the sum of A+B+C+D+E+F with no clamp applied."
     if requests < 3 and group_a == 0 and group_b == 0 and group_e == 0:
         label = "unknown"
     elif hard_behavior or base_score >= 60:
@@ -117,6 +177,7 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "summary": summaries[label],
         "evidence": evidence,
         "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e, "correlation_f": group_f},
+        "score_explanations": score_explanations,
         "data_health": health,
         "confidence_factors": confidence_factors,
     }

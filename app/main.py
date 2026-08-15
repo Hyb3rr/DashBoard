@@ -23,15 +23,22 @@ from .services.profiles import (
     ensure_profile,
 )
 from .services.dispositions import set_disposition, STATES
+from .services.classification_watcher import run_classification_watcher
 from .collectors.websocket_collector import bus, collector
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await collector.start()
+    watcher = asyncio.create_task(run_classification_watcher())
     try:
         yield
     finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
         await collector.stop()
 
 
@@ -76,47 +83,59 @@ def health():
     return {"status": "ok", "mode": "read_only"}
 
 @app.get("/api/analytics/traffic")
-def traffic_analytics(range_key: str = Query("all", alias="range")):
-    """Return a bounded traffic timeline and top access dimensions."""
+def traffic_analytics(
+    range_key: str = Query("1h", alias="range"),
+    start: str | None = None,
+    end: str | None = None,
+    filter_type: str | None = None,
+    filter_value: str | None = None,
+    exclude: bool = False,
+):
+    """Aggregate one traffic event set for the Overview time window."""
     ranges = {
-        "30m": (30 * 60, 5 * 60, "30 minutes"),
-        "1h": (60 * 60, 10 * 60, "1 hour"),
-        "6h": (6 * 60 * 60, 30 * 60, "6 hours"),
-        "12h": (12 * 60 * 60, 60 * 60, "12 hours"),
-        "1d": (24 * 60 * 60, 2 * 60 * 60, "1 day"),
-        "3d": (3 * 24 * 60 * 60, 6 * 60 * 60, "3 days"),
-        "7d": (7 * 24 * 60 * 60, 12 * 60 * 60, "7 days"),
-        "30d": (30 * 24 * 60 * 60, 24 * 60 * 60, "30 days"),
+        "30m": (30 * 60, 5 * 60, "last 30 minutes"),
+        "1h": (60 * 60, 10 * 60, "last 1 hour"),
+        "6h": (6 * 60 * 60, 30 * 60, "last 6 hours"),
+        "12h": (12 * 60 * 60, 60 * 60, "last 12 hours"),
+        "1d": (24 * 60 * 60, 2 * 60 * 60, "last 24 hours"),
+        "3d": (3 * 24 * 60 * 60, 6 * 60 * 60, "last 3 days"),
+        "7d": (7 * 24 * 60 * 60, 12 * 60 * 60, "last 7 days"),
+        "30d": (30 * 24 * 60 * 60, 24 * 60 * 60, "last 30 days"),
     }
-    selected = ranges.get(range_key)
+    selected = ranges.get(range_key, ranges["1h"])
+    now = datetime.now(timezone.utc)
+    end_stamp = _parse_traffic_time(end) if end else now
+    if end_stamp is None or end_stamp > now:
+        end_stamp = now
+    start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=selected[0])
+    if start_stamp is None or end_stamp <= start_stamp:
+        raise HTTPException(400, "Invalid traffic time range")
+    bucket_seconds = selected[1]
+    range_label = "custom window" if start else selected[2]
+    range_name = "custom" if start else range_key
+    window_seconds = max(60, int((end_stamp - start_stamp).total_seconds()))
+    if start:
+        bucket_seconds = max(60, min(3600, window_seconds // 12))
+    if filter_type not in {None, "ip", "path", "country"} or (filter_type and not filter_value):
+        raise HTTPException(400, "Invalid traffic filter")
     conn = connect()
     try:
-        latest = conn.execute("SELECT MAX(timestamp) AS latest FROM events WHERE timestamp IS NOT NULL").fetchone()["latest"]
-        if not latest:
-            return {"series": [], "top_paths": [], "top_countries": [], "top_ips": [], "total_requests": 0, "range": range_key, "as_of": datetime.now(timezone.utc).isoformat()}
-        try:
-            latest_stamp = datetime.fromisoformat(str(latest).replace("Z", "+00:00"))
-            if latest_stamp.tzinfo is None:
-                latest_stamp = latest_stamp.replace(tzinfo=timezone.utc)
-            latest_stamp = latest_stamp.astimezone(timezone.utc)
-        except (TypeError, ValueError):
-            latest_stamp = datetime.now(timezone.utc)
-
-        where = "WHERE e.timestamp IS NOT NULL"
-        params: list[str] = []
-        if selected:
-            range_seconds, bucket_seconds, range_label = selected
-            latest_stamp = datetime.now(timezone.utc)
-            start_stamp = latest_stamp - timedelta(seconds=range_seconds)
-            where += " AND e.timestamp >= ? AND e.timestamp <= ?"
-            params.extend([start_stamp.isoformat(), latest_stamp.isoformat()])
-        else:
-            range_label = "all available events"
+        where = ["e.timestamp IS NOT NULL", "e.timestamp >= ?", "e.timestamp <= ?"]
+        params: list[str] = [start_stamp.isoformat(), end_stamp.isoformat()]
+        if filter_type == "ip":
+            where.append("e.src_ip != ?" if exclude else "e.src_ip = ?")
+            params.append(str(filter_value))
+        elif filter_type == "path":
+            where.append("e.path != ?" if exclude else "e.path = ?")
+            params.append(str(filter_value))
+        elif filter_type == "country":
+            where.append("COALESCE(p.country_code, '') != ?" if exclude else "p.country_code = ?")
+            params.append(str(filter_value).upper())
         rows = conn.execute(
             f"""
             SELECT e.timestamp, e.src_ip, e.path, e.status, p.country_code, p.country
             FROM events e LEFT JOIN ip_profiles p ON p.ip = e.src_ip
-            {where}
+            WHERE {' AND '.join(where)}
             ORDER BY e.timestamp ASC
             """,
             params,
@@ -130,27 +149,25 @@ def traffic_analytics(range_key: str = Query("all", alias="range")):
                 parsed.append((stamp.astimezone(timezone.utc), row))
             except (TypeError, ValueError):
                 continue
-        if not parsed:
-            return {"series": [], "top_paths": [], "top_countries": [], "top_ips": [], "total_requests": 0, "range": range_key, "range_label": range_label, "as_of": datetime.now(timezone.utc).isoformat()}
-        if not selected:
-            span_seconds = (parsed[-1][0] - parsed[0][0]).total_seconds()
-            bucket_seconds = 3600 if span_seconds > 7 * 86400 else 900
-            start_stamp = parsed[0][0]
-            range_label = "all available events"
-        bucket_count = max(1, (int((selected[0] if selected else max(1, (parsed[-1][0] - parsed[0][0]).total_seconds())) + bucket_seconds - 1) // bucket_seconds))
-        grid_start = (start_stamp.timestamp() // bucket_seconds) * bucket_seconds
-        bucket_starts = [datetime.fromtimestamp(grid_start + i * bucket_seconds, timezone.utc) for i in range(bucket_count)]
+        grid_start = datetime.fromtimestamp((start_stamp.timestamp() // bucket_seconds) * bucket_seconds, timezone.utc)
+        bucket_count = max(1, int((end_stamp.timestamp() - grid_start.timestamp()) // bucket_seconds) + 1)
+        bucket_starts = [grid_start + timedelta(seconds=i * bucket_seconds) for i in range(bucket_count)]
         buckets = {stamp.isoformat().replace("+00:00", "Z"): {"requests": 0, "errors": 0} for stamp in bucket_starts}
         paths, countries, ips = Counter(), Counter(), Counter()
+        status_codes = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
         path_ips, country_ips = defaultdict(set), defaultdict(set)
         for stamp, row in parsed:
-            index = int((stamp.timestamp() - grid_start) // bucket_seconds)
+            index = int((stamp.timestamp() - grid_start.timestamp()) // bucket_seconds)
             index = max(0, min(bucket_count - 1, index))
             bucket = bucket_starts[index]
             item = buckets[bucket.isoformat().replace("+00:00", "Z")]
             item["requests"] += 1
-            if int(row["status"] or 0) >= 400:
+            status = int(row["status"] or 0)
+            if status >= 400:
                 item["errors"] += 1
+            family = f"{status // 100}xx"
+            if family in status_codes:
+                status_codes[family] += 1
             if row["path"]:
                 path = str(row["path"])
                 paths[path] += 1
@@ -164,13 +181,20 @@ def traffic_analytics(range_key: str = Query("all", alias="range")):
         return {
             "series": series,
             "bucket": f"{bucket_seconds // 60}min" if bucket_seconds < 3600 else f"{bucket_seconds // 3600}h",
-            "range": range_key,
+            "range": range_name,
             "range_label": range_label,
+            "start": start_stamp.isoformat(),
+            "end": end_stamp.isoformat(),
+            "status_codes": status_codes,
             "top_paths": [{"path": key, "requests": value, "ips": sorted(path_ips[key])} for key, value in paths.most_common(8)],
             "top_countries": [{"country_code": key[0], "country": key[1], "requests": value, "ips": sorted(country_ips[key])} for key, value in countries.most_common(8)],
             "top_ips": [{"ip": key, "requests": value} for key, value in ips.most_common(8)],
             "total_requests": len(parsed),
-            "as_of": datetime.now(timezone.utc).isoformat(),
+            "error_requests": sum(item["errors"] for item in buckets.values()),
+            "unique_ips": len(ips),
+            "unique_countries": len(countries),
+            "filter": {"type": filter_type, "value": filter_value, "exclude": bool(exclude)} if filter_type else None,
+            "as_of": now.isoformat(),
         }
     finally:
         conn.close()
@@ -186,6 +210,8 @@ def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str 
     seconds = ranges.get(range_key, ranges["1h"])
     now = datetime.now(timezone.utc)
     end_stamp = _parse_traffic_time(end) if end else now
+    if end_stamp is None or end_stamp > now:
+        end_stamp = now
     start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=seconds)
     if not start_stamp or not end_stamp or end_stamp <= start_stamp:
         raise HTTPException(400, "Invalid traffic time range")
@@ -712,13 +738,12 @@ def _build_ip_items(conn, only_ips: set[str] | None = None):
         item["provider_status"] = decode(item.pop("provider_status_json"))
         item["field_sources"] = decode(item.pop("field_sources_json"))
         item["effective_risk_score"], item["effective_risk_level"] = effective_risk(item["profile_risk_score"], item["behavior_score"])
+        # Keep Overview classification identical to IP Detail.  The detail
+        # endpoint classifies from the durable observation totals; passing the
+        # empty recent window here made the same IP appear as threat 0.
         observation = {
             "behavior_score": item["behavior_score"],
-            "recent_behavior_score": item["behavior_score_recent"] if item["recent_updated_at"] else item["behavior_score"],
             "requests": item["requests"],
-            "recent_requests": item["recent_requests"] if item["recent_updated_at"] else item["requests"],
-            "recent_sensitive_probe_requests": item["recent_sensitive_probe_requests"] if item["recent_updated_at"] else item["sensitive_probe_requests"],
-            "recent_first_seen": item["recent_first_seen"],
             "status_4xx": item["status_4xx"],
             "status_5xx": item["status_5xx"],
             "unique_paths": item["unique_paths"],

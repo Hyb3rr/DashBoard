@@ -178,6 +178,16 @@ CREATE TABLE IF NOT EXISTS ip_change_log (
 );
 CREATE INDEX IF NOT EXISTS idx_ip_change_log_seq ON ip_change_log(seq);
 
+CREATE TABLE IF NOT EXISTS ip_classification_state (
+  ip TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  score INTEGER NOT NULL,
+  confidence INTEGER,
+  updated_at TEXT NOT NULL,
+  last_alert_at TEXT,
+  last_alert_label TEXT
+);
+
 CREATE TABLE IF NOT EXISTS ip_clusters (
   cluster_id TEXT PRIMARY KEY,
   asn TEXT,
