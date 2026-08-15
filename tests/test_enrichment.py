@@ -391,11 +391,12 @@ def test_import_apache_lines_builds_observations(tmp_path, monkeypatch):
     conn.close()
 
     assert result["parsed"] == 2
-    assert result["inserted"] == 1
-    assert result["duplicates"] == 1
-    assert obs["requests"] == 1
-    assert obs["status_4xx"] == 1
-    assert obs["wp_login_requests"] == 1
+    # Same content at distinct file offsets represents two real requests.
+    assert result["inserted"] == 2
+    assert result["duplicates"] == 0
+    assert obs["requests"] == 2
+    assert obs["status_4xx"] == 2
+    assert obs["wp_login_requests"] == 2
 
 
 def test_window_features_use_utc_minutes_and_separate_sensitive_login(tmp_path, monkeypatch):
@@ -432,6 +433,7 @@ def test_ai_score_insufficient_data_clears_stale_snapshot(tmp_path, monkeypatch)
     from app.ai.detector import score_import
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "hub.db")
+    monkeypatch.setattr("app.ai.detector.load_model_bundle", lambda: None)
     conn = db.connect()
     conn.execute(
         "INSERT INTO ip_ai_scores (ip,windows_seen,anomalous_windows,ai_anomaly_score,model_mode,scored_at) VALUES (?,?,?,?,?,?)",

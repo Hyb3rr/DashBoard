@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS ip_observations (
   behavior_level TEXT NOT NULL DEFAULT 'low',
   behavior_evidence_json TEXT NOT NULL DEFAULT '[]',
   detections_json TEXT NOT NULL DEFAULT '[]',
+  detections_recent_json TEXT NOT NULL DEFAULT '[]',
+  ruleset_hash TEXT,
+  evaluated_at TEXT,
   recent_first_seen TEXT,
   recent_last_seen TEXT,
   recent_requests INTEGER NOT NULL DEFAULT 0,
@@ -187,6 +190,36 @@ CREATE TABLE IF NOT EXISTS ip_classification_state (
   last_alert_at TEXT,
   last_alert_label TEXT
 );
+
+CREATE TABLE IF NOT EXISTS change_consumer_state (
+  consumer_id TEXT PRIMARY KEY,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS rule_firing_state (
+  ip TEXT NOT NULL,
+  rule_id TEXT NOT NULL,
+  ruleset_hash TEXT NOT NULL,
+  first_fired_at TEXT NOT NULL,
+  last_fired_at TEXT NOT NULL,
+  last_seen_seq INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip, rule_id)
+);
+
+CREATE TABLE IF NOT EXISTS alert_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alert_outbox_due ON alert_outbox(status, next_retry_at);
 
 CREATE TABLE IF NOT EXISTS ip_clusters (
   cluster_id TEXT PRIMARY KEY,
@@ -313,6 +346,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "behavior_evidence_recent_json": "TEXT NOT NULL DEFAULT '[]'",
         "recent_updated_at": "TEXT",
         "detections_json": "TEXT NOT NULL DEFAULT '[]'",
+        "detections_recent_json": "TEXT NOT NULL DEFAULT '[]'",
+        "ruleset_hash": "TEXT",
+        "evaluated_at": "TEXT",
     }.items():
         if column not in observation_columns:
             conn.execute(f"ALTER TABLE ip_observations ADD COLUMN {column} {definition}")

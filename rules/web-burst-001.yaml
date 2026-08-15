@@ -1,0 +1,15 @@
+id: WEB-BURST-001
+name: Minute request burst
+severity: high
+points: 20
+rule_type: anomaly
+mitre_technique:
+window: 1h
+description: Burst above 100 requests per minute
+false_positive_notes: [Legitimate batch clients]
+version: 1
+enabled: true
+condition:
+  field: peak_requests_1m
+  operator: gte
+  value: 100

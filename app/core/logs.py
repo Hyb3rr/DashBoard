@@ -10,7 +10,8 @@ import sqlite3
 
 from .db import encode
 from .buckets import bucket_sums, trim_buckets, upsert_buckets
-from .rules import BehaviorContext, run_rules
+from .rules import BehaviorContext, run_rules, ruleset_hash
+from .change_feed import append_ip_changes
 from ..ai.detector import score_import
 
 APACHE_COMBINED = re.compile(
@@ -62,30 +63,6 @@ def parse_apache_combined(line: str) -> dict | None:
         "referer": None if data["referer"] == "-" else data["referer"],
         "user_agent": None if data["ua"] == "-" else data["ua"],
     }
-
-
-def _behavior_risk(ctx: BehaviorContext) -> tuple[int, str, list[str]]:
-    score = 0
-    evidence: list[str] = []
-    requests = ctx.requests
-    if ctx.sensitive_probe_requests > 0:
-        score += 50
-        evidence.append("Sensitive path probing (+50)")
-    if ctx.wp_login_requests > 20:
-        score += 30
-        evidence.append("wp-login burst (+30)")
-    if requests >= 20 and (ctx.status_4xx / requests) > 0.5:
-        score += 15
-        evidence.append("4xx ratio above 50% (+15)")
-    if ctx.unique_paths > 80:
-        score += 15
-        evidence.append("High unique path count (+15)")
-    if ctx.bot_requests and ctx.status_4xx > 10:
-        score += 10
-        evidence.append("Bot with repeated errors")
-    score = min(score, 100)
-    level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
-    return score, level, evidence
 
 
 def _rule_score(ctx: BehaviorContext) -> tuple[int, str, list, list[dict]]:
@@ -163,19 +140,19 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
             wp_login_requests=recent["wp_login_requests"], sensitive_probe_requests=recent["sensitive_probe_requests"],
             bot_requests=recent["bot_requests"], first_seen=recent["first_seen"], last_seen=recent["last_seen"],
         ) if recent else None
-        recent_score, recent_level, recent_evidence, _ = _rule_score(recent_ctx) if recent_ctx else (0, "low", [], [])
+        recent_score, recent_level, recent_evidence, recent_detections = _rule_score(recent_ctx) if recent_ctx else (0, "low", [], [])
         conn.execute(
             """
             INSERT OR REPLACE INTO ip_observations
               (ip,first_seen,last_seen,requests,status_2xx,status_3xx,status_4xx,status_5xx,
                unique_paths,wp_login_requests,sensitive_probe_requests,bot_requests,
                behavior_score,behavior_level,behavior_evidence_json,
-               detections_json,
+               detections_json,detections_recent_json,ruleset_hash,evaluated_at,
                recent_first_seen,recent_last_seen,recent_requests,recent_status_2xx,recent_status_3xx,
                recent_status_4xx,recent_status_5xx,recent_unique_paths,recent_wp_login_requests,
                recent_sensitive_probe_requests,recent_bot_requests,behavior_score_recent,
                behavior_level_recent,behavior_evidence_recent_json,recent_updated_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 ip,
@@ -193,6 +170,9 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
                 level,
                 encode(evidence),
                 encode(detections),
+                encode(recent_detections),
+                ruleset_hash(),
+                now,
                 recent["first_seen"] if recent else None,
                 recent["last_seen"] if recent else None,
                 recent["requests"] if recent else 0,
@@ -217,10 +197,7 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
         ).fetchone()
         new_behavior = tuple(new_row[column] for column in behavior_columns)
         if old_behavior != new_behavior:
-            conn.execute(
-                "INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, 'behavior', ?)",
-                (ip, now),
-            )
+            append_ip_changes(conn, (ip,), "behavior", now)
     trim_buckets(conn)
 
 
@@ -239,8 +216,11 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
     inserted = 0
     skipped = 0
     now = _now()
+    offset = 0
     for line in lines:
         raw = line.rstrip("\n")
+        line_offset = offset
+        offset += len(line.encode("utf-8"))
         if not raw:
             continue
         event = parse_apache_combined(raw)
@@ -248,12 +228,12 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
             skipped += 1
             continue
         parsed += 1
-        line_hash = hashlib.sha256(f"{source}\0{raw}".encode()).hexdigest()
+        line_hash = hashlib.sha256(f"{source}\0{line_offset}\0{raw}".encode()).hexdigest()
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO events
-              (source,line_hash,raw_line,timestamp,src_ip,method,path,status,bytes_sent,referer,user_agent,imported_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+              (source,line_hash,raw_line,timestamp,src_ip,method,path,status,bytes_sent,referer,user_agent,source_offset,imported_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 source,
@@ -266,7 +246,7 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
                 event["status"],
                 event["bytes_sent"],
                 event["referer"],
-                event["user_agent"],
+                event["user_agent"], line_offset,
                 now,
             ),
         )

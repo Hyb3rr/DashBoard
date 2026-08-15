@@ -1,0 +1,15 @@
+id: WEB-RATE-001
+name: Sustained request rate
+severity: medium
+points: 10
+rule_type: anomaly
+mitre_technique:
+window: 1h
+description: Sustained rate above 100 requests per 5 minutes
+false_positive_notes: [Traffic spikes]
+version: 1
+enabled: true
+condition:
+  field: peak_requests_5m
+  operator: gte
+  value: 100

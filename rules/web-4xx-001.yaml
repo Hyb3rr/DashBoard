@@ -1,0 +1,19 @@
+id: WEB-4XX-001
+name: Repeated client errors
+severity: medium
+points: 15
+rule_type: anomaly
+mitre_technique:
+window: 24h
+description: 4xx ratio above 50 percent
+false_positive_notes: [Broken clients, stale links]
+version: 1
+enabled: true
+condition:
+  all:
+    - field: requests
+      operator: gte
+      value: 20
+    - field: status_4xx_ratio
+      operator: gt
+      value: 0.5

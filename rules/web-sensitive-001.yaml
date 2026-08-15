@@ -1,0 +1,15 @@
+id: WEB-SENSITIVE-001
+name: Sensitive path probing
+severity: high
+points: 50
+rule_type: technique
+mitre_technique: T1595.003
+window: 24h
+description: Sensitive path probing
+false_positive_notes: [Legitimate security testing]
+version: 1
+enabled: true
+condition:
+  field: sensitive_probe_requests
+  operator: gt
+  value: 0

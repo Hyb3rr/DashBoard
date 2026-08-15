@@ -1,0 +1,19 @@
+id: WEB-BOT-001
+name: Bot repeated errors
+severity: low
+points: 10
+rule_type: anomaly
+mitre_technique:
+window: 24h
+description: Bot with repeated client errors
+false_positive_notes: [Unwanted but harmless crawlers]
+version: 1
+enabled: true
+condition:
+  all:
+    - field: bot_requests
+      operator: gt
+      value: 0
+    - field: status_4xx
+      operator: gt
+      value: 10

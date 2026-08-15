@@ -11,8 +11,9 @@ import socket
 
 from ..core.db import decode, encode, region_profile
 from ..core.enrichment import lookup
-from ..core.intelligence import classify_ip
 from ..core.correlation import cluster_for_ip
+from ..core.intelligence import classify_ip
+from .classification import build_classification_snapshot
 
 
 def profile_from_row(row):
@@ -61,13 +62,14 @@ def ai_profile_for_ip(conn, ip: str | None) -> dict | None:
 
 
 def attach_region_and_classification(conn, data: dict, observation: dict | None = None) -> dict:
-    region = region_profile(conn, data.get("country_code"))
+    snapshot = build_classification_snapshot(conn, data["ip"]) if data.get("ip") else None
+    region = snapshot.region if snapshot else region_profile(conn, data.get("country_code"))
     if region:
         data["region_profile"] = region
-    ai_profile = ai_profile_for_ip(conn, data.get("ip"))
+    ai_profile = snapshot.ai_profile if snapshot else ai_profile_for_ip(conn, data.get("ip"))
     if ai_profile:
         data["ai_profile"] = ai_profile
-    cluster = cluster_for_ip(conn, data.get("ip"))
+    cluster = snapshot.cluster if snapshot else cluster_for_ip(conn, data.get("ip"))
     if cluster:
         data["cluster"] = cluster
     if observation is not None and data.get("ip"):
@@ -83,7 +85,7 @@ def attach_region_and_classification(conn, data: dict, observation: dict | None 
                 observation["rule_coverage"] = observation["bucket_history_hours"] >= 24
             except ValueError:
                 pass
-    classification = classify_ip(data, observation, region, ai_profile, cluster)
+    classification = snapshot.classification if snapshot else classify_ip(data, observation, region, ai_profile, cluster)
     data["data_health"] = classification["data_health"]
     from .dispositions import ensure_disposition
     data["disposition"] = ensure_disposition(conn, data["ip"], classification["label"])

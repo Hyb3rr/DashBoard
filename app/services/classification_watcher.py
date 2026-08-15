@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import json
 import logging
 
-from ..core.correlation import cluster_for_ip
-from ..core.db import connect, decode, region_profile
-from ..core.intelligence import classify_ip
-from .profiles import ai_profile_for_ip, classification_observation, profile_from_row
-from .telegram import cooldown_seconds, format_bad_alert, send_message
+from ..core.db import connect
+from ..core.change_feed import append_ip_changes
+from ..core.rules import ruleset_hash
+from .classification import build_classification_snapshot
+from .telegram import cooldown_seconds, enabled as telegram_enabled, format_bad_alert, send_message
 
 logger = logging.getLogger(__name__)
 WATCH_INTERVAL_SECONDS = 5
@@ -34,18 +35,94 @@ def _cursor(conn) -> int:
     return int(conn.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM ip_change_log").fetchone()["seq"])
 
 
+CONSUMER_ID = "classification_watcher"
+
+
+def _consumer_cursor(conn) -> int:
+    row = conn.execute("SELECT last_seq FROM change_consumer_state WHERE consumer_id=?", (CONSUMER_ID,)).fetchone()
+    if row:
+        return int(row["last_seq"])
+    current = _cursor(conn)
+    conn.execute(
+        "INSERT INTO change_consumer_state(consumer_id,last_seq,updated_at,status) VALUES (?,?,?,'active')",
+        (CONSUMER_ID, current, _now().isoformat()),
+    )
+    conn.commit()
+    return current
+
+
+def _save_consumer_cursor(conn, cursor: int, status: str = "active") -> None:
+    conn.execute(
+        "UPDATE change_consumer_state SET last_seq=?, updated_at=?, status=? WHERE consumer_id=?",
+        (cursor, _now().isoformat(), status, CONSUMER_ID),
+    )
+
+
+def _enqueue_alert(conn, ip: str, message: str, now: datetime) -> None:
+    existing = conn.execute(
+        "SELECT id FROM alert_outbox WHERE ip=? AND event_type='classification_bad' AND status IN ('pending','sending') LIMIT 1",
+        (ip,),
+    ).fetchone()
+    if not existing:
+        conn.execute(
+            """INSERT INTO alert_outbox
+               (ip,event_type,payload_json,status,attempts,next_retry_at,created_at)
+               VALUES (?, 'classification_bad', ?, 'pending', 0, ?, ?)""",
+            (ip, json.dumps({"message": message}), now.isoformat(), now.isoformat()),
+        )
+
+
+def _record_rule_firings(conn, ip: str, classification: dict, seq: int, now: datetime) -> None:
+    for detection in classification.get("detections_recent", []):
+        rule_id = detection.get("id")
+        if not rule_id:
+            continue
+        conn.execute(
+            """INSERT INTO rule_firing_state
+               (ip,rule_id,ruleset_hash,first_fired_at,last_fired_at,last_seen_seq)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(ip,rule_id) DO UPDATE SET ruleset_hash=excluded.ruleset_hash,
+                 last_fired_at=excluded.last_fired_at,last_seen_seq=excluded.last_seen_seq""",
+            (ip, rule_id, ruleset_hash(), now.isoformat(), now.isoformat(), seq),
+        )
+
+
+async def _deliver_outbox() -> None:
+    if not telegram_enabled():
+        return
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM alert_outbox WHERE status='pending' AND next_retry_at<=? ORDER BY id LIMIT 10",
+            (_now().isoformat(),),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        delivered = await send_message(payload["message"])
+        conn = connect()
+        try:
+            if delivered:
+                conn.execute("UPDATE alert_outbox SET status='delivered', delivered_at=? WHERE id=?", (_now().isoformat(), row["id"]))
+                _mark_alert_delivered(conn, row["ip"], _now())
+            else:
+                attempts = int(row["attempts"]) + 1
+                if attempts >= 8:
+                    conn.execute("UPDATE alert_outbox SET status='failed', attempts=? WHERE id=?", (attempts, row["id"]))
+                    _clear_alert_pending(conn, row["ip"])
+                else:
+                    retry_at = _now().timestamp() + min(3600, 2 ** min(attempts, 10))
+                    retry_iso = datetime.fromtimestamp(retry_at, timezone.utc).isoformat()
+                    conn.execute("UPDATE alert_outbox SET attempts=?, next_retry_at=? WHERE id=?", (attempts, retry_iso, row["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _classification_for_ip(conn, ip: str):
-    observation_row = conn.execute("SELECT * FROM ip_observations WHERE ip=?", (ip,)).fetchone()
-    profile_row = conn.execute("SELECT * FROM ip_profiles WHERE ip=?", (ip,)).fetchone()
-    observation = classification_observation(dict(observation_row)) if observation_row else {}
-    if observation_row:
-        observation["behavior_evidence"] = decode(observation_row["behavior_evidence_json"])
-    profile = profile_from_row(profile_row) if profile_row else {"ip": ip}
-    region = region_profile(conn, profile.get("country_code")) or {}
-    ai_profile = ai_profile_for_ip(conn, ip)
-    cluster = cluster_for_ip(conn, ip)
-    classification = classify_ip(profile, observation, region, ai_profile, cluster)
-    return classification, profile, observation
+    snapshot = build_classification_snapshot(conn, ip)
+    return snapshot.classification, snapshot.profile, snapshot.observation
 
 
 def _record_state(conn, ip: str, classification: dict, now: datetime) -> bool:
@@ -104,24 +181,27 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
     stop_event = stop_event or asyncio.Event()
     conn = connect()
     try:
-        cursor = _cursor(conn)
+        cursor = _consumer_cursor(conn)
     finally:
         conn.close()
     while not stop_event.is_set():
-        alerts = []
         conn = connect()
         try:
-            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT seq, ip FROM ip_change_log WHERE seq>? ORDER BY seq",
+                "SELECT seq, ip FROM ip_change_log WHERE seq>? ORDER BY seq LIMIT 500",
                 (cursor,),
             ).fetchall()
             if rows:
                 next_cursor = max(int(row["seq"]) for row in rows)
                 for ip in dict.fromkeys(row["ip"] for row in rows):
                     classification, profile, observation = _classification_for_ip(conn, ip)
-                    if _record_state(conn, ip, classification, _now()):
-                        alerts.append((ip, classification, profile, observation))
+                    _record_rule_firings(conn, ip, classification, next_cursor, _now())
+                    alert = _record_state(conn, ip, classification, _now())
+                    if alert and telegram_enabled():
+                        _enqueue_alert(conn, ip, format_bad_alert(ip, classification, profile, observation), _now())
+                    elif alert:
+                        _clear_alert_pending(conn, ip)
+                _save_consumer_cursor(conn, next_cursor)
                 conn.commit()
                 cursor = next_cursor
         except Exception:
@@ -129,19 +209,7 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
             logger.exception("Classification watcher cycle failed")
         finally:
             conn.close()
-        for ip, classification, profile, observation in alerts:
-            async def deliver(ip=ip, classification=classification, profile=profile, observation=observation):
-                delivered = await send_message(format_bad_alert(ip, classification, profile, observation))
-                conn = connect()
-                try:
-                    if delivered:
-                        _mark_alert_delivered(conn, ip, _now())
-                    else:
-                        _clear_alert_pending(conn, ip)
-                    conn.commit()
-                finally:
-                    conn.close()
-            asyncio.create_task(deliver())
+        await _deliver_outbox()
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=WATCH_INTERVAL_SECONDS)
         except asyncio.TimeoutError:

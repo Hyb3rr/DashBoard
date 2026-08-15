@@ -1,0 +1,15 @@
+id: WEB-BRUTE-001
+name: WordPress login burst
+severity: high
+points: 30
+rule_type: technique
+mitre_technique: T1110.001
+window: 24h
+description: WordPress login burst
+false_positive_notes: [Administrator login testing]
+version: 1
+enabled: true
+condition:
+  field: wp_login_requests
+  operator: gt
+  value: 20

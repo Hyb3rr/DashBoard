@@ -15,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 
 from ..config.settings import AI_MODEL_PATH, PROJECT_DIR
 from ..core.db import decode, encode
+from ..core.change_feed import append_ip_changes
 from .features import FEATURE_COLUMNS, build_window_features
 
 MODEL_KEY = "isolation_forest_v1"
@@ -219,7 +220,7 @@ def expire_inactive_scores(conn, now: datetime | None = None) -> int:
                anomalous_windows=0, score_reason='inactivity_expired', scored_at=? WHERE ip=?""",
             (row["ai_anomaly_score"], -int(row["ai_anomaly_score"] or 0), _iso(now), row["ip"]),
         )
-        conn.execute("INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, 'ai', ?)", (row["ip"], _iso(now)))
+        append_ip_changes(conn, (row["ip"],), "ai", _iso(now))
     return len(rows)
 
 
@@ -331,7 +332,7 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
              confidence, confidence_level, previous_score, delta, reason, last_window, bundle["model_version"]),
         )
         if old_tuple != new_tuple:
-            conn.execute("INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, 'ai', ?)", (ip, scored_at))
+            append_ip_changes(conn, (ip,), "ai", scored_at)
             changed += 1
 
     _trim_change_log(conn)

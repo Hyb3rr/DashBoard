@@ -24,6 +24,8 @@ from .services.profiles import (
 )
 from .services.dispositions import set_disposition, STATES
 from .services.classification_watcher import run_classification_watcher
+from .services.classification import build_classification_snapshot
+from .core.rules import ruleset_hash
 from .collectors.websocket_collector import bus, collector
 
 
@@ -343,6 +345,37 @@ async def ip_details(ip: str, refresh: bool = False):
     return data
 
 
+@app.get("/api/ip/{ip}/attack")
+def ip_attack(ip: str, window: str = Query("24h")):
+    """Return recent observed detections and their explicit techniques."""
+    try:
+        address = str(ipaddress.ip_address(ip))
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid IP address") from exc
+    if window not in {"1h", "24h"}:
+        raise HTTPException(400, "Unsupported attack window")
+    conn = connect()
+    try:
+        snapshot = build_classification_snapshot(conn, address)
+        detections = snapshot.observation.get("detections_recent", [])
+        techniques = []
+        seen = set()
+        for detection in detections:
+            technique = detection.get("mitre_technique")
+            if technique and technique not in seen:
+                seen.add(technique)
+                techniques.append({"id": technique, "detection_ids": [detection.get("id")]})
+        return {
+            "ip": address,
+            "window": window,
+            "ruleset_hash": ruleset_hash(),
+            "detections": detections,
+            "techniques": techniques,
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/api/ip/{ip}/disposition")
 def update_ip_disposition(ip: str, payload: dict = Body(...)):
     try:
@@ -360,8 +393,7 @@ def update_ip_disposition(ip: str, payload: dict = Body(...)):
         if row:
             item = dict(row)
             if profile:
-                profile_data = dict(profile)
-                label = classify_ip(profile_data, item).get("label")
+                label = build_classification_snapshot(conn, address).classification.get("label")
         result = set_disposition(conn, address, state, payload.get("assigned_to"), payload.get("note"), payload.get("actor") or "system", label)
         return result
     finally:
@@ -421,8 +453,7 @@ def region_demand_signal(limit: int = 50):
             item["behavior_evidence"] = decode(item.pop("behavior_evidence_json", "[]"))
             code = item["country_code"]
             region = region_profile(conn, code) or {"country_code": code, "country_name": item.get("country") or code}
-            ai_profile = ai_profile_for_ip(conn, item.get("ip"))
-            classification = classify_ip(item, classification_observation(item), region, ai_profile)
+            classification = build_classification_snapshot(conn, item["ip"]).classification
             entry = aggregates.setdefault(code, {
                 "country_code": code,
                 "country_name": region.get("country_name") or item.get("country") or code,

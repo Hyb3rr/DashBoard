@@ -1,3 +1,0 @@
-[http] new.baquan.click:80 - User 'admin' - Pass '123456,password,admin,letmein,12345,123456789,admin123,password123,qwerty' - SUCCESS [Banner: cloudflare]
-[http] new.baquan.click:80 - User 'admin' - Pass 'password' - SUCCESS [Banner: cloudflare]
-[http] new.baquan.click:80 - User 'admin' - Pass '123456' - SUCCESS [Banner: cloudflare]

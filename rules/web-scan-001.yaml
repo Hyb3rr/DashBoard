@@ -1,0 +1,15 @@
+id: WEB-SCAN-001
+name: High path cardinality
+severity: medium
+points: 15
+rule_type: technique
+mitre_technique: T1595.003
+window: 24h
+description: Broad web content enumeration
+false_positive_notes: [Search crawlers]
+version: 1
+enabled: true
+condition:
+  field: unique_paths
+  operator: gt
+  value: 80

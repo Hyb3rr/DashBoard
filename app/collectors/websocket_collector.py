@@ -16,6 +16,7 @@ from ..core.db import connect
 from ..core.buckets import trim_buckets, upsert_buckets
 from ..core.correlation import asn_clusters
 from ..core.logs import parse_apache_combined, rebuild_observations_for_ips
+from ..core.change_feed import append_ip_changes
 from ..services.profiles import ensure_profile, refresh_due_profiles
 
 
@@ -429,8 +430,8 @@ class WebSocketCollector:
             upsert_buckets(conn, parsed_inserted)
             rebuild_observations_for_ips(conn, tuple(affected))
             trim_buckets(conn)
+            append_ip_changes(conn, sorted(affected), "traffic", now)
             for ip in sorted(affected):
-                conn.execute("INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, ?, ?)", (ip, "traffic", now))
                 if not conn.execute("SELECT 1 FROM ip_profiles WHERE ip = ?", (ip,)).fetchone():
                     new_ips.append(ip)
             trim_change_log(conn)
@@ -459,7 +460,7 @@ class WebSocketCollector:
                 data, error = await ensure_profile(conn, ip)
                 if data:
                     now = utc_now()
-                    conn.execute("INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (?, ?, ?)", (ip, "enrichment", now))
+                    append_ip_changes(conn, (ip,), "enrichment", now)
                     trim_change_log(conn)
                     conn.commit()
                     cursor = conn.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM ip_change_log").fetchone()["seq"]

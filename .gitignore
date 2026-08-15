@@ -8,3 +8,7 @@ data/*.db-shm
 data/*.db-wal
 data/*
 *.mmdb
+brutespray-checkpoint.json
+brutespray-checkpoint.jsonl
+brutespray-output/
+passwords.txt
