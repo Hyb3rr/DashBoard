@@ -1,0 +1,1 @@
+{"rule_id":"WEB-4XX-001","context":{"requests":20,"status_4xx":10},"expect":false}

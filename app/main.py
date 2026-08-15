@@ -13,19 +13,18 @@ from datetime import datetime, timedelta, timezone
 from .config.settings import APP_DIR
 from .core.db import connect, decode, region_profile
 from .core.logs import effective_risk
-from .core.intelligence import classify_ip
 from .core.correlation import asn_clusters, cluster_for_ip
 from .tools.calibration import csv_text
 from .services.profiles import (
     attach_region_and_classification,
     ai_profile_for_ip,
-    classification_observation,
     ensure_profile,
 )
 from .services.dispositions import set_disposition, STATES
 from .services.classification_watcher import run_classification_watcher
-from .services.classification import build_classification_snapshot
-from .core.rules import ruleset_hash
+from .services.classification import build_classification_snapshot, detection_snapshot
+from .services.coverage import coverage_matrix, run_coverage_consumer
+from .core.rules import ruleset_hash, ruleset_health
 from .collectors.websocket_collector import bus, collector
 
 
@@ -33,12 +32,18 @@ from .collectors.websocket_collector import bus, collector
 async def lifespan(_app: FastAPI):
     await collector.start()
     watcher = asyncio.create_task(run_classification_watcher())
+    coverage = asyncio.create_task(run_coverage_consumer())
     try:
         yield
     finally:
         watcher.cancel()
+        coverage.cancel()
         try:
             await watcher
+        except asyncio.CancelledError:
+            pass
+        try:
+            await coverage
         except asyncio.CancelledError:
             pass
         await collector.stop()
@@ -82,7 +87,15 @@ def region_profile_page(country_code: str):
 @app.get("/health")
 def health():
     connect().close()
-    return {"status": "ok", "mode": "read_only"}
+    rules_health = ruleset_health()
+    return {"status": "ok" if rules_health["status"] == "ok" else "degraded", "mode": "read_only", "rules": rules_health}
+
+
+@app.get("/api/coverage/rules")
+def rule_coverage(window: str = Query("24h")):
+    if window not in {"1h", "24h"}:
+        raise HTTPException(400, "Unsupported coverage window")
+    return {"window": window, "rules": coverage_matrix(window)}
 
 @app.get("/api/analytics/traffic")
 def traffic_analytics(
@@ -356,19 +369,22 @@ def ip_attack(ip: str, window: str = Query("24h")):
         raise HTTPException(400, "Unsupported attack window")
     conn = connect()
     try:
-        snapshot = build_classification_snapshot(conn, address)
-        detections = snapshot.observation.get("detections_recent", [])
+        persisted = detection_snapshot(conn, address, window)
+        detections = persisted["detections"]
         techniques = []
-        seen = set()
+        by_technique = {}
         for detection in detections:
             technique = detection.get("mitre_technique")
-            if technique and technique not in seen:
-                seen.add(technique)
-                techniques.append({"id": technique, "detection_ids": [detection.get("id")]})
+            if technique:
+                item = by_technique.setdefault(technique, {"id": technique, "detection_ids": []})
+                if detection.get("id") not in item["detection_ids"]:
+                    item["detection_ids"].append(detection.get("id"))
+        techniques = list(by_technique.values())
         return {
             "ip": address,
             "window": window,
-            "ruleset_hash": ruleset_hash(),
+            "ruleset_hash": persisted["ruleset_hash"],
+            "evaluated_at": persisted["evaluated_at"],
             "detections": detections,
             "techniques": techniques,
         }

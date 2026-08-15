@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+import json
 
 from app.core import db
 from app.core.buckets import bucket_sums, upsert_buckets
@@ -43,6 +44,25 @@ def test_observation_score_matches_persisted_detection_points(tmp_path, monkeypa
     detections = json.loads(row["detections_json"])
     assert row["behavior_score"] == min(sum(item["points"] for item in detections), 100)
     assert row["behavior_score"] == 50
+    conn.close()
+
+
+def test_windowed_detections_do_not_leak_old_burst_into_one_hour(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "hub.db")
+    monkeypatch.setattr(db, "REGION_SEED_PATH", tmp_path / "missing.seed.json")
+    conn = db.connect()
+    old = (datetime.now(timezone.utc) - timedelta(hours=23)).replace(second=0, microsecond=0)
+    upsert_buckets(conn, [
+        {"src_ip": "198.51.100.20", "timestamp": old.isoformat(), "path": f"/scan/{i}", "status": 404, "user_agent": "curl"}
+        for i in range(100)
+    ])
+    rebuild_observations(conn)
+    row = conn.execute("SELECT detections_1h_json,detections_24h_json FROM ip_observations WHERE ip=?", ("198.51.100.20",)).fetchone()
+    one_hour = {item["id"] for item in json.loads(row["detections_1h_json"])}
+    day = {item["id"] for item in json.loads(row["detections_24h_json"])}
+    assert "WEB-BURST-001" not in one_hour
+    assert "WEB-BURST-001" not in day
+    assert "WEB-SCAN-001" in day
     conn.close()
 
 

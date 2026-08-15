@@ -1,0 +1,1 @@
+{"rule_id":"WEB-SENSITIVE-001","context":{"sensitive_probe_requests":1},"expect":true}

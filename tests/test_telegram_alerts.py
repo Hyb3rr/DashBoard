@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import asyncio
 
 from app.core import db
 from app.core.logs import import_apache_lines
-from app.services.classification_watcher import _mark_alert_delivered, _record_state
+from app.services.classification_watcher import _deliver_outbox, _mark_alert_delivered, _record_state
 from app.services.telegram import format_bad_alert
 
 
@@ -62,3 +63,31 @@ def test_bad_alert_contains_score_reasons():
     assert "198.51.100.9" in message
     assert "behavior overrides trust" in message
     assert "&lt;Org&gt;" in message
+
+
+def test_outbox_claim_prevents_concurrent_duplicate_delivery(isolated_db, monkeypatch):
+    conn = db.connect()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """INSERT INTO alert_outbox
+           (ip,event_type,payload_json,status,attempts,next_retry_at,created_at,idempotency_key)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        ("198.51.100.9", "classification_bad", '{"message":"test"}', "pending", 0, now, now, "test-idempotency"),
+    )
+    conn.commit(); conn.close()
+    delivered = []
+    monkeypatch.setattr("app.services.classification_watcher.telegram_enabled", lambda: True)
+
+    async def send(_message):
+        delivered.append(True)
+        return True
+
+    monkeypatch.setattr("app.services.classification_watcher.send_message", send)
+    async def run_both():
+        await asyncio.gather(_deliver_outbox(), _deliver_outbox())
+
+    asyncio.run(run_both())
+    assert len(delivered) == 1
+    conn = db.connect()
+    assert conn.execute("SELECT status FROM alert_outbox").fetchone()["status"] == "delivered"
+    conn.close()

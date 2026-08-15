@@ -1,0 +1,1 @@
+{"rule_id":"WEB-BURST-001","context":{"peak_requests_1m":100},"expect":true}

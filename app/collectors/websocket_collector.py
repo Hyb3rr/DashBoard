@@ -415,7 +415,6 @@ class WebSocketCollector:
                 if not event:
                     continue
                 ip = event["src_ip"]
-                affected.add(ip)
                 source = f"ws:{self.config.source_id}"
                 line_hash = hashlib.sha256(f"{source}\0{position - length}\0{line}".encode()).hexdigest()
                 cur = conn.execute(
@@ -427,6 +426,7 @@ class WebSocketCollector:
                 )
                 if cur.rowcount:
                     parsed_inserted.append(event)
+                    affected.add(ip)
             upsert_buckets(conn, parsed_inserted)
             rebuild_observations_for_ips(conn, tuple(affected))
             trim_buckets(conn)

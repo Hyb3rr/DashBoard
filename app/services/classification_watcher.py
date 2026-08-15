@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
+from uuid import uuid4
 
 from ..core.db import connect
 from ..core.change_feed import append_ip_changes
-from ..core.rules import ruleset_hash
 from .classification import build_classification_snapshot
 from .telegram import cooldown_seconds, enabled as telegram_enabled, format_bad_alert, send_message
 
@@ -66,55 +67,54 @@ def _enqueue_alert(conn, ip: str, message: str, now: datetime) -> None:
     if not existing:
         conn.execute(
             """INSERT INTO alert_outbox
-               (ip,event_type,payload_json,status,attempts,next_retry_at,created_at)
-               VALUES (?, 'classification_bad', ?, 'pending', 0, ?, ?)""",
-            (ip, json.dumps({"message": message}), now.isoformat(), now.isoformat()),
-        )
-
-
-def _record_rule_firings(conn, ip: str, classification: dict, seq: int, now: datetime) -> None:
-    for detection in classification.get("detections_recent", []):
-        rule_id = detection.get("id")
-        if not rule_id:
-            continue
-        conn.execute(
-            """INSERT INTO rule_firing_state
-               (ip,rule_id,ruleset_hash,first_fired_at,last_fired_at,last_seen_seq)
-               VALUES (?,?,?,?,?,?)
-               ON CONFLICT(ip,rule_id) DO UPDATE SET ruleset_hash=excluded.ruleset_hash,
-                 last_fired_at=excluded.last_fired_at,last_seen_seq=excluded.last_seen_seq""",
-            (ip, rule_id, ruleset_hash(), now.isoformat(), now.isoformat(), seq),
+               (ip,event_type,payload_json,status,attempts,next_retry_at,created_at,idempotency_key)
+               VALUES (?, 'classification_bad', ?, 'pending', 0, ?, ?, ?)""",
+            (ip, json.dumps({"message": message}), now.isoformat(), now.isoformat(),
+             f"classification_bad:{ip}:{now.isoformat()}"),
         )
 
 
 async def _deliver_outbox() -> None:
     if not telegram_enabled():
         return
+    owner = f"telegram:{os.getpid()}:{uuid4().hex}"
     conn = connect()
     try:
+        now = _now().isoformat()
+        conn.execute("UPDATE alert_outbox SET status='pending',lease_owner=NULL,lease_until=NULL WHERE status='sending' AND lease_until<?", (now,))
         rows = conn.execute(
             "SELECT * FROM alert_outbox WHERE status='pending' AND next_retry_at<=? ORDER BY id LIMIT 10",
-            (_now().isoformat(),),
+            (now,),
         ).fetchall()
+        claimed = []
+        lease_until = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+        for row in rows:
+            updated = conn.execute(
+                "UPDATE alert_outbox SET status='sending',lease_owner=?,lease_until=? WHERE id=? AND status='pending'",
+                (owner, lease_until, row["id"]),
+            )
+            if updated.rowcount:
+                claimed.append(row)
+        conn.commit()
     finally:
         conn.close()
-    for row in rows:
+    for row in claimed:
         payload = json.loads(row["payload_json"])
         delivered = await send_message(payload["message"])
         conn = connect()
         try:
             if delivered:
-                conn.execute("UPDATE alert_outbox SET status='delivered', delivered_at=? WHERE id=?", (_now().isoformat(), row["id"]))
+                conn.execute("UPDATE alert_outbox SET status='delivered', delivered_at=?,lease_owner=NULL,lease_until=NULL WHERE id=? AND lease_owner=?", (_now().isoformat(), row["id"], owner))
                 _mark_alert_delivered(conn, row["ip"], _now())
             else:
                 attempts = int(row["attempts"]) + 1
                 if attempts >= 8:
-                    conn.execute("UPDATE alert_outbox SET status='failed', attempts=? WHERE id=?", (attempts, row["id"]))
+                    conn.execute("UPDATE alert_outbox SET status='failed', attempts=?,last_error=?,lease_owner=NULL,lease_until=NULL WHERE id=? AND lease_owner=?", (attempts, "telegram_delivery_failed", row["id"], owner))
                     _clear_alert_pending(conn, row["ip"])
                 else:
                     retry_at = _now().timestamp() + min(3600, 2 ** min(attempts, 10))
                     retry_iso = datetime.fromtimestamp(retry_at, timezone.utc).isoformat()
-                    conn.execute("UPDATE alert_outbox SET attempts=?, next_retry_at=? WHERE id=?", (attempts, retry_iso, row["id"]))
+                    conn.execute("UPDATE alert_outbox SET attempts=?, next_retry_at=?,last_error=?,status='pending',lease_owner=NULL,lease_until=NULL WHERE id=? AND lease_owner=?", (attempts, retry_iso, "telegram_delivery_failed", row["id"], owner))
             conn.commit()
         finally:
             conn.close()
@@ -187,6 +187,11 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
     while not stop_event.is_set():
         conn = connect()
         try:
+            oldest_row = conn.execute("SELECT MIN(seq) AS seq FROM ip_change_log").fetchone()
+            if oldest_row["seq"] and cursor and cursor < int(oldest_row["seq"]) - 1:
+                cursor = int(oldest_row["seq"]) - 1
+                _save_consumer_cursor(conn, cursor, "reset_required")
+                conn.commit()
             rows = conn.execute(
                 "SELECT seq, ip FROM ip_change_log WHERE seq>? ORDER BY seq LIMIT 500",
                 (cursor,),
@@ -195,7 +200,6 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
                 next_cursor = max(int(row["seq"]) for row in rows)
                 for ip in dict.fromkeys(row["ip"] for row in rows):
                     classification, profile, observation = _classification_for_ip(conn, ip)
-                    _record_rule_firings(conn, ip, classification, next_cursor, _now())
                     alert = _record_state(conn, ip, classification, _now())
                     if alert and telegram_enabled():
                         _enqueue_alert(conn, ip, format_bad_alert(ip, classification, profile, observation), _now())

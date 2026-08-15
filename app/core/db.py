@@ -103,8 +103,14 @@ CREATE TABLE IF NOT EXISTS ip_observations (
   behavior_evidence_json TEXT NOT NULL DEFAULT '[]',
   detections_json TEXT NOT NULL DEFAULT '[]',
   detections_recent_json TEXT NOT NULL DEFAULT '[]',
+  detections_1h_json TEXT NOT NULL DEFAULT '[]',
+  detections_24h_json TEXT NOT NULL DEFAULT '[]',
   ruleset_hash TEXT,
+  ruleset_hash_1h TEXT,
+  ruleset_hash_24h TEXT,
   evaluated_at TEXT,
+  evaluated_at_1h TEXT,
+  evaluated_at_24h TEXT,
   recent_first_seen TEXT,
   recent_last_seen TEXT,
   recent_requests INTEGER NOT NULL DEFAULT 0,
@@ -201,11 +207,12 @@ CREATE TABLE IF NOT EXISTS change_consumer_state (
 CREATE TABLE IF NOT EXISTS rule_firing_state (
   ip TEXT NOT NULL,
   rule_id TEXT NOT NULL,
+  window TEXT NOT NULL,
   ruleset_hash TEXT NOT NULL,
   first_fired_at TEXT NOT NULL,
   last_fired_at TEXT NOT NULL,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (ip, rule_id)
+  PRIMARY KEY (ip, rule_id, window)
 );
 
 CREATE TABLE IF NOT EXISTS alert_outbox (
@@ -217,7 +224,11 @@ CREATE TABLE IF NOT EXISTS alert_outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   next_retry_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  delivered_at TEXT
+  delivered_at TEXT,
+  lease_owner TEXT,
+  lease_until TEXT,
+  idempotency_key TEXT UNIQUE,
+  last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alert_outbox_due ON alert_outbox(status, next_retry_at);
 
@@ -305,6 +316,19 @@ IP_PROFILE_COLUMNS = {
 }
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    rule_state_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_firing_state)").fetchall()}
+    if rule_state_columns and "window" not in rule_state_columns:
+        conn.execute("ALTER TABLE rule_firing_state RENAME TO rule_firing_state_legacy")
+        conn.execute("""CREATE TABLE rule_firing_state (
+          ip TEXT NOT NULL, rule_id TEXT NOT NULL, window TEXT NOT NULL,
+          ruleset_hash TEXT NOT NULL, first_fired_at TEXT NOT NULL,
+          last_fired_at TEXT NOT NULL, last_seen_seq INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (ip, rule_id, window))""")
+        conn.execute("""INSERT INTO rule_firing_state
+          (ip,rule_id,window,ruleset_hash,first_fired_at,last_fired_at,last_seen_seq)
+          SELECT ip,rule_id,'24h',ruleset_hash,first_fired_at,last_fired_at,last_seen_seq
+          FROM rule_firing_state_legacy""")
+        conn.execute("DROP TABLE rule_firing_state_legacy")
     event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
     if "source_offset" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN source_offset INTEGER")
@@ -328,6 +352,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         """UPDATE ip_ai_scores SET score_reason='legacy_snapshot', last_window_at=scored_at
            WHERE last_window_at IS NULL"""
     )
+    outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(alert_outbox)").fetchall()}
+    for column, definition in {
+        "lease_owner": "TEXT",
+        "lease_until": "TEXT",
+        "idempotency_key": "TEXT",
+        "last_error": "TEXT",
+    }.items():
+        if column not in outbox_columns:
+            conn.execute(f"ALTER TABLE alert_outbox ADD COLUMN {column} {definition}")
     observation_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_observations)").fetchall()}
     for column, definition in {
         "recent_first_seen": "TEXT",
@@ -347,8 +380,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "recent_updated_at": "TEXT",
         "detections_json": "TEXT NOT NULL DEFAULT '[]'",
         "detections_recent_json": "TEXT NOT NULL DEFAULT '[]'",
+        "detections_1h_json": "TEXT NOT NULL DEFAULT '[]'",
+        "detections_24h_json": "TEXT NOT NULL DEFAULT '[]'",
         "ruleset_hash": "TEXT",
+        "ruleset_hash_1h": "TEXT",
+        "ruleset_hash_24h": "TEXT",
         "evaluated_at": "TEXT",
+        "evaluated_at_1h": "TEXT",
+        "evaluated_at_24h": "TEXT",
     }.items():
         if column not in observation_columns:
             conn.execute(f"ALTER TABLE ip_observations ADD COLUMN {column} {definition}")

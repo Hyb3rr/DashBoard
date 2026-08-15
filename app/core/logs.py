@@ -65,8 +65,8 @@ def parse_apache_combined(line: str) -> dict | None:
     }
 
 
-def _rule_score(ctx: BehaviorContext) -> tuple[int, str, list, list[dict]]:
-    detections = run_rules(ctx)
+def _rule_score(ctx: BehaviorContext, window: str) -> tuple[int, str, list, list[dict]]:
+    detections = run_rules(ctx, window)
     score = min(sum(item.points for item in detections), 100)
     level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
     evidence = [item.evidence for item in detections]
@@ -128,7 +128,21 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
             wp_login_requests=row["wp_login_requests"], sensitive_probe_requests=row["sensitive_probe_requests"],
             bot_requests=row["bot_requests"], first_seen=row["first_seen"], last_seen=row["last_seen"],
         )
-        score, level, evidence, detections = _rule_score(ctx)
+        lifetime_24_score, _, lifetime_24_evidence, lifetime_24_detections = _rule_score(ctx, "24h")
+        one_hour_score, _, one_hour_evidence, one_hour_detections = _rule_score(one_hour and BehaviorContext(
+            requests_1h=one_hour.get("requests", 0), requests_24h=one_hour.get("requests", 0),
+            peak_requests_1m=one_hour.get("peak_requests_1m"), peak_requests_5m=one_hour.get("peak_requests_5m"),
+            status_4xx_ratio_1h=(one_hour.get("status_4xx", 0) / one_hour["requests"] if one_hour.get("requests") else 0),
+            unique_paths_1h=one_hour.get("unique_paths", 0), sensitive_probes_1h=one_hour.get("sensitive_probe_requests", 0),
+            requests=one_hour.get("requests", 0), status_4xx=one_hour.get("status_4xx", 0), status_2xx=one_hour.get("status_2xx", 0),
+            status_3xx=one_hour.get("status_3xx", 0), status_5xx=one_hour.get("status_5xx", 0), unique_paths=one_hour.get("unique_paths", 0),
+            wp_login_requests=one_hour.get("wp_login_requests", 0), sensitive_probe_requests=one_hour.get("sensitive_probe_requests", 0),
+            bot_requests=one_hour.get("bot_requests", 0), first_seen=one_hour.get("first_seen"), last_seen=one_hour.get("last_seen"),
+        ) or BehaviorContext(), "1h")
+        lifetime_score = min(lifetime_24_score + one_hour_score, 100)
+        lifetime_evidence = lifetime_24_evidence + one_hour_evidence
+        detections = lifetime_24_detections + one_hour_detections
+        level = "low" if lifetime_score < 25 else "medium" if lifetime_score < 55 else "high" if lifetime_score < 80 else "critical"
         recent = recent_by_ip.get(ip)
         recent_ctx = BehaviorContext(
             requests_1h=recent["requests"], requests_24h=recent["requests"],
@@ -140,19 +154,33 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
             wp_login_requests=recent["wp_login_requests"], sensitive_probe_requests=recent["sensitive_probe_requests"],
             bot_requests=recent["bot_requests"], first_seen=recent["first_seen"], last_seen=recent["last_seen"],
         ) if recent else None
-        recent_score, recent_level, recent_evidence, recent_detections = _rule_score(recent_ctx) if recent_ctx else (0, "low", [], [])
+        recent_24_score, _, recent_24_evidence, recent_24_detections = _rule_score(recent_ctx, "24h") if recent_ctx else (0, "low", [], [])
+        recent_1h_score, _, recent_1h_evidence, recent_1h_detections = _rule_score(one_hour and BehaviorContext(
+            requests=one_hour.get("requests", 0), requests_1h=one_hour.get("requests", 0), requests_24h=one_hour.get("requests", 0),
+            peak_requests_1m=one_hour.get("peak_requests_1m"), peak_requests_5m=one_hour.get("peak_requests_5m"),
+            status_4xx_ratio_1h=(one_hour.get("status_4xx", 0) / one_hour["requests"] if one_hour.get("requests") else 0),
+            unique_paths=one_hour.get("unique_paths", 0), unique_paths_1h=one_hour.get("unique_paths", 0),
+            sensitive_probe_requests=one_hour.get("sensitive_probe_requests", 0), sensitive_probes_1h=one_hour.get("sensitive_probe_requests", 0),
+            wp_login_requests=one_hour.get("wp_login_requests", 0), bot_requests=one_hour.get("bot_requests", 0),
+            status_2xx=one_hour.get("status_2xx", 0), status_3xx=one_hour.get("status_3xx", 0), status_4xx=one_hour.get("status_4xx", 0), status_5xx=one_hour.get("status_5xx", 0),
+        ) or BehaviorContext(), "1h")
+        recent_score = min(recent_24_score + recent_1h_score, 100)
+        recent_level = "low" if recent_score < 25 else "medium" if recent_score < 55 else "high" if recent_score < 80 else "critical"
+        recent_evidence = recent_24_evidence + recent_1h_evidence
+        recent_detections = recent_24_detections + recent_1h_detections
         conn.execute(
             """
             INSERT OR REPLACE INTO ip_observations
               (ip,first_seen,last_seen,requests,status_2xx,status_3xx,status_4xx,status_5xx,
                unique_paths,wp_login_requests,sensitive_probe_requests,bot_requests,
                behavior_score,behavior_level,behavior_evidence_json,
-               detections_json,detections_recent_json,ruleset_hash,evaluated_at,
+               detections_json,detections_recent_json,detections_1h_json,detections_24h_json,
+               ruleset_hash,ruleset_hash_1h,ruleset_hash_24h,evaluated_at,evaluated_at_1h,evaluated_at_24h,
                recent_first_seen,recent_last_seen,recent_requests,recent_status_2xx,recent_status_3xx,
                recent_status_4xx,recent_status_5xx,recent_unique_paths,recent_wp_login_requests,
                recent_sensitive_probe_requests,recent_bot_requests,behavior_score_recent,
                behavior_level_recent,behavior_evidence_recent_json,recent_updated_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 ip,
@@ -166,12 +194,18 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
                 row["wp_login_requests"] or 0,
                 row["sensitive_probe_requests"] or 0,
                 row["bot_requests"] or 0,
-                score,
+                lifetime_score,
                 level,
-                encode(evidence),
+                encode(lifetime_evidence),
                 encode(detections),
                 encode(recent_detections),
+                encode(recent_1h_detections),
+                encode(recent_24_detections + recent_1h_detections),
                 ruleset_hash(),
+                ruleset_hash(),
+                ruleset_hash(),
+                now,
+                now,
                 now,
                 recent["first_seen"] if recent else None,
                 recent["last_seen"] if recent else None,
@@ -217,6 +251,7 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
     skipped = 0
     now = _now()
     offset = 0
+    affected_ips: set[str] = set()
     for line in lines:
         raw = line.rstrip("\n")
         line_offset = offset
@@ -253,7 +288,10 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
         inserted += cur.rowcount
         if cur.rowcount:
             upsert_buckets(conn, [event])
-    rebuild_observations(conn)
+            affected_ips.add(event["src_ip"])
+    # Rebuild only IPs whose event insert succeeded; replaying an identical
+    # source/offset must not trigger a full rebuild or a change event.
+    rebuild_observations_for_ips(conn, tuple(affected_ips))
     result = {"parsed": parsed, "inserted": inserted, "duplicates": parsed - inserted, "skipped": skipped}
     result["ai_scoring"] = score_import(conn)
     return result

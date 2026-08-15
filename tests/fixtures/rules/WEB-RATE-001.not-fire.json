@@ -1,0 +1,1 @@
+{"rule_id":"WEB-RATE-001","context":{"peak_requests_5m":99},"expect":false}

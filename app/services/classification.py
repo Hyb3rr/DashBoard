@@ -7,6 +7,7 @@ silently classify the same IP from different observation windows.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from ..core.correlation import cluster_for_ip
 from ..core.db import decode, region_profile
@@ -36,6 +37,21 @@ class ClassificationSnapshot:
             "cluster": self.cluster,
         })
         return result
+
+
+def detection_snapshot(conn, ip: str, window: str = "24h") -> dict:
+    if window not in {"1h", "24h"}:
+        raise ValueError("window must be 1h or 24h")
+    row = conn.execute("SELECT * FROM ip_observations WHERE ip=?", (ip,)).fetchone()
+    if not row:
+        return {"detections": [], "ruleset_hash": None, "evaluated_at": None, "window": window}
+    suffix = "1h" if window == "1h" else "24h"
+    return {
+        "detections": decode(row[f"detections_{suffix}_json"]),
+        "ruleset_hash": row[f"ruleset_hash_{suffix}"],
+        "evaluated_at": row[f"evaluated_at_{suffix}"],
+        "window": window,
+    }
 
 
 def _decode_profile(row) -> dict:
@@ -82,6 +98,8 @@ def _observation(row) -> dict:
         ("behavior_evidence_recent_json", "behavior_evidence_recent", []),
         ("behavior_evidence_json", "behavior_evidence_lifetime", []),
         ("detections_recent_json", "detections_recent", []),
+        ("detections_1h_json", "detections_1h", []),
+        ("detections_24h_json", "detections_24h", []),
         ("detections_json", "detections", []),
     ):
         result[key] = decode(source.get(column)) if column in source else fallback
@@ -90,6 +108,8 @@ def _observation(row) -> dict:
     result["behavior_evidence"] = (
         result["behavior_evidence_recent"] if recent_available else result["behavior_evidence_lifetime"]
     )
+    for field in ("ruleset_hash", "ruleset_hash_1h", "ruleset_hash_24h", "evaluated_at", "evaluated_at_1h", "evaluated_at_24h"):
+        result[field] = source.get(field)
     return result
 
 
@@ -97,6 +117,15 @@ def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:
     profile = _decode_profile(conn.execute("SELECT * FROM ip_profiles WHERE ip=?", (ip,)).fetchone())
     profile.setdefault("ip", ip)
     observation = _observation(conn.execute("SELECT * FROM ip_observations WHERE ip=?", (ip,)).fetchone())
+    history = conn.execute("SELECT MIN(bucket_minute) AS first_bucket, MAX(bucket_minute) AS last_bucket FROM ip_time_buckets WHERE ip=?", (ip,)).fetchone()
+    if history and history["first_bucket"] and history["last_bucket"]:
+        try:
+            first = datetime.fromisoformat(history["first_bucket"].replace("Z", "+00:00"))
+            last = datetime.fromisoformat(history["last_bucket"].replace("Z", "+00:00"))
+            observation["bucket_history_hours"] = max(0, (last - first).total_seconds() / 3600)
+            observation["rule_coverage"] = observation["bucket_history_hours"] >= 24
+        except ValueError:
+            pass
     region = region_profile(conn, profile.get("country_code")) or {}
     ai_row = conn.execute("SELECT * FROM ip_ai_scores WHERE ip=?", (ip,)).fetchone()
     ai_profile = dict(ai_row) if ai_row else None
@@ -104,6 +133,6 @@ def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:
         ai_profile["ai_evidence"] = decode(ai_profile.pop("ai_evidence_json", "[]"))
     cluster = cluster_for_ip(conn, ip)
     classification = classify_ip(profile, observation, region, ai_profile, cluster)
-    classification["ruleset_hash"] = ruleset_hash()
-    classification["detections_recent"] = observation.get("detections_recent", [])
+    classification["ruleset_hash"] = observation.get("ruleset_hash_24h") or ruleset_hash()
+    classification["detections_recent"] = observation.get("detections_24h", observation.get("detections_recent", []))
     return ClassificationSnapshot(ip, profile, observation, region, ai_profile, cluster, classification)

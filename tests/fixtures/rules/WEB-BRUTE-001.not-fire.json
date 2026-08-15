@@ -1,0 +1,1 @@
+{"rule_id":"WEB-BRUTE-001","context":{"wp_login_requests":20},"expect":false}

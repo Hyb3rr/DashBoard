@@ -1,0 +1,1 @@
+{"rule_id":"WEB-BOT-001","context":{"bot_requests":1,"status_4xx":11},"expect":true}

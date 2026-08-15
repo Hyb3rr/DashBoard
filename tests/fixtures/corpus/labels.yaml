@@ -1,0 +1,7 @@
+benign: []
+scanning:
+  - WEB-SENSITIVE-001
+brute_force:
+  - WEB-BRUTE-001
+burst:
+  - WEB-BURST-001
