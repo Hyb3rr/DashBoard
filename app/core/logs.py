@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime, timezone
+from collections.abc import Iterable, Sequence
+from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
+import os
 import re
 import sqlite3
 
 from .db import encode
+from .buckets import bucket_sums, trim_buckets, upsert_buckets
+from .rules import BehaviorContext, run_rules
 from ..ai.detector import score_import
 
 APACHE_COMBINED = re.compile(
@@ -61,23 +64,23 @@ def parse_apache_combined(line: str) -> dict | None:
     }
 
 
-def _behavior_risk(row: sqlite3.Row) -> tuple[int, str, list[str]]:
+def _behavior_risk(ctx: BehaviorContext) -> tuple[int, str, list[str]]:
     score = 0
     evidence: list[str] = []
-    requests = row["requests"] or 0
-    if row["sensitive_probe_requests"] > 0:
+    requests = ctx.requests
+    if ctx.sensitive_probe_requests > 0:
         score += 50
         evidence.append("Sensitive path probing (+50)")
-    if row["wp_login_requests"] > 20:
+    if ctx.wp_login_requests > 20:
         score += 30
         evidence.append("wp-login burst (+30)")
-    if requests >= 20 and (row["status_4xx"] / requests) > 0.5:
+    if requests >= 20 and (ctx.status_4xx / requests) > 0.5:
         score += 15
         evidence.append("4xx ratio above 50% (+15)")
-    if row["unique_paths"] > 80:
+    if ctx.unique_paths > 80:
         score += 15
         evidence.append("High unique path count (+15)")
-    if row["bot_requests"] and row["status_4xx"] > 10:
+    if ctx.bot_requests and ctx.status_4xx > 10:
         score += 10
         evidence.append("Bot with repeated errors")
     score = min(score, 100)
@@ -85,51 +88,84 @@ def _behavior_risk(row: sqlite3.Row) -> tuple[int, str, list[str]]:
     return score, level, evidence
 
 
-def rebuild_observations(conn: sqlite3.Connection) -> None:
-    rows = conn.execute(
-        """
-        SELECT
-          src_ip AS ip,
-          MIN(timestamp) AS first_seen,
-          MAX(timestamp) AS last_seen,
-          COUNT(*) AS requests,
-          SUM(CASE WHEN status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) AS status_2xx,
-          SUM(CASE WHEN status BETWEEN 300 AND 399 THEN 1 ELSE 0 END) AS status_3xx,
-          SUM(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS status_4xx,
-          SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS status_5xx,
-          COUNT(DISTINCT path) AS unique_paths,
-          SUM(CASE WHEN path LIKE '%/wp-login.php%' THEN 1 ELSE 0 END) AS wp_login_requests,
-          SUM(CASE
-            WHEN path LIKE '/.env%' OR path LIKE '/.git%' OR path LIKE '%wp-config.php%'
-              OR path LIKE '%xmlrpc.php%' OR path LIKE '%phpmyadmin%'
-              OR path LIKE '%adminer%' OR path LIKE '%vendor/phpunit%'
-            THEN 1 ELSE 0 END) AS sensitive_probe_requests,
-          SUM(CASE
-            WHEN lower(COALESCE(user_agent, '')) LIKE '%bot%'
-              OR lower(COALESCE(user_agent, '')) LIKE '%spider%'
-              OR lower(COALESCE(user_agent, '')) LIKE '%crawler%'
-              OR lower(COALESCE(user_agent, '')) LIKE '%feedfetcher%'
-              OR lower(COALESCE(user_agent, '')) LIKE '%archive.org_bot%'
-            THEN 1 ELSE 0 END) AS bot_requests
-        FROM events
-        GROUP BY src_ip
-        """
-    ).fetchall()
+def _rule_score(ctx: BehaviorContext) -> tuple[int, str, list, list[dict]]:
+    detections = run_rules(ctx)
+    score = min(sum(item.points for item in detections), 100)
+    level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
+    evidence = [item.evidence for item in detections]
+    return score, level, evidence, [item.to_dict() for item in detections]
+
+
+def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = None) -> None:
+    if ips is not None and not ips:
+        return
+    rows = bucket_sums(conn, ips)
+    if not rows:
+        # Compatibility for callers/tests that seed events directly instead of
+        # going through the ingest pipeline. Normal batches always populate
+        # buckets before this function and never take this path.
+        where = ""
+        params: tuple[str, ...] = ()
+        if ips is not None:
+            placeholders = ",".join("?" for _ in ips)
+            where = f" WHERE src_ip IN ({placeholders})"
+            params = tuple(ips)
+        legacy_events = conn.execute(
+            "SELECT timestamp,src_ip,method,path,status,bytes_sent,referer,user_agent FROM events" + where,
+            params,
+        ).fetchall()
+        if legacy_events:
+            upsert_buckets(conn, [dict(event) for event in legacy_events])
+            rows = bucket_sums(conn, ips)
+    try:
+        lookback_hours = max(1, int(os.getenv("LOGS_BEHAVIOR_LOOKBACK_HOURS", "24")))
+    except ValueError:
+        lookback_hours = 24
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    recent_by_ip = bucket_sums(conn, ips, recent_cutoff)
+    one_hour_by_ip = bucket_sums(conn, ips, datetime.now(timezone.utc) - timedelta(hours=1))
     now = _now()
-    for row in rows:
-        score, level, evidence = _behavior_risk(row)
+    for ip, row in rows.items():
+        one_hour = one_hour_by_ip.get(ip, {})
+        ctx = BehaviorContext(
+            requests_1h=one_hour.get("requests", 0), requests_24h=row["requests"],
+            peak_requests_1m=one_hour.get("peak_requests_1m"), peak_requests_5m=one_hour.get("peak_requests_5m"),
+            status_4xx_ratio_1h=(one_hour.get("status_4xx", 0) / one_hour["requests"] if one_hour.get("requests") else 0),
+            unique_paths_1h=one_hour.get("unique_paths", 0), sensitive_probes_1h=one_hour.get("sensitive_probe_requests", 0),
+            requests=row["requests"], status_2xx=row["status_2xx"], status_3xx=row["status_3xx"],
+            status_4xx=row["status_4xx"], status_5xx=row["status_5xx"], unique_paths=row["unique_paths"],
+            wp_login_requests=row["wp_login_requests"], sensitive_probe_requests=row["sensitive_probe_requests"],
+            bot_requests=row["bot_requests"], first_seen=row["first_seen"], last_seen=row["last_seen"],
+        )
+        score, level, evidence, detections = _rule_score(ctx)
+        recent = recent_by_ip.get(ip)
+        recent_ctx = BehaviorContext(
+            requests_1h=recent["requests"], requests_24h=recent["requests"],
+            peak_requests_1m=recent["peak_requests_1m"], peak_requests_5m=recent["peak_requests_5m"],
+            status_4xx_ratio_1h=(recent["status_4xx"] / recent["requests"] if recent["requests"] else 0),
+            unique_paths_1h=recent["unique_paths"], sensitive_probes_1h=recent["sensitive_probe_requests"],
+            requests=recent["requests"], status_2xx=recent["status_2xx"], status_3xx=recent["status_3xx"],
+            status_4xx=recent["status_4xx"], status_5xx=recent["status_5xx"], unique_paths=recent["unique_paths"],
+            wp_login_requests=recent["wp_login_requests"], sensitive_probe_requests=recent["sensitive_probe_requests"],
+            bot_requests=recent["bot_requests"], first_seen=recent["first_seen"], last_seen=recent["last_seen"],
+        ) if recent else None
+        recent_score, recent_level, recent_evidence, _ = _rule_score(recent_ctx) if recent_ctx else (0, "low", [], [])
         conn.execute(
             """
             INSERT OR REPLACE INTO ip_observations
               (ip,first_seen,last_seen,requests,status_2xx,status_3xx,status_4xx,status_5xx,
                unique_paths,wp_login_requests,sensitive_probe_requests,bot_requests,
-               behavior_score,behavior_level,behavior_evidence_json,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               behavior_score,behavior_level,behavior_evidence_json,
+               detections_json,
+               recent_first_seen,recent_last_seen,recent_requests,recent_status_2xx,recent_status_3xx,
+               recent_status_4xx,recent_status_5xx,recent_unique_paths,recent_wp_login_requests,
+               recent_sensitive_probe_requests,recent_bot_requests,behavior_score_recent,
+               behavior_level_recent,behavior_evidence_recent_json,recent_updated_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                row["ip"],
-                row["first_seen"],
-                row["last_seen"],
+                ip,
+                row["first_seen"], row["last_seen"],
                 row["requests"],
                 row["status_2xx"] or 0,
                 row["status_3xx"] or 0,
@@ -142,9 +178,36 @@ def rebuild_observations(conn: sqlite3.Connection) -> None:
                 score,
                 level,
                 encode(evidence),
+                encode(detections),
+                recent["first_seen"] if recent else None,
+                recent["last_seen"] if recent else None,
+                recent["requests"] if recent else 0,
+                recent["status_2xx"] if recent else 0,
+                recent["status_3xx"] if recent else 0,
+                recent["status_4xx"] if recent else 0,
+                recent["status_5xx"] if recent else 0,
+                recent["unique_paths"] if recent else 0,
+                recent["wp_login_requests"] if recent else 0,
+                recent["sensitive_probe_requests"] if recent else 0,
+                recent["bot_requests"] if recent else 0,
+                recent_score if recent else 0,
+                recent_level if recent else "low",
+                encode(recent_evidence if recent else []),
+                now,
                 now,
             ),
         )
+    trim_buckets(conn)
+
+
+def rebuild_observations(conn: sqlite3.Connection) -> None:
+    """Recompute behavior observations for the complete event store."""
+    _rebuild_observations(conn)
+
+
+def rebuild_observations_for_ips(conn: sqlite3.Connection, ips: Sequence[str]) -> None:
+    """Recompute only the observations affected by a streaming batch."""
+    _rebuild_observations(conn, tuple(dict.fromkeys(ips)))
 
 
 def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: str) -> dict:
@@ -184,6 +247,8 @@ def import_apache_lines(conn: sqlite3.Connection, lines: Iterable[str], source: 
             ),
         )
         inserted += cur.rowcount
+        if cur.rowcount:
+            upsert_buckets(conn, [event])
     rebuild_observations(conn)
     result = {"parsed": parsed, "inserted": inserted, "duplicates": parsed - inserted, "skipped": skipped}
     result["ai_scoring"] = score_import(conn)

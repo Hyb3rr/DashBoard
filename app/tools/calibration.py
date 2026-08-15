@@ -16,7 +16,8 @@ FIELDS = (
     "is_tor", "is_vpn", "is_proxy", "is_hosting", "behavior_score", "requests",
     "status_4xx", "unique_paths", "wp_login_requests", "sensitive_probe_requests",
     "effective_risk_score", "ai_e", "ai_anomaly_score", "anomalous_windows",
-    "windows_seen", "model_mode", "human_label", "notes",
+    "windows_seen", "model_mode", "ai_confidence", "ai_confidence_level",
+    "ai_score_delta", "ai_score_reason", "ai_model_version", "human_label", "notes",
 )
 LABELS = {"good", "watch", "bad", "unknown"}
 
@@ -55,6 +56,11 @@ def _row(item: dict) -> dict:
         "anomalous_windows": (item.get("ai_profile") or {}).get("anomalous_windows", ""),
         "windows_seen": (item.get("ai_profile") or {}).get("windows_seen", ""),
         "model_mode": (item.get("ai_profile") or {}).get("model_mode", ""),
+        "ai_confidence": (item.get("ai_profile") or {}).get("confidence", ""),
+        "ai_confidence_level": (item.get("ai_profile") or {}).get("confidence_level", ""),
+        "ai_score_delta": (item.get("ai_profile") or {}).get("score_delta", ""),
+        "ai_score_reason": (item.get("ai_profile") or {}).get("score_reason", ""),
+        "ai_model_version": (item.get("ai_profile") or {}).get("model_version", ""),
     })
     return row
 

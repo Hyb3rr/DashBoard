@@ -6,12 +6,17 @@ import argparse
 import fcntl
 import json
 import os
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..config.settings import DATA_DIR
+from ..core.db import connect
+from ..core.correlation import asn_clusters
+from ..services.profiles import refresh_due_profiles
 from .tor_refresh import refresh_tor_exit_list
 from .worldbank_update import update_world_bank
+from ..core.intel_updater import run_due_sources
 
 STATE_PATH = DATA_DIR / "update_state.json"
 LOCK_PATH = DATA_DIR / "data_scheduler.lock"
@@ -63,6 +68,29 @@ def run_scheduler(state_path: str | Path = STATE_PATH, lock_path: str | Path = L
             item["status"] = result.get("status", "failed")
             if result.get("status") in {"updated", "not_modified"}:
                 item["last_success_at"] = now.isoformat()
+        if os.getenv("PRIVACY_REFRESH_SCHEDULER", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                conn = connect()
+                try:
+                    report["privacy"] = asyncio.run(refresh_due_profiles(conn, limit=int(os.getenv("PRIVACY_REFRESH_BATCH", "100")), now=now))
+                finally:
+                    conn.close()
+            except Exception as exc:
+                report["privacy"] = {"status": "failed", "error": type(exc).__name__}
+        if os.getenv("CORRELATION_SCHEDULER", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                conn = connect()
+                try:
+                    report["correlation"] = {"status": "completed", "clusters": len(asn_clusters(conn, None, int(os.getenv("CORRELATION_OVERLAP_MINUTES", "10"))))}
+                finally:
+                    conn.close()
+            except Exception as exc:
+                report["correlation"] = {"status": "failed", "error": type(exc).__name__}
+        if os.getenv("INTEL_UPDATER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                report["intel"] = run_due_sources(now)
+            except Exception as exc:
+                report["intel"] = {"status": "failed", "error": type(exc).__name__}
         state["last_run_at"] = now.isoformat()
         temporary = state_path.with_name(f".{state_path.name}.tmp")
         temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")

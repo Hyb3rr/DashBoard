@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = 'hub:v1:';
+  const VERSION = 'hub:v2:';
   const CACHE_PATHS = [
     '/api/ips?limit=500',
     '/api/regions?limit=200',

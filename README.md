@@ -88,12 +88,15 @@ GET  /regions
 GET  /regions/{country_code}
 GET  /api/ip/{ip}
 GET  /api/ips?limit=500
+GET  /api/ips/snapshot?limit=500
+GET  /api/ips/updates?after=0
 GET  /api/ips/calibration.csv
 GET  /api/regions?limit=50
 GET  /api/regions/{country_code}
 GET  /api/regions/demand-signal?limit=50
+GET  /api/collector/status
+GET  /api/stream
 POST /api/ips/refresh-unknown?limit=100
-POST /api/import/sample?mode=replace
 ```
 
 Region profiles return economic, cultural, and normalized conflict indicators.
@@ -218,17 +221,34 @@ region D (capped at 5 and only enabled when behavior exists). `risk_score` and
 double-counting. Sensitive-path probing is a hard behavior signal; low-volume
 IPs without A/B evidence remain `unknown`.
 
-`/api/import/sample` reads only the local sample log file. Enrichment remains a
-separate local-only operation through `/api/ips/refresh-unknown`. Neither route
-connects back to, configures, blocks, or executes anything on the monitored
-website.
+Live access logs arrive through the configured WebSocket collector. The first
+connection starts at byte offset `0`; later connections resume from the last
+committed offset. Enrichment remains a separate local-only background operation
+through the same profile pipeline used by `/api/ips/refresh-unknown`.
+
+AI anomaly detection uses a persisted Isolation Forest. It trains on a bounded
+7-day UTC window every six hours and scores affected 24-hour windows every five
+minutes. The model artifact is stored under `data/models/` and is replaced
+atomically; scoring continues with the last-known-good model if training fails.
+
+Rule behavior keeps both lifetime evidence and a 24-hour recent view. Group A
+uses the recent view, so an old probe does not permanently block a new AI early
+warning. Set `LOGS_BEHAVIOR_LOOKBACK_HOURS` to change that window.
+
+VPN/proxy flags are only set from explicit sources: MaxMind Anonymous IP,
+`VPN_NETWORKS_PATH`, or `PROXY_NETWORKS_PATH` CIDR files. ASN organization
+names are not treated as VPN/proxy proof.
 
 ## Stored Data
 
 ```text
 events            raw normalized log events
+log_sources      WebSocket checkpoints and collector lease state
+ip_change_log    cursor for incremental dashboard updates
 ip_profiles       stable IP enrichment cache
 ip_observations   behavior aggregate per IP
+ip_ai_scores      current AI snapshot, confidence, decay reason, and evidence
+ai_model_state    model metadata, score cursor, and scheduler lease
 region_profiles   sourced country context stored as local JSON fields
 ```
 

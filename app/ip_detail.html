@@ -157,6 +157,8 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
 .path-bar{height:4px;margin-top:9px;background:var(--line);border-radius:99px;overflow:hidden}
 .path-bar i{display:block;height:100%;background:var(--cyan);border-radius:inherit}
 .path-dates{display:block;margin-top:6px;color:var(--tertiary);font-size:10px}
+.ip-traffic{margin:24px 0 16px}.ip-traffic-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ip-traffic-head h2{margin:0;font-size:14px}.ip-traffic-summary{margin-top:5px;color:var(--tertiary);font:11px monospace}.ip-range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:6px;background:var(--deck)}.ip-range button{min-height:27px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--tertiary);font:600 10px monospace;cursor:pointer}.ip-range button.active,.ip-range button:hover{color:var(--ink);background:var(--console)}.ip-traffic-chart{position:relative;height:240px;margin:15px 0}.ip-traffic-chart svg{width:100%;height:100%;display:block}.ip-traffic-chart .grid{stroke:var(--line);stroke-width:1}.ip-traffic-chart .axis{fill:var(--tertiary);font:10px monospace}.ip-traffic-chart .area{fill:rgba(89,216,230,.1)}.ip-traffic-chart .line{fill:none;stroke:var(--cyan);stroke-width:2;vector-effect:non-scaling-stroke}.ip-traffic-lower{display:grid;grid-template-columns:.8fr 1.2fr 1.2fr;gap:16px;padding-top:16px;border-top:1px solid var(--line)}.ip-traffic-block h3{margin:0 0 10px;font-size:12px}.status-list{display:grid;gap:8px}.status-row{display:grid;grid-template-columns:32px 1fr 42px;align-items:center;gap:8px;color:var(--secondary);font-size:11px}.status-row strong{font:600 11px monospace;text-align:right;color:var(--ink)}.status-track{height:7px;border-radius:99px;background:var(--deck);overflow:hidden}.status-track i{display:block;height:100%;background:var(--cyan)}.ip-top-paths{display:grid;gap:7px}.ip-top-path{display:flex;justify-content:space-between;gap:10px;color:var(--secondary);font:11px monospace}.ip-top-path span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ip-top-path strong{color:var(--ink)}.recent-list{display:grid;gap:6px;max-height:190px;overflow:auto}.recent-row{display:grid;grid-template-columns:62px 38px minmax(0,1fr) 32px;gap:7px;color:var(--secondary);font:10px monospace}.recent-row .recent-time{color:var(--tertiary)}.recent-row .recent-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row .status-4xx,.recent-row .status-5xx{color:var(--red)}
+ .ip-time-filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.ip-time-filter label{display:grid;gap:4px;color:var(--tertiary);font-size:10px}.ip-time-filter input{height:32px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--void);color:var(--secondary);font:11px monospace}.ip-time-filter button{height:32px;padding:0 10px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font-weight:700;cursor:pointer}.ip-time-filter button:hover{color:var(--ink);background:var(--raised)}
 .investigate-links{display:grid;gap:8px}
 .external-link{display:flex;justify-content:space-between;align-items:center;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--deck);color:var(--cyan);text-decoration:none;font-weight:700}
 .external-link:hover{border-color:#59d8e677;background:var(--raised)}
@@ -171,6 +173,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
   .hero-grid{grid-template-columns:repeat(2,1fr)}
   .stat:first-child{grid-column:1/-1}
   .layout{grid-template-columns:1fr}
+  .ip-traffic-lower{grid-template-columns:1fr 1fr}
 }
 @media(max-width:560px){
   .hero{display:block}
@@ -179,6 +182,7 @@ h1{margin:5px 0 8px;font:650 clamp(27px,4vw,42px)/1.05 monospace;letter-spacing:
   .decision-top{display:block}
   .score{margin-top:18px}
   .breakdown{grid-template-columns:repeat(2,1fr)}
+  .ip-traffic-head{display:block}.ip-range{margin-top:12px;overflow-x:auto}.ip-traffic-lower{grid-template-columns:1fr}
 }
 </style>
 
@@ -267,6 +271,30 @@ function investigationLinks(value){
   return `<div class="investigate-links"><a class="external-link" href="https://www.abuseipdb.com/check/${safe}" target="_blank" rel="noopener noreferrer">AbuseIPDB <span>↗</span></a><a class="external-link" href="https://app.crowdsec.net/cti/${safe}" target="_blank" rel="noopener noreferrer">CrowdSec CTI <span>↗</span></a></div>`
 }
 
+let trafficRange='1h',trafficStart='',trafficEnd='';
+function trafficClock(value){return new Date(value).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}
+function renderIpTraffic(data){
+  const chart=document.querySelector('#ip-traffic-chart'),series=data.series||[],max=Math.max(1,...series.map(x=>Number(x.requests||0))),w=1000,h=240,padL=42,padR=18,padT=14,padB=28,innerW=w-padL-padR,innerH=h-padT-padB;
+  document.querySelector('#ip-traffic-summary').textContent=`${num(data.total_requests||0)} requests · ${data.range_label||''} · updated ${trafficClock(data.as_of)}`;
+  if(!series.length){chart.innerHTML='<div class="state">No timeline buckets available.</div>'}else{
+    const start=new Date(data.start),end=new Date(data.end),span=Math.max(1,end-start),xFor=x=>padL+Math.max(0,Math.min(1,(new Date(x).getTime()-start.getTime())/span))*innerW;
+    const pointValues=series.map(x=>`${xFor(x.timestamp)},${padT+innerH-(Number(x.requests||0)/max)*innerH}`);const lastPoint=series[series.length-1];if(new Date(lastPoint.timestamp)<end)pointValues.push(`${xFor(data.end)},${padT+innerH}`);const points=pointValues.join(' '),area=`${padL},${padT+innerH} ${points} ${xFor(data.end)},${padT+innerH}`;
+    const grid=[0,.5,1].map(r=>{const y=padT+innerH-r*innerH;return `<line class="grid" x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}"></line><text class="axis" x="${padL-7}" y="${y+3}" text-anchor="end">${num(Math.round(max*r))}</text>`}).join('');
+    const axis=[start,new Date((start.getTime()+end.getTime())/2),end].map((x,i)=>`<text class="axis" x="${[padL,padL+innerW/2,w-padR][i]}" y="${h-7}" text-anchor="${i===0?'start':i===2?'end':'middle'}">${i===2&&!trafficEnd?'Now · ':''}${trafficClock(x)}</text>`).join('');
+    chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<polygon class="area" points="${area}"></polygon><polyline class="line" points="${points}"></polyline>${axis}</svg>`;
+  }
+  const codes=data.status_codes||{},codeMax=Math.max(1,...Object.values(codes).map(Number));
+  document.querySelector('#ip-status-codes').innerHTML=['2xx','3xx','4xx','5xx'].map(code=>`<div class="status-row"><span>${code}</span><div class="status-track"><i style="width:${Number(codes[code]||0)/codeMax*100}%"></i></div><strong>${num(codes[code]||0)}</strong></div>`).join('');
+  const paths=data.top_paths||[];document.querySelector('#ip-top-paths').innerHTML=paths.length?paths.map(x=>`<div class="ip-top-path"><span title="${esc(x.path)}">${esc(x.path)}</span><strong>${num(x.requests)}</strong></div>`).join(''):'<div class="state">No paths.</div>';
+  const recent=data.recent_requests||[];document.querySelector('#ip-recent-requests').innerHTML=recent.length?recent.map(x=>`<div class="recent-row"><span class="recent-time">${trafficClock(x.timestamp)}</span><span>${esc(x.method)}</span><span class="recent-path" title="${esc(x.path)}">${esc(x.path)}</span><span class="${Number(x.status)>=400?'status-4xx':''}">${esc(x.status??'—')}</span></div>`).join(''):'<div class="state">No recent requests.</div>';
+}
+function localIso(value){return value?new Date(value).toISOString():''}
+function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
+function syncTrafficInputs(start,end){if(trafficStart||trafficEnd)return;const startInput=document.querySelector('#ip-traffic-start'),endInput=document.querySelector('#ip-traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end)}
+async function loadIpTraffic(){try{const params=new URLSearchParams({range:trafficRange});if(trafficStart)params.set('start',localIso(trafficStart));if(trafficEnd)params.set('end',localIso(trafficEnd));const res=await fetch(`/api/ip/${encodeURIComponent(ip)}/traffic?${params}`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const data=await res.json();syncTrafficInputs(data.start,data.end);renderIpTraffic(data)}catch(error){const chart=document.querySelector('#ip-traffic-chart');if(chart)chart.innerHTML=`<div class="state"><strong>Traffic unavailable</strong>${esc(error.message)}</div>`}}
+function applyTrafficWindow(){trafficStart=document.querySelector('#ip-traffic-start').value;trafficEnd=document.querySelector('#ip-traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notifyIpTraffic('End must be after start');return}loadIpTraffic()}
+function notifyIpTraffic(message){const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent=message}
+
 async function load(){
   try{
     const res=await fetch('/api/ip/'+encodeURIComponent(ip));
@@ -333,6 +361,15 @@ async function load(){
         </div>
       </section>
 
+      <section class="card ip-traffic">
+        <div class="body">
+          <div class="ip-traffic-head"><div><h2>IP traffic</h2><div class="ip-traffic-summary" id="ip-traffic-summary">Loading traffic…</div></div><div class="ip-range" role="group" aria-label="IP traffic time range"><button data-ip-range="30m">30m</button><button class="active" data-ip-range="1h">1h</button><button data-ip-range="6h">6h</button><button data-ip-range="12h">12h</button><button data-ip-range="1d">24h</button><button data-ip-range="3d">3d</button></div></div>
+          <div class="ip-time-filter"><label>Started at <input id="ip-traffic-start" type="datetime-local"></label><label>Ended at <input id="ip-traffic-end" type="datetime-local"></label><button type="button" id="ip-traffic-apply">Apply window</button><button type="button" id="ip-traffic-clear">Clear window</button></div>
+          <div class="ip-traffic-chart" id="ip-traffic-chart"><div class="state">Loading timeline…</div></div>
+          <div class="ip-traffic-lower"><div class="ip-traffic-block"><h3>Status codes</h3><div class="status-list" id="ip-status-codes"></div></div><div class="ip-traffic-block"><h3>Top paths</h3><div class="ip-top-paths" id="ip-top-paths"></div></div><div class="ip-traffic-block"><h3>Recent requests</h3><div class="recent-list" id="ip-recent-requests"></div></div></div>
+        </div>
+      </section>
+
       <div class="layout">
         <div class="column">
           <section class="card">
@@ -379,6 +416,10 @@ async function load(){
         </div>
       </div>
     `
+    document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item===button));loadIpTraffic()}));
+    document.querySelector('#ip-traffic-apply').addEventListener('click',applyTrafficWindow);
+    document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';loadIpTraffic()});
+    loadIpTraffic();
   }catch(e){
     document.querySelector('#app').innerHTML=`
       <div class="state">

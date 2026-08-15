@@ -1,10 +1,11 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import ipaddress
 import os
 from pathlib import Path
 
 from ..config.settings import TOR_EXIT_LIST
+from .db import connect
 
 try:
     from dotenv import load_dotenv
@@ -14,6 +15,7 @@ except ImportError:
 
 _reader_cache: dict[tuple[str, str], object] = {}
 _tor_cache: dict[str, tuple[float, set[str]]] = {}
+_cidr_cache: dict[str, tuple[float, tuple[ipaddress._BaseNetwork, ...]]] = {}
 
 
 def _now() -> str:
@@ -44,7 +46,7 @@ def _merge(base: dict, incoming: dict, provider: str, field_sources: dict) -> li
 
 
 def _provider_state(status: dict, name: str, state: str, error: str | None = None) -> None:
-    status[name] = {"status": state}
+    status[name] = {"status": state, "checked_at": _now()}
     if error:
         status[name]["error"] = error
 
@@ -79,6 +81,58 @@ def _network_flags(organization: str | None, isp: str | None) -> dict:
     }
 
 
+def _anonymous_ip(ip: str) -> tuple[dict, list[str], str]:
+    path = os.getenv("MAXMIND_ANONYMOUS_DB", "").strip()
+    if not path:
+        return {}, [], "not_configured"
+    if not Path(path).is_file():
+        return {}, [f"MaxMind Anonymous IP: database file missing: {path}"], "failed"
+    try:
+        import geoip2.database
+        reader = _reader("maxmind_anonymous", path, geoip2.database.Reader)
+        record = reader.anonymous(ip)
+        result = {
+            "is_vpn": bool(record.is_anonymous_vpn),
+            "is_proxy": bool(record.is_public_proxy or record.is_residential_proxy),
+            "proxy_type": "residential" if record.is_residential_proxy else "datacenter" if record.is_public_proxy else None,
+            "is_tor": bool(record.is_tor_exit_node),
+            "is_hosting": bool(record.is_hosting_provider),
+        }
+        return result, [], "active"
+    except ImportError:
+        return {}, ["MaxMind Anonymous IP: geoip2 package is not installed"], "failed"
+    except Exception as exc:
+        return {}, [f"MaxMind Anonymous IP: {type(exc).__name__}: {exc}"], "failed"
+
+
+def _cidr_flag(ip: str, env_name: str, label: str) -> tuple[dict, list[str], str]:
+    path = os.getenv(env_name, "").strip()
+    if not path:
+        return {}, [], "not_configured"
+    list_path = Path(path)
+    if not list_path.is_file():
+        return {}, [f"{label}: list file missing: {path}"], "failed"
+    try:
+        mtime = list_path.stat().st_mtime
+        cached = _cidr_cache.get(path)
+        if not cached or cached[0] != mtime:
+            networks = []
+            for raw in list_path.read_text(encoding="utf-8").splitlines():
+                value = raw.split("#", 1)[0].strip()
+                if not value:
+                    continue
+                try:
+                    networks.append(ipaddress.ip_network(value, strict=False))
+                except ValueError:
+                    continue
+            _cidr_cache[path] = (mtime, tuple(networks))
+        matched = any(ipaddress.ip_address(ip) in network for network in _cidr_cache[path][1])
+        field = "is_vpn" if "VPN" in label.upper() else "is_proxy"
+        return ({field: True} if matched else {}), [], "active"
+    except Exception as exc:
+        return {}, [f"{label}: {type(exc).__name__}: {exc}"], "failed"
+
+
 def _identity_confidence(organization: str | None, asn: str | int | None, network_type: str | None) -> tuple[int, list[str]]:
     evidence = []
     if organization:
@@ -111,6 +165,47 @@ def _risk(data: dict) -> tuple[int, str, list[str]]:
     score = min(score, 100)
     level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
     return score, level, evidence
+
+
+def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
+    """Read the updater's normalized snapshot; this function never performs I/O beyond SQLite."""
+    result, providers, fields, errors = {}, {}, {}, []
+    try:
+        conn = connect()
+        rows = conn.execute("SELECT * FROM privacy_networks WHERE active=1").fetchall()
+        address = ipaddress.ip_address(ip)
+        matches = []
+        for row in rows:
+            try:
+                if address in ipaddress.ip_network(row["network"], strict=False): matches.append(row)
+            except ValueError:
+                continue
+        for row in matches:
+            kind, source = row["kind"], row["source"]
+            field = "is_vpn" if kind == "vpn" else "is_proxy" if kind == "proxy" else "is_hosting"
+            result[field] = True
+            prior = fields.get(field)
+            fields[field] = ", ".join(dict.fromkeys(filter(None, [prior, source])))
+            providers[source] = {"status":"active", "checked_at":row["checked_at"], "kind":kind}
+            if kind == "proxy" and row["proxy_type"] and not result.get("proxy_type"):
+                result["proxy_type"] = row["proxy_type"]; fields["proxy_type"] = source
+        threat = []
+        threat_rows = conn.execute("SELECT * FROM threat_indicators WHERE active=1").fetchall()
+        for source in {row["source"] for row in threat_rows}:
+            providers.setdefault(source, {"status":"active", "checked_at":next((row["checked_at"] for row in threat_rows if row["source"] == source), None)})
+        for row in threat_rows:
+            try:
+                if address not in ipaddress.ip_network(row["network"], strict=False): continue
+            except ValueError:
+                continue
+            threat.append(row)
+        for row in threat:
+            providers[row["source"]] = {"status":"active", "checked_at":row["checked_at"], "category":row["category"]}
+        if threat: result["threat_indicators"] = [dict(row) for row in threat]
+        conn.close()
+    except Exception as exc:
+        errors.append(f"Local intelligence: {type(exc).__name__}: {exc}")
+    return result, providers, fields, errors
 
 
 def _maxmind(ip: str) -> tuple[dict, list[str], str]:
@@ -191,7 +286,7 @@ def _tor_exit_list(ip: str) -> tuple[dict, list[str], str]:
         return {}, [f"Tor exit list: {type(exc).__name__}: {exc}"], "failed"
 
 
-async def lookup(ip: str, attempt: int = 1) -> dict:
+async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     """Local-only IP enrichment.
 
     No HTTP requests, DNS lookups, Tor downloads or reputation APIs are used.
@@ -199,6 +294,11 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
     """
     address = ipaddress.ip_address(ip)
     if not address.is_global:
+        fetched_at = _now()
+        try:
+            stale_hours = max(1, int(os.getenv("STALE_HOURS", "72")))
+        except ValueError:
+            stale_hours = 72
         return {
             "ip": str(address),
             "is_private": True,
@@ -209,7 +309,8 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
             "identity_evidence": ["Non-public address"],
             "field_sources": {},
             "provider_status": {},
-            "fetched_at": _now(),
+            "fetched_at": fetched_at,
+            "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=stale_hours)).isoformat(),
             "organization_confidence": 0,
             "reputation": [],
             "provider_errors": [],
@@ -222,6 +323,7 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
             "is_hosting": None,
             "is_vpn": None,
             "is_proxy": None,
+            "proxy_type": None,
             "is_tor": None,
             "abuse_score": None,
             "abuse_reports": None,
@@ -235,6 +337,7 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
         "is_hosting": None,
         "is_vpn": None,
         "is_proxy": None,
+        "proxy_type": None,
         "is_tor": None,
         "reputation": [],
         "abuse_score": None,
@@ -246,6 +349,14 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
     provider_status: dict[str, dict] = {}
     errors: list[str] = []
     sources: list[str] = []
+
+    local, local_status, local_fields, local_errors = await asyncio.to_thread(_local_intelligence, ip_text)
+    _merge(result, local, "local intelligence", field_sources)
+    field_sources.update(local_fields)
+    provider_status.update(local_status)
+    errors.extend(local_errors)
+    if local:
+        sources.append("local intelligence")
 
     # 1) MaxMind local first.
     # The _maxmind and _tor_exit_list calls are synchronous, blocking
@@ -261,7 +372,22 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
     if _merge(result, mm, "MaxMind", field_sources):
         sources.append("MaxMind")
 
-    # 2) Tor is the only local privacy source currently enabled.
+    # 2) Optional MaxMind Anonymous IP database provides real VPN/proxy flags.
+    anonymous, anonymous_errors, anonymous_state = await asyncio.to_thread(_anonymous_ip, ip_text)
+    errors.extend(anonymous_errors)
+    _provider_state(provider_status, "MaxMind Anonymous IP", anonymous_state, anonymous_errors[0] if anonymous_errors else None)
+    if _merge(result, anonymous, "MaxMind Anonymous IP", field_sources):
+        sources.append("MaxMind Anonymous IP")
+
+    # 3) Optional local CIDR lists are explicit, auditable VPN/proxy sources.
+    for env_name, label in (("VPN_NETWORKS_PATH", "VPN CIDR list"), ("PROXY_NETWORKS_PATH", "Proxy CIDR list")):
+        matched, matched_errors, matched_state = await asyncio.to_thread(_cidr_flag, ip_text, env_name, label)
+        errors.extend(matched_errors)
+        _provider_state(provider_status, label, matched_state, matched_errors[0] if matched_errors else None)
+        if _merge(result, matched, label, field_sources):
+            sources.append(label)
+
+    # 4) Tor remains a separate local privacy source.
     tor, tor_errors, tor_state = await asyncio.to_thread(_tor_exit_list, ip_text)
     errors.extend(tor_errors)
     _provider_state(provider_status, "Tor exit list", tor_state, tor_errors[0] if tor_errors else None)
@@ -285,18 +411,27 @@ async def lookup(ip: str, attempt: int = 1) -> dict:
 
     privacy_fields = ("is_vpn", "is_proxy", "is_hosting", "is_tor")
     privacy_status = "complete" if all(result.get(f) is not None for f in privacy_fields) else "unknown"
+    if any(result.get(f) is True for f in ("is_vpn", "is_proxy", "is_hosting")):
+        privacy_status = "partial" if privacy_status == "unknown" else privacy_status
+    threat_status = "complete" if any(k == "threat_indicators" for k in result) else "unknown"
 
+    fetched_at = _now()
+    try:
+        stale_hours = max(1, int(os.getenv("STALE_HOURS", "72")))
+    except ValueError:
+        stale_hours = 72
     result.update({
         "organization_confidence": confidence,
         "identity_evidence": identity_evidence + errors,
         "field_sources": field_sources,
         "provider_status": provider_status,
         "sources": list(dict.fromkeys(sources)),
-        "fetched_at": _now(),
+        "fetched_at": fetched_at,
+        "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=stale_hours)).isoformat(),
         "provider_errors": errors,
         "core_enrichment_status": core_status,
         "privacy_enrichment_status": privacy_status,
-        "threat_enrichment_status": "unknown",
+        "threat_enrichment_status": threat_status,
         "enrichment_status": core_status,
         "next_retry_at": None,  # local-only pass does not schedule online retries
         "enrichment_attempts": attempt,

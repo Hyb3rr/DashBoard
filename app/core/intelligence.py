@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .telemetry import confidence_for_label, data_health
+
 
 def _region_nudge(region_profile: dict) -> tuple[int, str | None]:
     """Return a small, behavior-gated conflict nudge from typed indicators."""
@@ -21,7 +23,7 @@ def _region_nudge(region_profile: dict) -> tuple[int, str | None]:
     return min(severity, 5), evidence
 
 
-def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None) -> dict:
+def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None, cluster: dict | None = None) -> dict:
     """Classify an IP with behavior-first, auditable rule groups.
 
     A (behavior) is sourced from the normalized observation's behavior_score.
@@ -32,9 +34,9 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     observation = observation or {}
     region_profile = region_profile or {}
     evidence: list[str] = []
-    behavior_score = max(0, min(int(observation.get("behavior_score") or 0), 100))
-    requests = int(observation.get("requests") or 0)
-    hard_behavior = int(observation.get("sensitive_probe_requests") or 0) > 0
+    behavior_score = max(0, min(int(observation.get("recent_behavior_score", observation.get("behavior_score")) or 0), 100))
+    requests = int(observation.get("recent_requests", observation.get("requests")) or 0)
+    hard_behavior = int(observation.get("recent_sensitive_probe_requests", observation.get("sensitive_probe_requests")) or 0) > 0
 
     # Group A: logs.py is the single owner of behavior scoring.
     group_a = behavior_score
@@ -78,12 +80,18 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     group_e = 0
     if ai_profile:
         ai_score = int(ai_profile.get("ai_anomaly_score") or 0)
-        if group_a < 25 and ai_score >= 70:
+        windows_seen = int(ai_profile.get("windows_seen") or 0)
+        if group_a < 25 and ai_score >= 70 and windows_seen >= 3:
             group_e = 8
             windows = ai_profile.get("anomalous_windows", 0)
             evidence.append(f"E — AI flagged {windows} anomalous window(s) despite low rule-based score (+8)")
 
-    base_score = group_a + group_b + group_c + group_d
+    group_f = 0
+    if cluster and len(cluster.get("member_ips") or []) >= 3:
+        group_f = min(5, int(cluster.get("campaign_score") or 0) // 20)
+        evidence.append(f"F — possible ASN campaign {cluster.get('cluster_id')} ({len(cluster.get('member_ips') or [])} IPs, {len(cluster.get('shared_paths') or [])} shared sensitive paths; +{group_f})")
+
+    base_score = group_a + group_b + group_c + group_d + group_f
     score = max(0, min(base_score + group_e, 100))
     if requests < 3 and group_a == 0 and group_b == 0 and group_e == 0:
         label = "unknown"
@@ -100,12 +108,15 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "good": "No strong hostile indicators in current evidence",
         "unknown": "Insufficient traffic or identity evidence to classify",
     }
-    confidence = 90 if label == "bad" else 75 if label == "watch" else 65 if label == "good" else 35
+    health = data_health(observation, profile, ai_profile, cluster)
+    confidence, confidence_factors = confidence_for_label(label, health)
     return {
         "label": label,
         "score": score,
         "confidence": confidence,
         "summary": summaries[label],
         "evidence": evidence,
-        "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e},
+        "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e, "correlation_f": group_f},
+        "data_health": health,
+        "confidence_factors": confidence_factors,
     }

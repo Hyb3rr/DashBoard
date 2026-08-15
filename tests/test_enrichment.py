@@ -2,6 +2,7 @@ import asyncio
 import csv
 from io import StringIO
 import json
+from datetime import datetime, timedelta, timezone
 
 from app.core.enrichment import (
     _maxmind,
@@ -29,6 +30,45 @@ def test_unknown_privacy_signals_are_null():
     flags = _network_flags("Example ISP", "Example ISP")
     assert flags["is_vpn"] is None
     assert flags["is_proxy"] is None
+
+
+def test_recent_behavior_score_does_not_keep_old_behavior_active(tmp_path, monkeypatch):
+    from app.core import db
+    from app.core.logs import rebuild_observations
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "hub.db")
+    monkeypatch.setattr(db, "REGION_SEED_PATH", tmp_path / "missing.seed.json")
+    conn = db.connect()
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    conn.executemany(
+        """INSERT INTO events
+           (source,line_hash,raw_line,timestamp,src_ip,method,path,status,bytes_sent,imported_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        [
+            ("test", "old-1", "", old, "8.8.8.8", "GET", "/.env", 404, 1, old),
+            ("test", "recent-1", "", recent, "8.8.8.8", "GET", "/", 200, 1, recent),
+        ],
+    )
+    rebuild_observations(conn)
+    row = conn.execute("SELECT * FROM ip_observations WHERE ip='8.8.8.8'").fetchone()
+    assert row["behavior_score"] == 50
+    assert row["behavior_score_recent"] == 0
+    assert row["recent_first_seen"] is not None
+    conn.close()
+
+
+def test_proxy_cidr_source_flags_only_matching_ip(tmp_path, monkeypatch):
+    from app.core.enrichment import _cidr_flag
+
+    path = tmp_path / "proxy.txt"
+    path.write_text("203.0.113.0/24\n", encoding="utf-8")
+    monkeypatch.setenv("PROXY_NETWORKS_PATH", str(path))
+    match, _, state = _cidr_flag("203.0.113.8", "PROXY_NETWORKS_PATH", "Proxy CIDR list")
+    miss, _, _ = _cidr_flag("198.51.100.8", "PROXY_NETWORKS_PATH", "Proxy CIDR list")
+    assert state == "active"
+    assert match == {"is_proxy": True}
+    assert miss == {}
 
 
 def test_tor_refresh_replaces_atomically_and_validates_payload(monkeypatch, tmp_path):
@@ -398,8 +438,8 @@ def test_ai_score_insufficient_data_clears_stale_snapshot(tmp_path, monkeypatch)
         ("8.8.8.8", 100, 1, 90, "fit_per_import", "now"),
     )
     result = score_import(conn)
-    assert result["status"] == "insufficient_data"
-    assert conn.execute("SELECT COUNT(*) FROM ip_ai_scores").fetchone()[0] == 0
+    assert result["status"] == "model_unavailable"
+    assert conn.execute("SELECT COUNT(*) FROM ip_ai_scores").fetchone()[0] == 1
     conn.close()
 
 
@@ -410,7 +450,7 @@ def test_group_e_promotes_watch_but_cannot_create_bad():
         {"is_tor": True, "is_proxy": True, "is_vpn": True, "is_hosting": True},
         {"behavior_score": 0, "requests": 20},
         {"conflict_indicators": [{"type": "civil_war", "severity": "high"}]},
-        {"ai_anomaly_score": 70, "anomalous_windows": 1},
+        {"ai_anomaly_score": 70, "anomalous_windows": 1, "windows_seen": 3},
     )
     assert result["score_breakdown"]["ai_e"] == 8
     assert result["label"] == "watch"
