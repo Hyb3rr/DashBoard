@@ -5,7 +5,6 @@ import json
 from app.core import db
 from app.core.buckets import bucket_sums, upsert_buckets
 from app.core.logs import rebuild_observations
-from app.core.correlation import asn_clusters
 from app.services.dispositions import ensure_disposition, set_disposition
 
 
@@ -89,26 +88,6 @@ def test_privacy_provider_freshness_and_proxy_type(monkeypatch):
     due = datetime.fromisoformat(result["privacy_recheck_due_at"])
     fetched = datetime.fromisoformat(result["fetched_at"])
     assert timedelta(hours=71, minutes=59) <= due - fetched <= timedelta(hours=72, seconds=1)
-
-
-def test_asn_cluster_requires_shared_sensitive_paths_and_excludes_other_asn(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "hub.db")
-    monkeypatch.setattr(db, "REGION_SEED_PATH", tmp_path / "missing.seed.json")
-    conn = db.connect()
-    stamp = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    for index in range(1, 7):
-        ip = f"198.51.100.{index}"
-        asn = "AS64500" if index < 6 else "AS64501"
-        conn.execute("INSERT INTO ip_profiles(ip, asn, organization, fetched_at) VALUES (?, ?, ?, ?)", (ip, asn, "Example Net", stamp.isoformat()))
-        upsert_buckets(conn, [
-            {"src_ip": ip, "timestamp": (stamp + timedelta(minutes=index % 3)).isoformat(), "path": path, "status": 404}
-            for path in ("/.env", "/.git/config", "/wp-config.php")
-        ])
-    clusters = asn_clusters(conn, stamp - timedelta(minutes=1))
-    assert len(clusters) == 1
-    assert len(clusters[0]["member_ips"]) == 5
-    assert clusters[0]["shared_paths"] == ["/.env", "/.git/config", "/wp-config.php"]
-    conn.close()
 
 
 def test_disposition_history_survives_recommendation_refresh(tmp_path, monkeypatch):

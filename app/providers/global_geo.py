@@ -24,6 +24,16 @@ def _upsert_prefix(conn, network: str, source: str, **values) -> None:
     )
 
 
+def _prefix_params(rows: list[dict], source: str, now: str, rir: str) -> list[tuple]:
+    return [
+        (
+            row["network"], None, None, None, rir, row["country_code"],
+            source, None, now, now, "{}",
+        )
+        for row in rows
+    ]
+
+
 def parse_rir_delegated(payload: str, rir: str) -> list[dict]:
     """Parse RIR delegated-extended records into normalized IPv4/IPv6 rows."""
     rows = []
@@ -59,8 +69,16 @@ def refresh_rir(conn, rir: str, url: str, cache: Path | None = None) -> dict:
         if not rows:
             return {"status": "failed", "error": "empty or invalid RIR delegated payload", "records_upserted": 0}
         conn.execute("UPDATE geo_prefixes SET active=0 WHERE source=?", (f"rir:{rir.lower()}",))
-        for row in rows:
-            _upsert_prefix(conn, row["network"], f"rir:{rir.lower()}", rir=rir, registration_country=row["country_code"])
+        source = f"rir:{rir.lower()}"
+        conn.executemany(
+            """INSERT INTO geo_prefixes
+               (network,asn,organization,network_type,rir,registration_country,source,source_version,first_seen,last_seen,active,metadata_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
+               ON CONFLICT(network,source) DO UPDATE SET
+                 rir=excluded.rir, registration_country=excluded.registration_country,
+                 last_seen=excluded.last_seen, active=1, metadata_json=excluded.metadata_json""",
+            _prefix_params(rows, source, datetime.now(timezone.utc).isoformat(), rir),
+        )
         conn.commit()
         return {"status": result["status"], "records_upserted": len(rows), "source": f"rir:{rir.lower()}"}
     except Exception as exc:
@@ -101,15 +119,14 @@ def refresh_geofeed(conn, name: str, url: str, cache: Path | None = None) -> dic
             return {"status": "failed", "error": "empty or invalid geofeed", "records_upserted": 0}
         now = datetime.now(timezone.utc).isoformat()
         source = f"geofeed:{name}"
-        for row in rows:
-            conn.execute(
-                """INSERT INTO geo_location_observations
-                   (network,country_code,country,source,source_confidence,location_scope,observed_at,metadata_json)
-                   VALUES(?,?,?,?,?,?,?,?)
-                   ON CONFLICT(network,source,location_scope) DO UPDATE SET country_code=excluded.country_code,
-                     source_confidence=excluded.source_confidence,observed_at=excluded.observed_at""",
-                (row["network"], row["country_code"], None, source, 95, "network", now, "{}"),
-            )
+        conn.executemany(
+            """INSERT INTO geo_location_observations
+               (network,country_code,country,source,source_confidence,location_scope,observed_at,metadata_json)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(network,source,location_scope) DO UPDATE SET country_code=excluded.country_code,
+                 source_confidence=excluded.source_confidence,observed_at=excluded.observed_at""",
+            [(row["network"], row["country_code"], None, source, 95, "network", now, "{}") for row in rows],
+        )
         conn.commit()
         return {"status": result["status"], "records_upserted": len(rows), "source": source}
     except Exception as exc:

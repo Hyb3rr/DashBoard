@@ -11,7 +11,6 @@ import socket
 
 from ..core.db import decode, encode, region_profile
 from ..core.enrichment import lookup
-from ..core.correlation import cluster_for_ip
 from ..core.intelligence import classify_ip
 from ..core.geo_resolver import GEO_RULESET_VERSION, persist_resolution
 from .classification import build_classification_snapshot
@@ -80,9 +79,6 @@ def attach_region_and_classification(conn, data: dict, observation: dict | None 
     ai_profile = snapshot.ai_profile if snapshot else ai_profile_for_ip(conn, data.get("ip"))
     if ai_profile:
         data["ai_profile"] = ai_profile
-    cluster = snapshot.cluster if snapshot else cluster_for_ip(conn, data.get("ip"))
-    if cluster:
-        data["cluster"] = cluster
     if observation is not None and data.get("ip"):
         history = conn.execute(
             "SELECT MIN(bucket_minute) AS first_bucket, MAX(bucket_minute) AS last_bucket FROM ip_time_buckets WHERE ip=?",
@@ -96,7 +92,7 @@ def attach_region_and_classification(conn, data: dict, observation: dict | None 
                 observation["rule_coverage"] = observation["bucket_history_hours"] >= 24
             except ValueError:
                 pass
-    classification = snapshot.classification if snapshot else classify_ip(data, observation, region, ai_profile, cluster)
+    classification = snapshot.classification if snapshot else classify_ip(data, observation, region, ai_profile)
     data["data_health"] = classification["data_health"]
     from .dispositions import ensure_disposition
     data["disposition"] = ensure_disposition(conn, data["ip"], classification["label"])

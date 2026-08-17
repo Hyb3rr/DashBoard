@@ -204,6 +204,7 @@ html[data-theme="light"] .signal{background:rgba(22,54,64,.1)}
 <script>
 const initialTheme=localStorage.getItem('sentinel-theme')||'dark';document.documentElement.dataset.theme=initialTheme;
 let ips=[],regions=[],regionDemand=[],sortField='threat_signal_score',sortDir='desc',lastFocus=null;
+let ipsReady=false,regionsReady=false;
 const $=id=>document.getElementById(id);
 const API_BASE=(location.protocol==='file:'||!['127.0.0.1:8000','localhost:8000'].includes(location.host))?'http://127.0.0.1:8000':'';
 const apiUrl=path=>API_BASE+path;
@@ -245,14 +246,20 @@ function geoSummary(d){
   const regText=reg?`${reg.country||reg.country_code||'Unknown'} (${reg.country_code||'—'}) · ${reg.source||'RIR'}`:'Unavailable';
   return `<div class="geo-summary"><div class="geo-summary-grid"><div class="geo-summary-item"><span>Operational country</span><strong>${esc(country)} (${esc(code)})</strong></div><div class="geo-summary-item"><span>Operational confidence</span><strong>${num(confidence)}% · ${disputed?'DISPUTED':'RESOLVED'}</strong></div><div class="geo-summary-item"><span>RIR registration</span><strong>${esc(regText)}</strong></div><div class="geo-summary-item"><span>Allocation pattern</span><strong>${esc(allocationLabel(pattern))}</strong></div><div class="geo-summary-item"><span>Location scope</span><strong>${esc(scope)}</strong></div><div class="geo-summary-item"><span>Operational sources</span><strong>${esc((loc.sources||[]).join(', ')||'none')}</strong></div></div><div class="geo-callout ${tone}">${esc(note)}</div><div class="geo-source-list">${geoSourceRows(loc)}</div></div>`;
 }
-function renderAnalytics(){
+function renderClassificationAnalytics(){
   const counts={bad:0,watch:0,good:0,unknown:0};ips.forEach(x=>{counts[classification(x)]=(counts[classification(x)]||0)+1});
   const total=Math.max(1,ips.length), colors={bad:'var(--critical)',watch:'var(--watch)',good:'var(--stable)',unknown:'var(--tertiary)'};
   $('classification-chart').innerHTML=Object.entries(counts).map(([label,count])=>`<div class="risk-chart-row"><label>${label}</label><div class="risk-track"><div class="risk-fill" style="width:${(count/total)*100}%;background:${colors[label]}"></div></div><b>${num(count)}</b></div>`).join('');
   const scored=ips.filter(x=>Object.keys(x.ai_profile||{}).length>0),flagged=scored.filter(x=>Number(x.ai_profile?.ai_anomaly_score||0)>=70);
   $('ai-scored').textContent=num(scored.length);$('ai-flagged').textContent=num(flagged.length);$('ai-coverage').textContent=ips.length?`${(scored.length/ips.length*100).toFixed(2)}%`:'—';
+}
+function renderRegionAnalytics(){
   const market=regions.filter(x=>x.market_score!=null).sort((a,b)=>Number(b.market_score)-Number(a.market_score)).slice(0,5),maxMarket=Math.max(1,...market.map(x=>Number(x.market_score)));
   $('region-signal-bars').innerHTML=market.length?market.map(x=>`<div class="signal-bar"><label title="${esc(x.country_name)}">${esc(x.country_code)} · <strong>${esc(x.country_name)}</strong></label><div class="risk-track"><div class="risk-fill" style="width:${Number(x.market_score)/maxMarket*100}%;background:var(--radar)"></div></div><b>${num(x.market_score)}</b></div>`).join(''):'<div class="state">No scored market data.</div>';
+}
+function renderAnalytics(){
+  if(ipsReady)renderClassificationAnalytics();
+  if(regionsReady)renderRegionAnalytics();
 }
 function trafficTime(value){return new Date(value).toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}
 function trafficClock(value){return new Date(value).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}
@@ -345,14 +352,18 @@ function render(){
 const IP_SNAPSHOT_KEY='hub:v3:ip-snapshot';let ipCursor=0,deltaBusy=false,trafficTimer=null,eventSource=null;
 function readIpSnapshot(){try{const saved=JSON.parse(sessionStorage.getItem(IP_SNAPSHOT_KEY)||'null');if(saved&&Array.isArray(saved.items)){ipCursor=Number(saved.cursor||0);return saved.items}}catch(_){}return null}
 function saveIpSnapshot(){try{sessionStorage.setItem(IP_SNAPSHOT_KEY,JSON.stringify({items:ips,cursor:ipCursor,ts:Date.now()}))}catch(_){} }
-function mergeIpItems(items){const byIp=new Map(ips.map(item=>[item.ip,item]));(items||[]).forEach(item=>byIp.set(item.ip,item));ips=Array.from(byIp.values());saveIpSnapshot();summary();render();renderAnalytics()}
-async function loadIpSnapshot(force=false){setBusy(true);try{if(!force){const saved=readIpSnapshot();if(saved){ips=saved;summary();render();renderAnalytics();await syncIpDelta();return}}const response=await fetch(apiUrl('/api/ips/snapshot?limit=500'),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipCursor=Number(data.cursor||0);saveIpSnapshot();summary();render();renderAnalytics()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="10"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}finally{setBusy(false)}}
+function mergeIpItems(items){const byIp=new Map(ips.map(item=>[item.ip,item]));(items||[]).forEach(item=>byIp.set(item.ip,item));ips=Array.from(byIp.values());ipsReady=true;saveIpSnapshot();summary();render();renderAnalytics()}
+async function loadIpSnapshot(force=false){setBusy(true);try{if(!force){const saved=readIpSnapshot();if(saved){ips=saved;ipsReady=true;summary();render();renderAnalytics();await syncIpDelta();return}}const response=await fetch(apiUrl('/api/ips/snapshot?limit=500'),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipsReady=true;ipCursor=Number(data.cursor||0);saveIpSnapshot();summary();render();renderAnalytics()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="10"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}finally{setBusy(false)}}
 async function syncIpDelta(){if(deltaBusy)return;deltaBusy=true;try{let after=ipCursor,more=true;while(more){const response=await fetch(apiUrl(`/api/ips/updates?after=${encodeURIComponent(after)}&limit=500`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();if(data.reset_required){await loadIpSnapshot(true);return}if(data.items?.length)mergeIpItems(data.items);after=Number(data.cursor||after);more=Boolean(data.has_more);ipCursor=after;saveIpSnapshot()}}catch(_){}finally{deltaBusy=false}}
 function scheduleTrafficRefresh(){if(trafficTimer)return;trafficTimer=window.setTimeout(()=>{trafficTimer=null;loadTraffic(true)},1000)}
 function setCollectorStatus(data){const state=data.status||'unknown';$('collector-state').textContent=state==='backlog'?'Replaying log…':state.charAt(0).toUpperCase()+state.slice(1);$('collector-dot').style.background=state==='live'?'var(--stable)':state==='retrying'||state==='config_error'?'var(--hostile)':'var(--watch)'}
 function startRealtime(){if(!window.EventSource)return;eventSource=new EventSource('/api/stream');window.setInterval(()=>loadTraffic(true),5000);eventSource.addEventListener('ip_changes',()=>{syncIpDelta();scheduleTrafficRefresh()});eventSource.addEventListener('collector_status',event=>{try{setCollectorStatus(JSON.parse(event.data))}catch(_){}});eventSource.addEventListener('ai_trained',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI training: ${data.status}`);syncIpDelta()}catch(_){}});eventSource.addEventListener('ai_scored',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI scoring: ${data.status}`);syncIpDelta()}catch(_){}});eventSource.onerror=()=>{ $('collector-state').textContent='Reconnecting…';$('collector-dot').style.background='var(--watch)'};fetch('/api/collector/status',{cache:'no-store'}).then(r=>r.json()).then(setCollectorStatus).catch(()=>{})}
-async function loadRegions(){try{const [regionData,demandData]=await Promise.all([cachedFetch(apiUrl('/api/regions?limit=200'),600000),cachedFetch(apiUrl('/api/regions/demand-signal?limit=24'),45000)]);regions=regionData;regionDemand=demandData;renderAnalytics()}catch{$('region-signal-bars').innerHTML='<div class="state">Market signals unavailable.</div>'}}
-async function refreshDashboard(){if(window.invalidateHubCache)window.invalidateHubCache();try{sessionStorage.removeItem(IP_SNAPSHOT_KEY)}catch(_){}await Promise.all([loadIpSnapshot(true),loadRegions(),loadTraffic(true)])}
+async function loadRegions(){
+  const regionRequest=cachedFetch(apiUrl('/api/regions?limit=200'),600000).then(data=>{regions=data;regionsReady=true;renderRegionAnalytics();return data}).catch(()=>{$('region-signal-bars').innerHTML='<div class="state"><strong>Market signals unavailable.</strong>Regions widget failed independently.</div>';return null});
+  cachedFetch(apiUrl('/api/regions/demand-signal?limit=24'),45000).then(data=>{regionDemand=data}).catch(()=>{});
+  return regionRequest;
+}
+async function refreshDashboard(){if(window.invalidateHubCache)window.invalidateHubCache();try{sessionStorage.removeItem(IP_SNAPSHOT_KEY)}catch(_){}await Promise.allSettled([loadIpSnapshot(true),loadRegions(),loadTraffic(true)])}
 function openDrawer(){lastFocus=document.activeElement;$('drawer').classList.add('open');$('drawer').setAttribute('aria-hidden','false');document.body.style.overflow='hidden';$('drawer').querySelector('button').focus()}
 function closeDrawer(){$('drawer').classList.remove('open');$('drawer').setAttribute('aria-hidden','true');document.body.style.overflow='';lastFocus?.focus()}
 function evidence(items){return items?.length?items.map(item=>`<div class="evidence-item">${esc(item)}</div>`).join(''):'<div class="evidence-item">No provider evidence available.</div>'}

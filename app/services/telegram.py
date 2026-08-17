@@ -40,7 +40,7 @@ def format_bad_alert(ip: str, classification: dict[str, Any], profile: dict[str,
     evidence_text = "\n".join(f"• {html.escape(str(item))}" for item in evidence[:8]) or "• no evidence detail"
     score_text = " / ".join(
         f"{key}={int(breakdown.get(key, 0) or 0)}"
-        for key in ("behavior_a", "identity_b", "trust_c", "region_d", "ai_e", "correlation_f")
+        for key in ("behavior_a", "identity_b", "trust_c", "region_d", "ai_e")
     )
     reasons = "\n".join(
         f"• {html.escape(str(explanations[key]))}"

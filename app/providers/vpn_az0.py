@@ -69,12 +69,12 @@ def refresh(conn, url: str | None = None, timeout: int = 30) -> dict:
             # Replace only this provider's snapshot. Failed providers retain their
             # last-good records instead of disappearing from local intelligence.
             conn.execute("UPDATE privacy_networks SET active=0 WHERE source='az0_vpn_ip' AND kind='vpn' AND provider=?", (name,))
-        for network in found:
-            conn.execute("""INSERT INTO privacy_networks(network,kind,provider,source,first_seen,last_seen,checked_at,metadata_json,active)
-              VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(source,kind,network) DO UPDATE SET provider=excluded.provider,last_seen=excluded.last_seen,checked_at=excluded.checked_at,active=1""",
-              (network,"vpn",name,"az0_vpn_ip",now,now,now,json.dumps({"errors":errors})))
-            conn.execute("INSERT INTO privacy_network_history(network,kind,provider,source,first_seen,last_seen,observed_at,metadata_json) VALUES(?,?,?,?,?,?,?,?)",
-                         (network, "vpn", name, "az0_vpn_ip", now, now, now, json.dumps({"errors": errors})))
+        metadata = json.dumps({"errors": errors})
+        conn.executemany("""INSERT INTO privacy_networks(network,kind,provider,source,first_seen,last_seen,checked_at,metadata_json,active)
+          VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(source,kind,network) DO UPDATE SET provider=excluded.provider,last_seen=excluded.last_seen,checked_at=excluded.checked_at,active=1""",
+          [(network, "vpn", name, "az0_vpn_ip", now, now, now, metadata) for network in found])
+        conn.executemany("INSERT INTO privacy_network_history(network,kind,provider,source,first_seen,last_seen,observed_at,metadata_json) VALUES(?,?,?,?,?,?,?,?)",
+                         [(network, "vpn", name, "az0_vpn_ip", now, now, now, metadata) for network in found])
         total += len(found); statuses[name] = {"status": "ok" if found and not errors else "partial" if found else "failed", "records": len(found), "errors": errors}
     conn.commit()
     status = "updated" if total and all(item.get("status") == "ok" for item in statuses.values()) else "partial" if total else "failed"

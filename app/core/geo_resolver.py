@@ -30,6 +30,8 @@ import ipaddress
 import json
 from datetime import datetime, timedelta, timezone
 
+from .net_utils import candidate_networks
+
 
 SOURCE_WEIGHTS = {
     "geofeed": 95,
@@ -142,7 +144,12 @@ def resolve_network_location(conn, ip: str, vendor: dict | None = None) -> dict:
     """Resolve one IP using only local SQLite snapshots and optional vendor data."""
     address = ipaddress.ip_address(ip)
     prefixes = []
-    for row in conn.execute("SELECT * FROM geo_prefixes WHERE active=1"):
+    candidates = candidate_networks(address)
+    placeholders = ",".join("?" for _ in candidates)
+    for row in conn.execute(
+        f"SELECT * FROM geo_prefixes WHERE active=1 AND network IN ({placeholders})",
+        candidates,
+    ):
         try:
             if address in ipaddress.ip_network(row["network"], strict=False):
                 prefixes.append(dict(row))

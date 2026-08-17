@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def data_health(observation: dict | None, profile: dict | None, ai_profile: dict | None, cluster: dict | None) -> dict:
+def data_health(observation: dict | None, profile: dict | None, ai_profile: dict | None) -> dict:
     observation, profile, ai_profile = observation or {}, profile or {}, ai_profile or {}
     bucket_history = observation.get("bucket_history_hours")
     rule_coverage = bool(observation.get("rule_coverage", bucket_history is not None and float(bucket_history or 0) >= 24))
@@ -14,7 +14,6 @@ def data_health(observation: dict | None, profile: dict | None, ai_profile: dict
         "ai_confidence": ai_confidence,
         "ai_confidence_level": ai_profile.get("confidence_level") if ai_profile else "unavailable",
         "rule_coverage": rule_coverage,
-        "cluster_available": bool(cluster),
     }
     health["complete"] = (health["core_enrichment_status"] == "complete" and health["privacy_enrichment_status"] == "complete" and rule_coverage and bool(ai_profile))
     return health
@@ -33,6 +32,4 @@ def confidence_for_label(label: str, health: dict) -> tuple[int, list[str]]:
         score += 4; factors.append("AI confidence medium (+4)")
     if health.get("rule_coverage"):
         score += 5; factors.append("rule history covered (+5)")
-    if health.get("cluster_available"):
-        score += 2; factors.append("network correlation available (+2)")
     return max(0, min(100, score)), factors

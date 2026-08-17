@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import io
 import json
 import zipfile
@@ -6,6 +7,7 @@ import zipfile
 from app.core import db
 from app.core.enrichment import lookup
 from app.core.geo_resolver import resolve_network_location
+from app.core.net_utils import candidate_networks
 from app.providers.global_geo import parse_geofeed, parse_rir_delegated
 from app.providers import firehol, common, device_browser_info
 from app.providers import vpn_az0
@@ -20,6 +22,15 @@ def test_parse_rir_delegated_ipv4_and_ipv6():
     assert {row["country_code"] for row in rows} == {"US", "DE"}
     assert any(row["network"] == "198.51.100.0/24" for row in rows)
     assert any(row["network"] == "2001:db8::/32" for row in rows)
+
+
+def test_candidate_networks_are_bounded_and_canonical():
+    ipv4 = candidate_networks(ipaddress.ip_address("198.51.100.7"))
+    ipv6 = candidate_networks(ipaddress.ip_address("2001:db8::7"))
+    assert len(ipv4) == 34
+    assert len(ipv6) == 130
+    assert "198.51.100.0/24" in ipv4
+    assert "2001:db8::/32" in ipv6
 
 
 def test_geofeed_normalizes_country_and_cidr():
@@ -46,6 +57,29 @@ def test_resolver_prefers_geofeed_and_marks_close_conflict(tmp_path, monkeypatch
     assert result["confidence"] >= 90
     assert "geofeed:test" in result["sources"]
     conn.close()
+
+
+def test_database_initialization_is_cached_per_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "init.db")
+    monkeypatch.setattr(db, "REGION_SEED_PATH", tmp_path / "missing.json")
+    path_key = str((tmp_path / "init.db").resolve())
+    db._initialized_paths.discard(path_key)
+    original = db._migrate
+    calls = 0
+
+    def counted_migrate(conn):
+        nonlocal calls
+        calls += 1
+        return original(conn)
+
+    monkeypatch.setattr(db, "_migrate", counted_migrate)
+    first = db.connect()
+    second = db.connect()
+    assert calls == 1
+    assert first.execute("SELECT 1").fetchone()[0] == 1
+    assert second.execute("SELECT 1").fetchone()[0] == 1
+    first.close()
+    second.close()
 
 
 def test_lookup_exposes_network_location_without_network_io(tmp_path, monkeypatch):

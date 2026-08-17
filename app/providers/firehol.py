@@ -49,14 +49,13 @@ def refresh_list(conn, name: str, category: str | None = None, url: str | None =
     privacy_kind = "proxy" if name in {"firehol_proxies", "firehol_anonymous"} else None
     if privacy_kind:
         conn.execute("UPDATE privacy_networks SET active=0 WHERE source=? AND kind=?", (source, privacy_kind))
-    for network in networks:
-        conn.execute("""INSERT INTO threat_indicators(network,source,category,confidence,checked_at,evidence_json,active) VALUES(?,?,?,?,?,?,1)
-          ON CONFLICT(network,source,category) DO UPDATE SET checked_at=excluded.checked_at,active=1,evidence_json=excluded.evidence_json""",
-          (network,source,category,1.0,now,'{}'))
-        if privacy_kind:
-            conn.execute("""INSERT INTO privacy_networks
-              (network,kind,provider,proxy_type,source,first_seen,last_seen,checked_at,metadata_json,active)
-              VALUES(?,?,?,?,?,?,?,?,?,1)
-              ON CONFLICT(source,kind,network) DO UPDATE SET last_seen=excluded.last_seen,checked_at=excluded.checked_at,active=1""",
-              (network, privacy_kind, "FireHOL", "datacenter", source, now, now, now, '{"role":"proxy"}'))
+    conn.executemany("""INSERT INTO threat_indicators(network,source,category,confidence,checked_at,evidence_json,active) VALUES(?,?,?,?,?,?,1)
+      ON CONFLICT(network,source,category) DO UPDATE SET checked_at=excluded.checked_at,active=1,evidence_json=excluded.evidence_json""",
+      [(network, source, category, 1.0, now, "{}") for network in networks])
+    if privacy_kind:
+        conn.executemany("""INSERT INTO privacy_networks
+          (network,kind,provider,proxy_type,source,first_seen,last_seen,checked_at,metadata_json,active)
+          VALUES(?,?,?,?,?,?,?,?,?,1)
+          ON CONFLICT(source,kind,network) DO UPDATE SET last_seen=excluded.last_seen,checked_at=excluded.checked_at,active=1""",
+          [(network, privacy_kind, "FireHOL", "datacenter", source, now, now, now, '{"role":"proxy"}') for network in networks])
     conn.commit(); return {"status": result["status"], "url": url, "records_upserted": len(networks)}

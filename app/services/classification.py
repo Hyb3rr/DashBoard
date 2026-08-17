@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..core.correlation import cluster_for_ip
 from ..core.db import decode, region_profile
 from ..core.intelligence import classify_ip
 from ..core.rules import ruleset_hash
@@ -22,7 +21,6 @@ class ClassificationSnapshot:
     observation: dict
     region: dict
     ai_profile: dict | None
-    cluster: dict | None
     classification: dict
     window: str = "24h"
 
@@ -34,7 +32,6 @@ class ClassificationSnapshot:
             "observation": self.observation,
             "region": self.region,
             "ai_profile": self.ai_profile,
-            "cluster": self.cluster,
         })
         return result
 
@@ -131,8 +128,7 @@ def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:
     ai_profile = dict(ai_row) if ai_row else None
     if ai_profile:
         ai_profile["ai_evidence"] = decode(ai_profile.pop("ai_evidence_json", "[]"))
-    cluster = cluster_for_ip(conn, ip)
-    classification = classify_ip(profile, observation, region, ai_profile, cluster)
+    classification = classify_ip(profile, observation, region, ai_profile)
     classification["ruleset_hash"] = observation.get("ruleset_hash_24h") or ruleset_hash()
     classification["detections_recent"] = observation.get("detections_recent", [])
-    return ClassificationSnapshot(ip, profile, observation, region, ai_profile, cluster, classification)
+    return ClassificationSnapshot(ip, profile, observation, region, ai_profile, classification)

@@ -13,8 +13,7 @@ from urllib.parse import urlencode
 
 from ..ai.detector import load_model_bundle, score_cycle, train_model
 from ..core.db import connect
-from ..core.buckets import trim_buckets, upsert_buckets
-from ..core.correlation import asn_clusters
+from ..core.buckets import upsert_buckets
 from ..core.logs import parse_apache_combined, rebuild_observations_for_ips
 from ..core.change_feed import append_ip_changes
 from ..services.profiles import ensure_profile, refresh_due_profiles
@@ -133,9 +132,9 @@ class WebSocketCollector:
         self._ai_lock = asyncio.Lock()
         self._enrichment_task: asyncio.Task | None = None
         self._privacy_task: asyncio.Task | None = None
-        self._correlation_task: asyncio.Task | None = None
         self._enrichment_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
         self._enrichment_pending: set[str] = set()
+        self._enrichment_deferred: set[str] = set()
         self._owner = f"{socket.gethostname()}:{os.getpid()}"
 
     async def start(self) -> None:
@@ -160,9 +159,6 @@ class WebSocketCollector:
         self._privacy_task = asyncio.create_task(
             self.privacy_loop(), name="websocket-privacy-refresh"
         )
-        self._correlation_task = asyncio.create_task(
-            self.correlation_loop(), name="websocket-asn-correlation"
-        )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -173,7 +169,6 @@ class WebSocketCollector:
                 self._ai_task,
                 self._enrichment_task,
                 self._privacy_task,
-                self._correlation_task,
             )
             if task
         ]
@@ -181,9 +176,7 @@ class WebSocketCollector:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._task = self._ai_task = self._enrichment_task = self._privacy_task = (
-            self._correlation_task
-        ) = None
+        self._task = self._ai_task = self._enrichment_task = self._privacy_task = None
         if self._fit_executor:
             await asyncio.to_thread(
                 self._fit_executor.shutdown, wait=True, cancel_futures=True
@@ -496,7 +489,9 @@ class WebSocketCollector:
                 self._enrichment_queue.put_nowait(ip)
                 self._enrichment_pending.add(ip)
             except asyncio.QueueFull:
-                break
+                self._enrichment_pending.discard(ip)
+                self._enrichment_deferred.add(ip)
+                continue
         if affected:
             await bus.publish(
                 "ip_changes", {"cursor": int(cursor), "count": len(affected)}
@@ -549,7 +544,6 @@ class WebSocketCollector:
                     affected.add(ip)
             upsert_buckets(conn, parsed_inserted)
             rebuild_observations_for_ips(conn, tuple(affected))
-            trim_buckets(conn)
             append_ip_changes(conn, sorted(affected), "traffic", now)
             for ip in sorted(affected):
                 if not conn.execute(
@@ -582,28 +576,65 @@ class WebSocketCollector:
         finally:
             conn.close()
 
+    @staticmethod
+    def _enrich_one(ip: str) -> tuple[str, bool, str | None]:
+        """Enrich one IP in a worker-owned SQLite connection."""
+        conn = connect()
+        try:
+            data, error = asyncio.run(ensure_profile(conn, ip))
+            return ip, bool(data and not error), error
+        except Exception as exc:
+            conn.rollback()
+            return ip, False, f"{type(exc).__name__}: {exc}"
+        finally:
+            conn.close()
+
     async def enrichment_loop(self) -> None:
+        concurrency = _env_int("ENRICHMENT_CONCURRENCY", 4, 1)
+        batch_size = _env_int("ENRICHMENT_BATCH_SIZE", 20, 1)
         while not self._stop.is_set():
-            ip = await self._enrichment_queue.get()
-            self._enrichment_pending.discard(ip)
-            conn = connect()
             try:
-                data, error = await ensure_profile(conn, ip)
-                if data:
+                first = await asyncio.wait_for(self._enrichment_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                first = None
+            batch = []
+            if first:
+                batch.append(first)
+            while len(batch) < batch_size:
+                try:
+                    batch.append(self._enrichment_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            deferred = list(self._enrichment_deferred)
+            self._enrichment_deferred.clear()
+            capacity = max(0, batch_size - len(batch))
+            batch.extend(deferred[:capacity])
+            self._enrichment_deferred.update(deferred[capacity:])
+            batch = list(dict.fromkeys(batch))
+            if not batch:
+                continue
+            for ip in batch:
+                self._enrichment_pending.discard(ip)
+            results = []
+            for start in range(0, len(batch), concurrency):
+                results.extend(await asyncio.gather(*[
+                    asyncio.to_thread(self._enrich_one, ip)
+                    for ip in batch[start:start + concurrency]
+                ]))
+            successful = [ip for ip, ok, _error in results if ok]
+            if successful:
+                conn = connect()
+                try:
                     now = utc_now()
-                    append_ip_changes(conn, (ip,), "enrichment", now)
+                    append_ip_changes(conn, successful, "enrichment", now)
                     trim_change_log(conn)
                     conn.commit()
                     cursor = conn.execute(
                         "SELECT COALESCE(MAX(seq), 0) AS seq FROM ip_change_log"
                     ).fetchone()["seq"]
-                    await bus.publish("ip_changes", {"cursor": int(cursor), "count": 1})
-                elif error:
-                    conn.rollback()
-            except Exception:
-                conn.rollback()
-            finally:
-                conn.close()
+                    await bus.publish("ip_changes", {"cursor": int(cursor), "count": len(successful)})
+                finally:
+                    conn.close()
 
     async def privacy_loop(self) -> None:
         interval = _env_int("LOG_WS_PRIVACY_REFRESH_INTERVAL_SECONDS", 3600, 60)
@@ -618,27 +649,6 @@ class WebSocketCollector:
                     await bus.publish(
                         "ip_changes", {"cursor": 0, "count": result["processed"]}
                     )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                conn.rollback()
-            finally:
-                conn.close()
-
-    async def correlation_loop(self) -> None:
-        interval = _env_int("LOG_WS_CORRELATION_INTERVAL_SECONDS", 3600, 300)
-        while not self._stop.is_set():
-            await asyncio.sleep(interval)
-            conn = connect()
-            try:
-                result = await asyncio.to_thread(
-                    asn_clusters,
-                    conn,
-                    None,
-                    _env_int("CORRELATION_OVERLAP_MINUTES", 10, 1),
-                )
-                if result:
-                    await bus.publish("ip_changes", {"cursor": 0, "count": len(result)})
             except asyncio.CancelledError:
                 raise
             except Exception:

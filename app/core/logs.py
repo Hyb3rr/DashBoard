@@ -9,7 +9,7 @@ import re
 import sqlite3
 
 from .db import encode
-from .buckets import bucket_sums, trim_buckets, upsert_buckets
+from .buckets import bucket_sums, upsert_buckets
 from .rules import BehaviorContext, run_rules, ruleset_hash
 from .change_feed import append_ip_changes
 from ..ai.detector import score_import
@@ -109,6 +109,7 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
         "recent_sensitive_probe_requests", "recent_bot_requests", "behavior_score_recent",
         "behavior_level_recent", "behavior_evidence_recent_json",
     )
+    changed_ips: list[str] = []
     for ip, row in rows.items():
         old_row = conn.execute(
             "SELECT " + ", ".join(behavior_columns) + " FROM ip_observations WHERE ip=?",
@@ -229,8 +230,9 @@ def _rebuild_observations(conn: sqlite3.Connection, ips: Sequence[str] | None = 
         ).fetchone()
         new_behavior = tuple(new_row[column] for column in behavior_columns)
         if old_behavior != new_behavior:
-            append_ip_changes(conn, (ip,), "behavior", now)
-    trim_buckets(conn)
+            changed_ips.append(ip)
+    if changed_ips:
+        append_ip_changes(conn, changed_ips, "behavior", now)
 
 
 def rebuild_observations(conn: sqlite3.Connection) -> None:

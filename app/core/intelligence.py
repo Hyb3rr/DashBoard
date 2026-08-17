@@ -23,7 +23,7 @@ def _region_nudge(region_profile: dict) -> tuple[int, str | None]:
     return min(severity, 5), evidence
 
 
-def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None, cluster: dict | None = None) -> dict:
+def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None) -> dict:
     """Classify an IP with behavior-first, auditable rule groups.
 
     A (behavior) is sourced from the normalized observation's behavior_score.
@@ -86,12 +86,7 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
             windows = ai_profile.get("anomalous_windows", 0)
             evidence.append(f"E — AI flagged {windows} anomalous window(s) despite low rule-based score (+8)")
 
-    group_f = 0
-    if cluster and len(cluster.get("member_ips") or []) >= 3:
-        group_f = min(5, int(cluster.get("campaign_score") or 0) // 20)
-        evidence.append(f"F — possible ASN campaign {cluster.get('cluster_id')} ({len(cluster.get('member_ips') or [])} IPs, {len(cluster.get('shared_paths') or [])} shared sensitive paths; +{group_f})")
-
-    base_score = group_a + group_b + group_c + group_d + group_f
+    base_score = group_a + group_b + group_c + group_d
     score = max(0, min(base_score + group_e, 100))
     score_explanations = {
         "A": (
@@ -109,7 +104,6 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "C": "",
         "D": "",
         "E": "",
-        "F": "",
     }
     if group_c == -20:
         score_explanations["C"] = f"C = -20: {profile.get('organization')} has confidence {org_confidence}%, is not hosting, and behavior A={group_a} is below 25."
@@ -140,19 +134,10 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     else:
         score_explanations["E"] = f"E = +8: AI anomaly score {ai_score} and {windows_seen} windows satisfied the gate."
 
-    if not cluster:
-        score_explanations["F"] = "F = 0: no ASN campaign correlation is available."
-    elif len(cluster.get("member_ips") or []) < 3:
-        score_explanations["F"] = f"F = 0: correlation has {len(cluster.get('member_ips') or [])} member IP(s); minimum is 3."
-    elif group_f == 0:
-        score_explanations["F"] = "F = 0: campaign exists, but campaign score is below the first +1 threshold."
-    else:
-        score_explanations["F"] = f"F = +{group_f}: ASN campaign correlation passed the member and campaign-score gates."
-
     if score != base_score + group_e:
         score_explanations["final"] = f"Final score clamped from {base_score + group_e} into 0–100."
     else:
-        score_explanations["final"] = "Final score is the sum of A+B+C+D+E+F with no clamp applied."
+            score_explanations["final"] = "Final score is the sum of A+B+C+D+E with no clamp applied."
     if requests < 3 and group_a == 0 and group_b == 0 and group_e == 0:
         label = "unknown"
     elif hard_behavior or base_score >= 60:
@@ -168,7 +153,7 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "good": "No strong hostile indicators in current evidence",
         "unknown": "Insufficient traffic or identity evidence to classify",
     }
-    health = data_health(observation, profile, ai_profile, cluster)
+    health = data_health(observation, profile, ai_profile)
     confidence, confidence_factors = confidence_for_label(label, health)
     return {
         "label": label,
@@ -176,7 +161,7 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "confidence": confidence,
         "summary": summaries[label],
         "evidence": evidence,
-        "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e, "correlation_f": group_f},
+        "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e},
         "score_explanations": score_explanations,
         "data_health": health,
         "confidence_factors": confidence_factors,

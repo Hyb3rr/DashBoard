@@ -8,6 +8,7 @@ from pathlib import Path
 from ..config.settings import TOR_EXIT_LIST
 from .db import connect
 from .geo_resolver import resolve_network_location
+from .net_utils import candidate_networks
 
 try:
     from dotenv import load_dotenv
@@ -171,21 +172,13 @@ def _risk(data: dict) -> tuple[int, str, list[str]]:
     return score, level, evidence
 
 
-def _candidate_networks(address: ipaddress._BaseAddress) -> list[str]:
-    """Return canonical supernets that can contain an address."""
-    return [str(address)] + [
-        str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
-        for prefix in range(address.max_prefixlen + 1)
-    ]
-
-
 def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
     """Read the updater's normalized snapshot; this function never performs I/O beyond SQLite."""
     result, providers, fields, errors = {}, {}, {}, []
     try:
         conn = connect()
         address = ipaddress.ip_address(ip)
-        candidates = _candidate_networks(address)
+        candidates = candidate_networks(address)
         placeholders = ",".join("?" for _ in candidates)
         matches = conn.execute(
             f"SELECT * FROM privacy_networks WHERE active=1 AND network IN ({placeholders})",

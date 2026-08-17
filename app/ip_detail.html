@@ -294,7 +294,6 @@ function scoreExplainer(b,c){
     ['C','Trust adjustment',Number(b.trust_c||0),20,'Trusted attributed network can reduce score when behavior risk is low.'],
     ['D','Region signal',Number(b.region_d||0),5,'Conflict nudge. Only active when behavior signal exists.'],
     ['E','AI anomaly',Number(b.ai_e||0),8,'AI anomaly bonus. Requires low rule score and enough scored windows.'],
-    ['F','Correlation',Number(b.correlation_f||0),5,'ASN/campaign correlation from shared IPs and sensitive paths.']
   ];
   const evidence=Array.isArray(c.evidence)?c.evidence:[],explanations=c.score_explanations||{};
   const signed=value=>value>0?`+${value}`:String(value);
@@ -371,7 +370,33 @@ function renderIpTraffic(data){
 function localIso(value){return value?new Date(value).toISOString():''}
 function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
 function syncTrafficInputs(start,end){const startInput=document.querySelector('#ip-traffic-start'),endInput=document.querySelector('#ip-traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end)}
-async function loadIpTraffic(){try{const params=new URLSearchParams({range:trafficRange});if(trafficStart)params.set('start',localIso(trafficStart));if(trafficEnd)params.set('end',localIso(trafficEnd));const res=await fetch(`/api/ip/${encodeURIComponent(ip)}/traffic?${params}`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const data=await res.json();syncTrafficInputs(data.start,data.end);renderIpTraffic(data)}catch(error){const chart=document.querySelector('#ip-traffic-chart');if(chart)chart.innerHTML=`<div class="state"><strong>Traffic unavailable</strong>${esc(error.message)}</div>`}}
+async function loadIpTraffic(){
+  const ids=['ip-traffic-chart','ip-status-codes','ip-top-paths','ip-recent-requests'];
+  ids.forEach(id=>{const node=document.querySelector('#'+id);if(node)node.innerHTML='<div class="state">Loading…</div>'});
+  try{
+    const params=new URLSearchParams({range:trafficRange});
+    if(trafficStart)params.set('start',localIso(trafficStart));
+    if(trafficEnd)params.set('end',localIso(trafficEnd));
+    const res=await fetch(`/api/ip/${encodeURIComponent(ip)}/traffic?${params}`,{cache:'no-store'});
+    if(!res.ok)throw Error(`HTTP ${res.status}`);
+    const data=await res.json();syncTrafficInputs(data.start,data.end);renderIpTraffic(data);
+  }catch(error){
+    ids.forEach(id=>{const node=document.querySelector('#'+id);if(node)node.innerHTML=`<div class="state"><strong>Unavailable</strong>${esc(error.message)}</div>`});
+    const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent='Traffic widget unavailable';
+  }
+}
+async function loadIpPaths(){
+  const body=document.querySelector('#ip-path-body'),head=document.querySelector('#ip-path-head');
+  if(!body)return;
+  body.innerHTML='<div class="state">Loading path activity…</div>';
+  try{
+    const res=await fetch('/api/ip/'+encodeURIComponent(ip)+'/paths?limit=12',{cache:'no-store'});
+    if(!res.ok)throw Error(`HTTP ${res.status}`);
+    const data=await res.json();
+    if(head)head.textContent=`top paths for this IP · ${num(data.total_requests)} requests`;
+    body.innerHTML=pathActivity(data);
+  }catch(error){body.innerHTML=`<div class="state"><strong>Path activity unavailable</strong>${esc(error.message)}</div>`}
+}
 function applyTrafficWindow(){trafficStart=document.querySelector('#ip-traffic-start').value;trafficEnd=document.querySelector('#ip-traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notifyIpTraffic('End must be after start');return}saveIpTrafficWindow();loadIpTraffic()}
 function notifyIpTraffic(message){const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent=message}
 
@@ -381,11 +406,7 @@ async function load(){
     if(!res.ok)throw Error(res.status===404?'IP case not found':'Could not load profile');
 
     const d=await res.json();
-    let pathData={paths:[],total_requests:0};
-    try{
-      const pathRes=await fetch('/api/ip/'+encodeURIComponent(ip)+'/paths?limit=12');
-      if(pathRes.ok)pathData=await pathRes.json();
-    }catch(_){/* profile remains useful when path analytics is unavailable */}
+    const pathData={paths:[],total_requests:0};
     const
       o=d.observation||{},
       r=d.region_profile||{},
@@ -468,8 +489,8 @@ async function load(){
           </section>
 
           <section class="card">
-            <div class="card-head"><h2>Path activity</h2><small>top paths for this IP · ${num(pathData.total_requests)} requests</small></div>
-            <div class="body">${pathActivity(pathData)}</div>
+            <div class="card-head"><h2>Path activity</h2><small id="ip-path-head">Loading path activity…</small></div>
+            <div class="body" id="ip-path-body"><div class="state">Loading path activity…</div></div>
           </section>
 
           <section class="card">
@@ -518,6 +539,7 @@ async function load(){
     syncTrafficInputs(trafficStart&&localIso(trafficStart)||new Date(Date.now()-3600000).toISOString(),trafficEnd&&localIso(trafficEnd)||new Date().toISOString());
     const themeButton=document.querySelector('#theme-toggle');themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;localStorage.setItem('sentinel-theme',next);themeButton.textContent=next==='dark'?'Light mode':'Dark mode'});
     loadIpTraffic();
+    loadIpPaths();
   }catch(e){
     document.querySelector('#app').innerHTML=`
       <div class="state">

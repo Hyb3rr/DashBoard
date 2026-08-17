@@ -11,6 +11,7 @@ from .regions import market_score, normalise_conflict_indicators, normalise_econ
 # schema migration serialized inside a process; SQLite's busy timeout below
 # handles a second process (for example Uvicorn's reloader) doing the same.
 _migration_lock = threading.RLock()
+_initialized_paths: set[str] = set()
 
 
 SCHEMA = """
@@ -253,19 +254,6 @@ CREATE TABLE IF NOT EXISTS alert_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_outbox_due ON alert_outbox(status, next_retry_at);
 
-CREATE TABLE IF NOT EXISTS ip_clusters (
-  cluster_id TEXT PRIMARY KEY,
-  asn TEXT,
-  organization TEXT,
-  member_ips_json TEXT NOT NULL DEFAULT '[]',
-  shared_paths_json TEXT NOT NULL DEFAULT '[]',
-  first_seen TEXT,
-  last_seen TEXT,
-  campaign_score INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ip_clusters_asn ON ip_clusters(asn);
-
 CREATE TABLE IF NOT EXISTS ip_dispositions (
   ip TEXT PRIMARY KEY,
   state TEXT NOT NULL DEFAULT 'new',
@@ -327,6 +315,7 @@ CREATE TABLE IF NOT EXISTS geo_prefixes (
 );
 CREATE INDEX IF NOT EXISTS idx_geo_prefixes_network ON geo_prefixes(network);
 CREATE INDEX IF NOT EXISTS idx_geo_prefixes_active ON geo_prefixes(active, source);
+CREATE INDEX IF NOT EXISTS idx_geo_prefixes_network_active ON geo_prefixes(network, active);
 
 CREATE TABLE IF NOT EXISTS geo_location_observations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -428,6 +417,10 @@ IP_PROFILE_COLUMNS = {
 }
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # ASN campaign correlation was removed from the product. Drop its legacy
+    # snapshot table during migration so old databases do not retain an
+    # orphaned feature surface.
+    conn.execute("DROP TABLE IF EXISTS ip_clusters")
     rule_state_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_firing_state)").fetchall()}
     if rule_state_columns and "window" not in rule_state_columns:
         conn.execute("ALTER TABLE rule_firing_state RENAME TO rule_firing_state_legacy")
@@ -688,6 +681,42 @@ def region_profile(conn: sqlite3.Connection, country_code: str | None):
     data.update(market_score(data))
     return data
 
+def _database_path_key() -> str:
+    return str(Path(DB_PATH).expanduser().resolve())
+
+
+def _initialize_database(conn: sqlite3.Connection, path_key: str) -> None:
+    """Initialize one database once per process.
+
+    Connections remain cheap and independent, while schema/migration/seed
+    work is serialized and skipped after the first successful initialization
+    for the same database path.  A failed initialization is deliberately not
+    cached so the next connection can retry it.
+    """
+    if path_key in _initialized_paths:
+        return
+    with _migration_lock:
+        if path_key in _initialized_paths:
+            return
+        conn.executescript(SCHEMA)
+        _migrate(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_offset "
+            "ON events(source, source_offset) WHERE source_offset IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ip_profiles_country_code "
+            "ON ip_profiles(country_code)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_geo_prefixes_network_active "
+            "ON geo_prefixes(network, active)"
+        )
+        _seed_region_profiles(conn)
+        conn.commit()
+        _initialized_paths.add(path_key)
+
+
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
@@ -701,16 +730,7 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=MEMORY")
-    conn.executescript(SCHEMA)
-    with _migration_lock:
-        _migrate(conn)
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_offset "
-        "ON events(source, source_offset) WHERE source_offset IS NOT NULL"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_profiles_country_code ON ip_profiles(country_code)")
-    _seed_region_profiles(conn)
-    conn.commit()
+    _initialize_database(conn, _database_path_key())
     return conn
 
 def encode(value):

@@ -20,6 +20,9 @@ def _path_hash(path: str | None) -> str:
 def upsert_buckets(conn: sqlite3.Connection, parsed_events: Iterable[dict]) -> set[str]:
     """Apply parsed events to minute buckets; caller owns the transaction."""
     affected: set[str] = set()
+    bucket_deltas: dict[tuple[str, str], dict[str, int | str]] = {}
+    path_deltas: dict[tuple[str, str], dict[str, int | str]] = {}
+    bucket_paths: set[tuple[str, str, str | None]] = set()
     for event in parsed_events:
         timestamp = event.get("timestamp")
         ip = event.get("src_ip")
@@ -29,83 +32,94 @@ def upsert_buckets(conn: sqlite3.Connection, parsed_events: Iterable[dict]) -> s
         status = int(event.get("status") or 0)
         path = (event.get("path") or "").lower()
         ua = (event.get("user_agent") or "").lower()
-        conn.execute(
-            """
-            INSERT INTO ip_time_buckets
-              (ip, bucket_minute, requests, status_2xx, status_3xx, status_4xx, status_5xx, status_403, status_404, post_requests,
-               sensitive_hits, wp_login_hits, bot_hits, bytes_sum, first_seen, last_seen)
-            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ip, bucket_minute) DO UPDATE SET
-              requests = requests + 1,
-              status_2xx = status_2xx + excluded.status_2xx,
-              status_3xx = status_3xx + excluded.status_3xx,
-              status_4xx = status_4xx + excluded.status_4xx,
-              status_5xx = status_5xx + excluded.status_5xx,
-              status_403 = status_403 + excluded.status_403,
-              status_404 = status_404 + excluded.status_404,
-              post_requests = post_requests + excluded.post_requests,
-              sensitive_hits = sensitive_hits + excluded.sensitive_hits,
-              wp_login_hits = wp_login_hits + excluded.wp_login_hits,
-              bot_hits = bot_hits + excluded.bot_hits,
-              bytes_sum = bytes_sum + excluded.bytes_sum,
-              first_seen = MIN(first_seen, excluded.first_seen),
-              last_seen = MAX(last_seen, excluded.last_seen)
-            """,
-            (
-                ip, minute,
-                int(200 <= status < 300), int(300 <= status < 400),
-                int(400 <= status < 500), int(status >= 500), int(status == 403), int(status == 404),
-                int((event.get("method") or "").upper() == "POST"),
-                int(any(marker in path for marker in (
-                    "/.env", "/.git", "wp-config.php", "xmlrpc.php",
-                    "phpmyadmin", "adminer", "vendor/phpunit",
-                ))),
-                int("/wp-login.php" in path),
-                int(any(word in ua for word in ("bot", "spider", "crawler", "feedfetcher", "archive.org_bot"))),
-                int(event.get("bytes_sent") or 0), timestamp, timestamp,
-            ),
-        )
-        path_inserted = conn.execute(
-            "INSERT OR IGNORE INTO ip_time_bucket_paths(ip, bucket_minute, path_hash, path) VALUES (?, ?, ?, ?)",
-            (ip, minute, _path_hash(event.get("path")), event.get("path")),
-        )
-        if path_inserted.rowcount:
-            conn.execute(
-                "UPDATE ip_time_buckets SET unique_paths_approx = unique_paths_approx + 1 "
-                "WHERE ip = ? AND bucket_minute = ?",
-                (ip, minute),
-            )
+        key = (ip, minute)
+        bucket = bucket_deltas.setdefault(key, {
+            "requests": 0, "status_2xx": 0, "status_3xx": 0,
+            "status_4xx": 0, "status_5xx": 0, "status_403": 0,
+            "status_404": 0, "post_requests": 0, "sensitive_hits": 0,
+            "wp_login_hits": 0, "bot_hits": 0, "bytes_sum": 0,
+            "first_seen": timestamp, "last_seen": timestamp,
+        })
+        bucket["requests"] += 1
+        bucket["status_2xx"] += int(200 <= status < 300)
+        bucket["status_3xx"] += int(300 <= status < 400)
+        bucket["status_4xx"] += int(400 <= status < 500)
+        bucket["status_5xx"] += int(status >= 500)
+        bucket["status_403"] += int(status == 403)
+        bucket["status_404"] += int(status == 404)
+        bucket["post_requests"] += int((event.get("method") or "").upper() == "POST")
+        bucket["sensitive_hits"] += int(any(marker in path for marker in (
+            "/.env", "/.git", "wp-config.php", "xmlrpc.php", "phpmyadmin", "adminer", "vendor/phpunit",
+        )))
+        bucket["wp_login_hits"] += int("/wp-login.php" in path)
+        bucket["bot_hits"] += int(any(word in ua for word in ("bot", "spider", "crawler", "feedfetcher", "archive.org_bot")))
+        bucket["bytes_sum"] += int(event.get("bytes_sent") or 0)
+        bucket["first_seen"] = min(bucket["first_seen"], timestamp)
+        bucket["last_seen"] = max(bucket["last_seen"], timestamp)
+        bucket_paths.add((ip, minute, event.get("path")))
 
         raw_path = event.get("path")
         if raw_path:
+            path_key = (ip, raw_path)
+            path_row = path_deltas.setdefault(path_key, {
+                "requests": 0, "status_2xx": 0, "status_3xx": 0,
+                "status_4xx": 0, "status_5xx": 0,
+                "first_seen": timestamp, "last_seen": timestamp,
+            })
             family = status // 100
-            conn.execute(
-                """
-                INSERT INTO ip_path_stats
-                  (ip, path, requests, status_2xx, status_3xx, status_4xx,
-                   status_5xx, first_seen, last_seen)
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(ip, path) DO UPDATE SET
-                  requests = requests + 1,
-                  status_2xx = status_2xx + excluded.status_2xx,
-                  status_3xx = status_3xx + excluded.status_3xx,
-                  status_4xx = status_4xx + excluded.status_4xx,
-                  status_5xx = status_5xx + excluded.status_5xx,
-                  first_seen = MIN(first_seen, excluded.first_seen),
-                  last_seen = MAX(last_seen, excluded.last_seen)
-                """,
-                (
-                    ip,
-                    raw_path,
-                    int(family == 2),
-                    int(family == 3),
-                    int(family == 4),
-                    int(family >= 5),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            path_row["requests"] += 1
+            path_row["status_2xx"] += int(family == 2)
+            path_row["status_3xx"] += int(family == 3)
+            path_row["status_4xx"] += int(family == 4)
+            path_row["status_5xx"] += int(family >= 5)
+            path_row["first_seen"] = min(path_row["first_seen"], timestamp)
+            path_row["last_seen"] = max(path_row["last_seen"], timestamp)
         affected.add(ip)
+
+    conn.executemany(
+        """INSERT INTO ip_time_buckets
+          (ip, bucket_minute, requests, status_2xx, status_3xx, status_4xx, status_5xx,
+           status_403, status_404, post_requests, sensitive_hits, wp_login_hits, bot_hits,
+           bytes_sum, first_seen, last_seen)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(ip, bucket_minute) DO UPDATE SET
+            requests=requests+excluded.requests, status_2xx=status_2xx+excluded.status_2xx,
+            status_3xx=status_3xx+excluded.status_3xx, status_4xx=status_4xx+excluded.status_4xx,
+            status_5xx=status_5xx+excluded.status_5xx, status_403=status_403+excluded.status_403,
+            status_404=status_404+excluded.status_404, post_requests=post_requests+excluded.post_requests,
+            sensitive_hits=sensitive_hits+excluded.sensitive_hits, wp_login_hits=wp_login_hits+excluded.wp_login_hits,
+            bot_hits=bot_hits+excluded.bot_hits, bytes_sum=bytes_sum+excluded.bytes_sum,
+            first_seen=MIN(first_seen, excluded.first_seen), last_seen=MAX(last_seen, excluded.last_seen)""",
+        [(
+            ip, minute, row["requests"], row["status_2xx"], row["status_3xx"], row["status_4xx"],
+            row["status_5xx"], row["status_403"], row["status_404"], row["post_requests"],
+            row["sensitive_hits"], row["wp_login_hits"], row["bot_hits"], row["bytes_sum"],
+            row["first_seen"], row["last_seen"],
+        ) for (ip, minute), row in bucket_deltas.items()],
+    )
+    for ip, minute, raw_path in bucket_paths:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO ip_time_bucket_paths(ip, bucket_minute, path_hash, path) VALUES (?, ?, ?, ?)",
+            (ip, minute, _path_hash(raw_path), raw_path),
+        )
+        if cur.rowcount:
+            conn.execute(
+                "UPDATE ip_time_buckets SET unique_paths_approx=unique_paths_approx+1 WHERE ip=? AND bucket_minute=?",
+                (ip, minute),
+            )
+    conn.executemany(
+        """INSERT INTO ip_path_stats
+          (ip, path, requests, status_2xx, status_3xx, status_4xx, status_5xx, first_seen, last_seen)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(ip, path) DO UPDATE SET requests=requests+excluded.requests,
+            status_2xx=status_2xx+excluded.status_2xx, status_3xx=status_3xx+excluded.status_3xx,
+            status_4xx=status_4xx+excluded.status_4xx, status_5xx=status_5xx+excluded.status_5xx,
+            first_seen=MIN(first_seen, excluded.first_seen), last_seen=MAX(last_seen, excluded.last_seen)""",
+        [(
+            ip, path, row["requests"], row["status_2xx"], row["status_3xx"], row["status_4xx"],
+            row["status_5xx"], row["first_seen"], row["last_seen"],
+        ) for (ip, path), row in path_deltas.items()],
+    )
     return affected
 
 

@@ -54,7 +54,7 @@ def test_bad_alert_contains_score_reasons():
         {
             "score": 80,
             "confidence": 90,
-            "score_breakdown": {"behavior_a": 80, "identity_b": 0, "trust_c": 0, "region_d": 0, "ai_e": 0, "correlation_f": 0},
+            "score_breakdown": {"behavior_a": 80, "identity_b": 0, "trust_c": 0, "region_d": 0, "ai_e": 0},
             "score_explanations": {"A": "A = 80: probe burst", "C": "C = 0: behavior overrides trust"},
             "evidence": ["A — sensitive path probing (+50)"],
         },

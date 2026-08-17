@@ -1,297 +1,448 @@
-# IP Intelligence MVP
+# 1 IP Intelligence Hub
 
-Read-only IP enrichment hub. No remote server control, blocking, or remediation.
+> Local-first security dashboard for observed web traffic, IP enrichment,
+> behavior scoring, threat intelligence and investigation workflows.
 
-## Project layout
+The application observes normalized access-log traffic, enriches public IPs,
+calculates auditable signals and presents the result in a dashboard. It is
+defensive monitoring software: it does not control remote servers, block
+traffic, run exploit tools or identify a person behind an IP address.
 
-```text
+## 1.1 1. System overview
+
+~~~text
+                    Dashboard / UI
+          overview · IP case · region profiles
+                         |
+                    HTTP / SSE
+                         |
+                 FastAPI application
+                       app/main.py
+                         |
+          +--------------+---------------+
+          |                              |
+       SQLite                    background workers
+ profiles, buckets,             WebSocket, AI, Intel,
+ geo, indicators                classification, Telegram
+          |                              |
+          +--------------+---------------+
+                         |
+                 source files and feeds
+        logs · GeoIP · RIR · VPN/proxy · FireHOL
+~~~
+
+### 1.1.1 Main data flow
+
+~~~text
+WebSocket / Apache log
+        |
+        v
+parse + normalize + deduplicate
+        |
+        +-- events              raw forensic request
+        +-- ip_time_buckets     minute traffic aggregate
+        +-- ip_path_stats       lifetime path aggregate
+        +-- ip_observations     behavior and detection snapshot
+        +-- ip_change_log       incremental dashboard/watchers
+
+new or refreshed IP
+        |
+        v
+local enrichment lookup
+        |
+        +-- ip_profiles         cached profile
+        +-- geo_resolutions      location and provenance
+        +-- classification       threat label and score
+        +-- alert_outbox         durable Telegram delivery
+~~~
+
+## 1.2 2. Repository structure
+
+~~~text
 app/
-  main.py                 FastAPI app and HTTP endpoint orchestration
-  config/                 Project-relative runtime paths
-  core/                   Database, enrichment, classification, and log logic
-  services/               Reusable application services
-  tools/                  Calibration and Tor refresh CLIs
-  dashboard.html          Dashboard view
-  ip_detail.html          IP investigation view
-  regions.html            Region profile index
-  region_detail.html      Country context and market-score detail
-data/                     Local databases, seed data, and cached Tor list
-tests/                    Unit and endpoint tests
-```
+├── main.py                     FastAPI app and API orchestration
+├── dashboard.html              Global traffic/IP dashboard
+├── ip_detail.html              Single-IP investigation view
+├── regions.html                Region profile index
+├── region_detail.html          Country/market detail
+├── config/settings.py           Runtime paths and environment loading
+├── core/                       Database and domain logic
+├── providers/                  External-source adapters and cache parsers
+├── services/                   Profiles, classification, coverage, Telegram
+├── collectors/                 Resumable live log collector
+├── ai/                         Bucket features and Isolation Forest
+└── tools/                      Refresh, scheduler and calibration commands
 
-The HTTP layer stays in `main.py`; reusable profile storage and enrichment
-composition belongs in `app/services/`, while provider and domain logic stays
-in focused modules. This keeps new API routes from duplicating persistence
-rules or classification wiring.
+data/
+├── hub.db                      SQLite runtime database
+├── models/                     Last-known-good AI artifacts
+├── geo/                        RIR/geofeed/BGP caches
+├── intel/                      VPN/proxy/threat-feed caches
+├── tor_exit_nodes.txt          Local Tor exit list
+└── region_profiles.seed.json   Local region seed data
 
-## Run
+tests/                          Unit, integration and replay tests
+.env.example                    Configuration reference
+requirements.txt                Runtime/test dependencies
+~~~
 
-```bash
-cd ip-intelligence
+Core module responsibilities:
+
+| Module                             | Responsibility                                            |
+| ---------------------------------- | --------------------------------------------------------- |
+| core/db.py                         | SQLite schema, migrations, indexes and JSON serialization |
+| core/logs.py                       | Apache parsing, file import and observation rebuild       |
+| core/buckets.py                    | Minute traffic and per-IP path aggregate upserts          |
+| core/enrichment.py                 | Local-only profile and intelligence lookup                |
+| core/intelligence.py               | Auditable A–E threat scoring                              |
+| core/geo_resolver.py               | Global network-location resolution                        |
+| core/intel_updater.py              | Single external intelligence refresh orchestrator         |
+| collectors/websocket_collector.py  | Live log stream, offset resume and reconnect              |
+| services/classification.py         | Canonical classification snapshot                         |
+| services/classification_watcher.py | Background classification transition watcher              |
+| ai/detector.py                     | Isolation Forest training and anomaly scoring             |
+| providers/                         | RIR, geofeed, VPN, proxy, FireHOL and cloud sources       |
+| tools/                             | Scheduled refreshes and analyst utilities                 |
+
+app/main.py is the current HTTP composition point. New domain logic should be
+placed in core, providers or services instead of duplicated in route handlers.
+
+## 1.3 3. Runtime pipeline
+
+### 1.3.1 Ingestion
+
+The WebSocket collector and Apache file importer use the same normalized event
+pipeline:
+
+~~~text
+source input
+  -> parse and normalize
+  -> source + offset idempotency check
+  -> insert events
+  -> update ip_time_buckets
+  -> update ip_path_stats
+  -> rebuild affected ip_observations
+  -> append ip_change_log
+  -> publish realtime update
+~~~
+
+The collector persists its checkpoint in log_sources. Reconnects resume from the last committed offset, and duplicate offsets are ignored.
+
+### 1.3.2 Local enrichment
+
+core/enrichment.py never performs HTTP or DNS network I/O. It reads:
+
+~~~text
+IP
+ ├── MaxMind City / ASN databases
+ ├── local geo_resolutions and prefix snapshots
+ ├── privacy_networks: VPN / proxy / hosting / Tor evidence
+ ├── threat_indicators: FireHOL evidence
+ └── cached ip_profiles
+~~~
+
+Unknown means no positive evidence was available. It is not silently converted
+into a privacy signal.
+
+### 1.3.3 Global network location
+
+The geo layer is global, not Vietnam-specific. It can combine:
+
+- RIR delegated files: APNIC, RIPE, ARIN, LACNIC and AFRINIC.
+- Owner-declared geofeeds.
+- Optional local pyasn BGP prefix database.
+- MaxMind/vendor location data.
+- Official cloud/CDN ranges.
+
+The output separates network location, RIR registration context, location
+confidence and anonymization signals. RIR registration describes ownership;
+it does not automatically override operational location.
+
+### 1.3.4 Intelligence updater
+
+intel_updater.py is the only orchestration point for external HTTP and DNS
+intelligence refreshes.
+
+~~~text
+due-source trigger
+  -> acquire INTEL_UPDATE_LOCK_PATH
+  -> conditional download
+  -> validate payload
+  -> atomic cache replacement
+  -> parse and upsert SQLite snapshot
+  -> write intel_source_status
+  -> release lock
+~~~
+
+Sources include AZ0 VPN, X4B VPN/datacenter, Cloudflare, Device & Browser
+Info, selected FireHOL lists, RIR files and configured geofeeds. A failed
+optional source does not stop the API or other sources. FireHOL is threat
+evidence and does not directly become behavior points.
+
+Manual refresh:
+
+~~~bash
+.venv/bin/python -m app.core.intel_updater
+~~~
+
+Startup refresh:
+
+~~~env
+INTEL_UPDATER_ENABLED=true
+INTEL_AUTO_UPDATE_ON_STARTUP=true
+~~~
+
+### 1.3.5 Behavior and classification
+
+Behavior uses persisted bucket aggregates and fixed product windows:
+
+~~~text
+ip_time_buckets
+  -> BehaviorContext for 1h and 24h
+  -> detection rules
+  -> behavior score and evidence
+  -> canonical classification snapshot
+~~~
+
+Threat scoring groups:
+
+~~~text
+A  behavior       requests, probes, errors and bot patterns
+B  identity       Tor/proxy/VPN/hosting support, capped at +25
+C  trust          trusted-network reduction for low-risk attributed networks
+D  region         small behavior-gated regional nudge
+E  AI anomaly     bonus when low rule score has sufficient AI evidence
+~~~
+
+services/classification.py is the canonical consumer for Overview, IP Detail,
+watchers and alert formatting.
+
+### 1.3.6 AI and Telegram
+
+AI uses bucket features and a persisted Isolation Forest. It is an additional
+signal, not a replacement for rule evidence.
+
+Telegram transitions use a durable outbox:
+
+~~~text
+classification transition
+  -> alert_outbox pending row
+  -> claim lease
+  -> send
+  -> delivered or retry with backoff
+~~~
+
+Telegram is disabled by default.
+
+## 1.4 4. Database model
+
+~~~text
+RAW
+  events
+
+TIME
+  ip_time_buckets
+  ip_time_bucket_paths
+
+IP SUMMARY
+  ip_observations
+  ip_profiles
+  ip_path_stats
+
+INTELLIGENCE STATE
+  geo_resolutions
+  privacy_networks
+  threat_indicators
+  classification, AI, change and outbox tables
+~~~
+
+Important tables:
+
+| Table | Purpose |
+|---|---|
+| events | Raw normalized requests for forensics and recent requests |
+| ip_time_buckets | One row per IP/minute for timelines and behavior windows |
+| ip_path_stats | Lifetime per-IP path counts/status/first-last seen |
+| ip_profiles | Cached enrichment/profile output |
+| ip_observations | Lifetime and recent behavior aggregates/detections |
+| geo_resolutions | Network location, confidence and provenance |
+| privacy_networks | Active VPN/proxy/datacenter memberships |
+| threat_indicators | FireHOL evidence |
+| intel_source_status | Per-source refresh status and errors |
+| ip_change_log | Cursor-based incremental dashboard updates |
+| ip_classification_state | Persisted classification transition state |
+| rule_firing_state | Detection history by IP/rule/window/ruleset |
+| alert_outbox | Durable Telegram delivery queue |
+| region_profiles | Country context and market score |
+
+IP Detail reads aggregates for most widgets:
+
+~~~text
+summary          -> ip_observations and ip_profiles
+timeline/status  -> ip_time_buckets
+path activity    -> ip_path_stats
+recent requests  -> events LIMIT 50
+~~~
+
+## 1.5 5. Web interface
+
+### 1.5.1 Overview
+
+The dashboard provides:
+
+- Live/custom traffic timeline.
+- Top IPs, paths and countries.
+- Traffic filter/exclude actions.
+- Priority queue for bad and watch identities.
+- Classification distribution and AI coverage.
+- Region market signal.
+- Network identity search, sorting and filters.
+
+Widgets load independently. A failed region request does not block traffic;
+IP Detail path activity does not block the profile or traffic timeline.
+
+### 1.5.2 IP Detail
+
+The investigation page provides:
+
+- Identity, ASN, organization and first/last seen context.
+- Network location and location-confidence explanation.
+- VPN, proxy, Tor and hosting signals.
+- A–F threat-score explanation and evidence.
+- IP traffic timeline with start/end controls.
+- Status codes, top paths and recent raw requests.
+- Provider status and external investigation pivots.
+
+### 1.5.3 Realtime
+
+The dashboard subscribes to /api/stream using Server-Sent Events. Change
+notifications trigger incremental IP updates and traffic refreshes. A periodic
+fallback refresh keeps the timeline current when an event is missed.
+
+## 1.6 6. API reference
+
+### 1.6.1 Pages
+
+~~~text
+GET /                         Overview dashboard
+GET /ip/{ip}                  IP investigation page
+GET /regions                  Region index
+GET /regions/{country_code}   Region detail page
+~~~
+
+### 1.6.2 IP and traffic
+
+~~~text
+GET /api/analytics/traffic
+GET /api/ip/{ip}
+GET /api/ip/{ip}/traffic?range=1h
+GET /api/ip/{ip}/traffic?start=...&end=...
+GET /api/ip/{ip}/paths?limit=12
+GET /api/ip/{ip}/attack?window=24h
+POST /api/ip/{ip}/disposition
+~~~
+
+The IP traffic endpoint returns zero-filled buckets through the requested end
+time. Recent raw requests are bounded to avoid loading full history.
+
+### 1.6.3 Dashboard and realtime state
+
+~~~text
+GET /health
+GET /api/ips?limit=100
+GET /api/ips/snapshot?limit=500
+GET /api/ips/updates?after=0&limit=500
+GET /api/collector/status
+GET /api/stream
+~~~
+
+### 1.6.4 Regions and operations
+
+~~~text
+GET /api/regions?limit=50
+GET /api/regions/{country_code}
+GET /api/regions/demand-signal?limit=50
+GET /api/ips/calibration.csv
+POST /api/ips/refresh-unknown?limit=100
+~~~
+
+Examples:
+
+~~~bash
+curl 'http://127.0.0.1:8000/api/ip/8.8.8.8'
+curl 'http://127.0.0.1:8000/api/ip/8.8.8.8/traffic?range=1h'
+curl 'http://127.0.0.1:8000/api/ip/8.8.8.8/paths?limit=12'
+~~~
+
+## 1.7 7. Configuration
+
+~~~bash
+cp .env.example .env
+~~~
+
+| Group | Main settings |
+|---|---|
+| GeoIP | MAXMIND_CITY_DB, MAXMIND_ASN_DB, MAXMIND_ANONYMOUS_DB |
+| Live logs | LOG_WS_ENABLED, LOG_WS_URL, LOG_WS_TOKEN, LOG_WS_LOG_KEY, LOG_WS_SOURCE_ID |
+| AI | LOG_WS_AI_*, AI_MODEL_PATH |
+| Intel updater | INTEL_UPDATER_ENABLED, INTEL_AUTO_UPDATE_ON_STARTUP, INTEL_UPDATE_LOCK_PATH |
+| Device & Browser Info | DEVICEBROWSERINFO_API_KEY, DEVICEBROWSERINFO_CSV_URL, DEVICEBROWSERINFO_AUTH_HEADER |
+| VPN/datacenter | AZ0_VPN_MANIFEST_URL, X4B_VPN_LIST_URL, X4B_DATACENTER_LIST_URL |
+| FireHOL | FIREHOL_LISTS, FIREHOL_CACHE_DIR |
+| Global geo | GEO_RIR_REFRESH_ENABLED, GEOFEED_SOURCES, RIR_*_URL, GEO_PYASN_DB_PATH |
+| Tor | TOR_EXIT_LIST_PATH, TOR_EXIT_LIST_URL |
+| Telegram | TELEGRAM_ALERTS_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID |
+
+Keep secrets in .env or a deployment secret manager. Never commit API keys,
+tokens, credentials, brute-force artifacts or provider exports.
+
+## 1.8 8. Running the application
+
+~~~bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+~~~
 
-Open `http://127.0.0.1:8000`.
+Open http://127.0.0.1:8000/. SQLite is created automatically at data/hub.db.
+Migrations are serialized and connections use WAL mode with a busy timeout.
 
-The dashboard can import the local sample `apache_logs.log`, parse Apache
-combined access logs, aggregate behavior per IP, enrich new public IPs, and show
-a multi-IP security table.
+### 1.8.1 Refresh tools
 
-Manual lookup still exists at `GET /api/ip/{ip}`.
+~~~bash
+.venv/bin/python -m app.tools.tor_refresh
+.venv/bin/python -m app.tools.market_refresh
+.venv/bin/python -m app.tools.data_scheduler
+.venv/bin/python -m app.core.intel_updater
+~~~
 
-Lookup uses the configured MaxMind GeoLite2 databases and cached Tor exit list.
-No remote enrichment API or optional provider is enabled in this MVP.
+The scheduler stores due state in data/update_state.json and avoids overlap
+with a lock file. Downloads use conditional headers, validation and atomic
+replacement so bad payloads do not overwrite last-known-good data.
 
-Each cached profile keeps separate layers: geo, network/ASN, privacy flags,
-organization confidence/evidence, reputation placeholders, and observed behavior.
-The current provider cannot prove that a network organization is the visitor's
-identity; `organization_confidence` describes enrichment confidence only.
-`network_type` is deliberately conservative (`cdn`, `hosting/datacenter`, or
-`isp/unknown`). VPN and proxy signals remain `Unknown` unless a future provider
-is explicitly added.
+## 1.9 9. Testing
 
-Optional provider configuration:
-
-```text
-MAXMIND_CITY_DB=/absolute/path/GeoLite2-City.mmdb
-MAXMIND_ASN_DB=/absolute/path/GeoLite2-ASN.mmdb
-TOR_EXIT_LIST_PATH=/absolute/path/tor_exit_nodes.txt
-TOR_EXIT_LIST_URL=https://check.torproject.org/torbulkexitlist
-```
-
-Global network-location snapshots are refreshed by the existing scheduler and
-remain local-only at lookup time. RIR delegated files and optional RFC 8805
-geofeeds are normalized into prefix snapshots; an optional pyasn database adds
-local BGP ASN/prefix lookups. The resulting `network_location` includes source
-provenance, confidence, scope, and disagreement status. It describes network
-infrastructure, not the end-user's physical location. Configure the refresh
-sources in `.env` with `GEO_RIR_REFRESH_ENABLED`, `GEOFEED_SOURCES`, and
-`GEO_PYASN_DB_PATH`.
-
-To run the due-source updater once in the background on each app startup, set
-`INTEL_AUTO_UPDATE_ON_STARTUP=true` together with
-`INTEL_UPDATER_ENABLED=true`. The refresh uses the existing lock, conditional
-cache, atomic replacement, and last-known-good snapshots; a failed source does
-not block the API from starting. `DEVICEBROWSERINFO_CSV_URL` must be the
-provider's CSV export/API endpoint returning CSV; a local path is also accepted
-for a local fixture and is not an API call.
-
-Core provider priority is field-aware and local-first:
-
-```text
-Cache
-→ MaxMind GeoLite2 City/ASN
-→ Tor local list
-→ local organization/network heuristics
-```
-
-Use `GET /api/ip/{ip}?refresh=true` to explicitly refresh one cached profile
-after adding/changing local databases or provider configuration.
-
-Profiles now separate `core_enrichment_status`, `privacy_enrichment_status`, and
-`threat_enrichment_status`. Backward-compatible `enrichment_status` follows core
-status so optional provider outages do not downgrade otherwise-good local
-Geo/ASN results. Unknown privacy signals remain SQL `NULL` and display as
-`Unknown`, not `No`.
-
-## API
-
-```text
-GET  /health
-GET  /regions
-GET  /regions/{country_code}
-GET  /api/ip/{ip}
-GET  /api/ips?limit=500
-GET  /api/ips/snapshot?limit=500
-GET  /api/ips/updates?after=0
-GET  /api/ips/calibration.csv
-GET  /api/regions?limit=50
-GET  /api/regions/{country_code}
-GET  /api/regions/demand-signal?limit=50
-GET  /api/collector/status
-GET  /api/stream
-POST /api/ips/refresh-unknown?limit=100
-```
-
-Region profiles return economic, cultural, and normalized conflict indicators.
-Conflict fields are `type`, `severity`, `source`, `date`, and `description`,
-plus available provenance metadata. `severity` is `low`, `medium`, `high`,
-`critical`, or `null` when unknown. Legacy `label`, `value`, and `data_date`
-aliases remain available for existing clients. Invalid or missing context
-degrades to unknown data instead of failing the response.
-
-Every region response contains a batch-precomputed woodworking machinery market score:
-
-```text
-economic_potential       40%
-machine_demand             60%
-
-economic_potential = market_capacity × 40% + industrial_fit × 60%
-
-woodworking_machine_demand:
-  HS8465 import size 55%
-  3-year growth      25%
-  stability          10%
-  product breadth    10%
-
-market_capacity uses GDP, GDP per capita, merchandise imports, and population
-at 25% each. Forest is a supporting Industrial Fit signal with 5% internal
-weight.
-
-market_score = economic_potential × 40% + machine_demand × 60%
-```
-
-Score levels are `low` (0–24), `medium` (25–49), `high` (50–74), and
-`very_high` (75–100). Missing structured signals return `market_score: null`
-and `market_level: unknown`. `market_evidence` exposes each contribution,
-source, date, raw value, percentile, points, weight, and effect. This
-commercial score never changes `threat_signal_score`.
-
-Refresh local market intelligence with:
-
-```bash
-python -m app.tools.market_refresh
-```
-
-The refresh reads `data/worldbank/Data.csv`,
-`data/worldbank/Series _Metadata.csv`, and all yearly CSV files in
-`data/comtrade/`. Comtrade data currently ends at 2025; no 2026 data is
-assumed.
-
-`/api/regions/demand-signal` is an observed-traffic signal for market
-exploration, not a claim about a person or a country's demand. It joins the
-country profile with IPs classified `good`, then reports qualifying good
-traffic after excluding Tor/VPN/proxy/hosting signals, bots, and sensitive
-probes. Validate it with conversion, customer, and product analytics before
-making business decisions.
-
-Responses include `field_sources`, `provider_status`, `core_enrichment_status`,
-`privacy_enrichment_status`, and `threat_enrichment_status`.
-
-To test one previously cached IP:
-
-```bash
-curl 'http://127.0.0.1:8000/api/ip/8.8.8.8?refresh=true'
-```
-
-To refresh old failed/partial/unknown profiles:
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/api/ips/refresh-unknown?limit=100'
-```
-
-Refresh the local Tor exit list safely. The command uses ETag and
-Last-Modified when available, validates that the response contains public IPs,
-rejects an abrupt count drop, and atomically replaces the old file only after
-validation succeeds:
-
-```bash
-python -m app.tools.tor_refresh
-```
-
-The refresh job never contacts or changes a monitored website. If the download
-fails or is empty, the previous Tor list remains in place.
-
-Run one scheduler hourly from cron, systemd, or launchd. It checks Tor every 6
-hours and World Bank every 30 days; task failures are isolated:
-
-```bash
-python -m app.tools.data_scheduler
-```
-
-Example cron:
-
-```bash
-0 * * * * cd /path/to/project && .venv/bin/python -m app.tools.data_scheduler >> logs/data_scheduler.log 2>&1
-```
-
-The scheduler stores due-state in `data/update_state.json` and uses
-`data/data_scheduler.lock` to skip overlapping runs. World Bank updates keep
-`Data.last-good.csv`, write raw responses to `Data.raw.json`, and trigger
-`market_refresh` only after validated data changes. Comtrade is not touched.
-
-To calibrate classification with real traffic, export the current predictions:
-
-```bash
-curl -o ip-calibration.csv 'http://127.0.0.1:8000/api/ips/calibration.csv'
-```
-
-Fill the `human_label` column manually using only `good`, `watch`, `bad`, or
-`unknown`. Keep the existing columns so the mismatches retain their evidence.
-Then evaluate the labeled rows:
-
-```bash
-python -m app.tools.calibration ip-calibration.csv
-```
-
-The report includes accuracy, per-label precision/recall, a confusion matrix,
-and the IPs where the system disagrees with the human label. Blank labels are
-ignored, so calibration can be done incrementally.
-
-Classification uses four auditable groups: behavior A (primary and sourced
-from `ip_observations.behavior_score`), identity B (capped at 25), trust C, and
-region D (capped at 5 and only enabled when behavior exists). `risk_score` and
-`effective_risk_score` are not inputs to classification, preventing
-double-counting. Sensitive-path probing is a hard behavior signal; low-volume
-IPs without A/B evidence remain `unknown`.
-
-Live access logs arrive through the configured WebSocket collector. The first
-connection starts at byte offset `0`; later connections resume from the last
-committed offset. Enrichment remains a separate local-only background operation
-through the same profile pipeline used by `/api/ips/refresh-unknown`.
-
-AI anomaly detection uses a persisted Isolation Forest. It trains on a bounded
-7-day UTC window every six hours and scores affected 24-hour windows every five
-minutes. The model artifact is stored under `data/models/` and is replaced
-atomically; scoring continues with the last-known-good model if training fails.
-
-Rule behavior keeps both lifetime evidence and a 24-hour recent view. Group A
-uses the recent view, so an old probe does not permanently block a new AI early
-warning. Set `LOGS_BEHAVIOR_LOOKBACK_HOURS` to change that window.
-
-VPN/proxy flags are only set from explicit sources: MaxMind Anonymous IP,
-`VPN_NETWORKS_PATH`, or `PROXY_NETWORKS_PATH` CIDR files. ASN organization
-names are not treated as VPN/proxy proof.
-
-## Stored Data
-
-```text
-events            raw normalized log events
-log_sources      WebSocket checkpoints and collector lease state
-ip_change_log    cursor for incremental dashboard updates
-ip_profiles       stable IP enrichment cache
-ip_observations   behavior aggregate per IP
-ip_ai_scores      current AI snapshot, confidence, decay reason, and evidence
-ai_model_state    model metadata, score cursor, and scheduler lease
-region_profiles   sourced country context stored as local JSON fields
-```
-
-## Design limits
-
-IP location is approximate. VPN/proxy/hosting detection is probabilistic. An IP
-does not identify a person. Economic, cultural, and conflict data must be joined
-from reputable country-level datasets and shown with source, date, and confidence;
-this MVP stores that profile separately and does not infer culture or danger from
-an IP alone.
-
-Run tests with:
-
-```bash
+~~~bash
 pytest -q
-```
+python -m compileall -q app
+git diff --check
+~~~
 
-Manual verification:
+Tests cover migrations, file/WebSocket replay consistency, offset idempotency,
+traffic zero-fill, aggregate path updates, local-only enrichment, global geo,
+detection windows, classification consistency and Telegram outbox behavior.
 
-```bash
-uvicorn app.main:app --reload
-curl 'http://127.0.0.1:8000/api/regions?limit=5'
-curl 'http://127.0.0.1:8000/api/regions/US'
-curl 'http://127.0.0.1:8000/api/ip/8.8.8.8'
-```
+## 1.10 10. Design limits
 
-Then open `http://127.0.0.1:8000/regions` and follow a country into its detail
-page. World Bank ingestion and LLM explanations remain future work; runtime
-still reads only local region data.
+- An IP is a network identifier, not a person identifier.
+- Network location describes infrastructure and may differ from user location.
+- RIR country is ownership context, not automatically physical location.
+- VPN/proxy/Tor/hosting flags require positive evidence; unknown is valid.
+- FireHOL is threat evidence, not automatic behavior-score points.
+- AI anomaly detection is probabilistic and should be reviewed with rule evidence.
+- Region market scores are commercial context and never change threat scores.
+- Optional provider failure is isolated and visible in intel_source_status.
+
+The system supports analyst review and investigation; it is not intended to make
+unreviewed claims about people, countries or organizations.

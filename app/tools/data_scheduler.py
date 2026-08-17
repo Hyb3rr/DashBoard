@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..config.settings import DATA_DIR
 from ..core.db import connect
-from ..core.correlation import asn_clusters
+from ..core.buckets import trim_buckets
 from ..services.profiles import refresh_due_profiles
 from .tor_refresh import refresh_tor_exit_list
 from .worldbank_update import update_world_bank
@@ -30,7 +30,10 @@ def _due(item: dict, now: datetime) -> bool:
         checked = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
         return True
-    interval = timedelta(hours=float(item.get("interval_hours", 0))) if item.get("interval_hours") else timedelta(days=float(item.get("interval_days", 0)))
+    if item.get("interval_seconds"):
+        interval = timedelta(seconds=float(item["interval_seconds"]))
+    else:
+        interval = timedelta(hours=float(item.get("interval_hours", 0))) if item.get("interval_hours") else timedelta(days=float(item.get("interval_days", 0)))
     return now - checked >= interval
 
 
@@ -77,15 +80,22 @@ def run_scheduler(state_path: str | Path = STATE_PATH, lock_path: str | Path = L
                     conn.close()
             except Exception as exc:
                 report["privacy"] = {"status": "failed", "error": type(exc).__name__}
-        if os.getenv("CORRELATION_SCHEDULER", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        trim_state = state.setdefault("bucket_trim", {})
+        trim_state.setdefault("interval_seconds", int(os.getenv("BUCKET_TRIM_INTERVAL_SECONDS", "1800")))
+        if _due(trim_state, now):
+            trim_state["last_checked_at"] = now.isoformat()
             try:
                 conn = connect()
                 try:
-                    report["correlation"] = {"status": "completed", "clusters": len(asn_clusters(conn, None, int(os.getenv("CORRELATION_OVERLAP_MINUTES", "10"))))}
+                    deleted = trim_buckets(conn)
+                    conn.commit()
+                    report["bucket_trim"] = {"status": "updated", "deleted": deleted}
                 finally:
                     conn.close()
             except Exception as exc:
-                report["correlation"] = {"status": "failed", "error": type(exc).__name__}
+                report["bucket_trim"] = {"status": "failed", "error": type(exc).__name__}
+        else:
+            report["bucket_trim"] = {"status": "not_due"}
         if os.getenv("INTEL_UPDATER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
             try:
                 report["intel"] = run_due_sources(now)

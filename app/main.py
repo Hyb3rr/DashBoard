@@ -15,11 +15,12 @@ from .config.settings import APP_DIR
 from .core.db import connect, decode, region_profile
 from .core.logs import effective_risk
 from .core.buckets import upsert_buckets
-from .core.correlation import asn_clusters, cluster_for_ip
+from .core.intelligence import classify_ip
 from .tools.calibration import csv_text
 from .services.profiles import (
     attach_region_and_classification,
     ai_profile_for_ip,
+    classification_observation,
     ensure_profile,
 )
 from .services.dispositions import set_disposition, STATES
@@ -32,6 +33,7 @@ from .core.intel_updater import run_due_sources
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    connect().close()
     await collector.start()
     watcher = asyncio.create_task(run_classification_watcher())
     intel_task = None
@@ -49,6 +51,16 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Remote Web Monitoring Hub - IP Intelligence", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def timing_middleware(request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["X-Process-Time-ms"] = f"{(time.perf_counter() - started) * 1000:.1f}"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +69,46 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+def _build_ip_details_sync(ip: str, refresh: bool) -> tuple[dict | None, str | None]:
+    """Build an IP detail response entirely inside one worker thread.
+
+    SQLite connections are thread-affine by default.  Opening the connection
+    inside this worker avoids moving a connection created by the ASGI thread
+    across threads while keeping profile IO and classification off the event
+    loop.
+    """
+    conn = connect()
+    try:
+        data, error = asyncio.run(ensure_profile(conn, ip, refresh=refresh))
+        if error or not data:
+            return data, error
+        obs = conn.execute(
+            "SELECT * FROM ip_observations WHERE ip = ?", (ip,)
+        ).fetchone()
+        if obs:
+            obs_data = dict(obs)
+            obs_data["behavior_evidence"] = decode(
+                obs_data.pop("behavior_evidence_json")
+            )
+            obs_data["behavior_evidence_recent"] = decode(
+                obs_data.pop("behavior_evidence_recent_json")
+            )
+            obs_data["detections"] = decode(obs_data.pop("detections_json", "[]"))
+            data["observation"] = obs_data
+            data["effective_risk_score"], data["effective_risk_level"] = effective_risk(
+                data.get("risk_score"), obs["behavior_score"]
+            )
+            attach_region_and_classification(conn, data, obs_data)
+        else:
+            attach_region_and_classification(conn, data, None)
+        conn.commit()
+        return data, None
+    finally:
+        conn.close()
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return HTMLResponse((APP_DIR / "dashboard.html").read_text())
@@ -385,23 +437,11 @@ async def ip_details(ip: str, refresh: bool = False):
         address = ipaddress.ip_address(ip)
     except ValueError as exc:
         raise HTTPException(400, "Invalid IP address") from exc
-    conn = connect()
-    data, error = await ensure_profile(conn, str(address), refresh=refresh)
+    data, error = await asyncio.to_thread(
+        _build_ip_details_sync, str(address), refresh
+    )
     if error:
-        conn.close()
         raise HTTPException(502, f"Enrichment provider unavailable: {error}")
-    obs = conn.execute("SELECT * FROM ip_observations WHERE ip = ?", (str(address),)).fetchone()
-    if obs:
-        obs_data = dict(obs)
-        obs_data["behavior_evidence"] = decode(obs_data.pop("behavior_evidence_json"))
-        obs_data["behavior_evidence_recent"] = decode(obs_data.pop("behavior_evidence_recent_json"))
-        obs_data["detections"] = decode(obs_data.pop("detections_json", "[]"))
-        data["observation"] = obs_data
-        data["effective_risk_score"], data["effective_risk_level"] = effective_risk(data.get("risk_score"), obs["behavior_score"])
-        attach_region_and_classification(conn, data, obs_data)
-    else:
-        attach_region_and_classification(conn, data, None)
-    conn.commit(); conn.close()
     return data
 
 
@@ -463,22 +503,6 @@ def update_ip_disposition(ip: str, payload: dict = Body(...)):
         conn.close()
 
 
-@app.get("/api/clusters")
-def list_clusters(limit: int = 100):
-    conn = connect()
-    try:
-        rows = conn.execute("SELECT * FROM ip_clusters ORDER BY campaign_score DESC, updated_at DESC LIMIT ?", (min(max(limit, 1), 500),)).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["member_ips"] = decode(item.pop("member_ips_json"))
-            item["shared_paths"] = decode(item.pop("shared_paths_json"))
-            items.append(item)
-        return items
-    finally:
-        conn.close()
-
-
 @app.get("/api/regions/demand-signal")
 def region_demand_signal(limit: int = 50):
     """Aggregate observed, likely-legitimate traffic by country.
@@ -503,6 +527,14 @@ def region_demand_signal(limit: int = 50):
             WHERE p.country_code IS NOT NULL
             """
         ).fetchall()
+        # Load the small AI snapshot once. The previous loop reread profile,
+        # observation and history tables repeatedly for every IP.
+        ai_by_ip = {}
+        for ai_row in conn.execute("SELECT * FROM ip_ai_scores").fetchall():
+            ai_item = dict(ai_row)
+            ai_item["ai_evidence"] = decode(ai_item.pop("ai_evidence_json", "[]"))
+            ai_by_ip[ai_item["ip"]] = ai_item
+        region_cache = {}
         aggregates = {}
         for raw in rows:
             item = dict(raw)
@@ -515,8 +547,20 @@ def region_demand_signal(limit: int = 50):
             item["sources"] = decode(item.pop("source_json", "[]"))
             item["behavior_evidence"] = decode(item.pop("behavior_evidence_json", "[]"))
             code = item["country_code"]
-            region = region_profile(conn, code) or {"country_code": code, "country_name": item.get("country") or code}
-            classification = build_classification_snapshot(conn, item["ip"]).classification
+            if code not in region_cache:
+                region_cache[code] = region_profile(conn, code) or {
+                    "country_code": code,
+                    "country_name": item.get("country") or code,
+                }
+            region = region_cache[code]
+            observation = classification_observation(item)
+            observation["behavior_evidence"] = item.get("behavior_evidence", [])
+            classification = classify_ip(
+                item,
+                observation,
+                region,
+                ai_by_ip.get(item["ip"]),
+            )
             entry = aggregates.setdefault(code, {
                 "country_code": code,
                 "country_name": region.get("country_name") or item.get("country") or code,
