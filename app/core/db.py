@@ -7,6 +7,12 @@ from ..config.settings import DB_PATH, REGION_SEED_PATH
 from .regions import market_score, normalise_conflict_indicators, normalise_economic_indicators
 
 
+# Requests and background workers open independent SQLite connections. Keep
+# schema migration serialized inside a process; SQLite's busy timeout below
+# handles a second process (for example Uvicorn's reloader) doing the same.
+_migration_lock = threading.RLock()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +55,21 @@ CREATE TABLE IF NOT EXISTS ip_time_buckets (
   PRIMARY KEY (ip, bucket_minute)
 );
 CREATE INDEX IF NOT EXISTS idx_ip_time_buckets_minute ON ip_time_buckets(bucket_minute);
+
+CREATE TABLE IF NOT EXISTS ip_path_stats (
+  ip TEXT NOT NULL,
+  path TEXT NOT NULL,
+  requests INTEGER NOT NULL DEFAULT 0,
+  status_2xx INTEGER NOT NULL DEFAULT 0,
+  status_3xx INTEGER NOT NULL DEFAULT 0,
+  status_4xx INTEGER NOT NULL DEFAULT 0,
+  status_5xx INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT,
+  last_seen TEXT,
+  PRIMARY KEY (ip, path)
+);
+CREATE INDEX IF NOT EXISTS idx_ip_path_stats_ip_requests
+  ON ip_path_stats(ip, requests DESC, path ASC);
 
 CREATE TABLE IF NOT EXISTS ip_time_bucket_paths (
   ip TEXT NOT NULL,
@@ -264,6 +285,7 @@ CREATE TABLE IF NOT EXISTS privacy_networks (
 );
 CREATE INDEX IF NOT EXISTS idx_privacy_networks_network ON privacy_networks(network);
 CREATE INDEX IF NOT EXISTS idx_privacy_networks_active ON privacy_networks(active, kind);
+CREATE INDEX IF NOT EXISTS idx_privacy_networks_checked_at ON privacy_networks(active, checked_at);
 
 CREATE TABLE IF NOT EXISTS privacy_network_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, kind TEXT NOT NULL,
@@ -285,6 +307,87 @@ CREATE INDEX IF NOT EXISTS idx_threat_indicators_active ON threat_indicators(act
 CREATE TABLE IF NOT EXISTS intel_source_status (
   source_name TEXT PRIMARY KEY, last_run_at TEXT, last_status TEXT,
   last_error TEXT, records_upserted INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS geo_prefixes (
+  network TEXT NOT NULL,
+  asn TEXT,
+  organization TEXT,
+  network_type TEXT,
+  rir TEXT,
+  registration_country TEXT,
+  source TEXT NOT NULL,
+  source_version TEXT,
+  first_seen TEXT,
+  last_seen TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(network, source)
+);
+CREATE INDEX IF NOT EXISTS idx_geo_prefixes_network ON geo_prefixes(network);
+CREATE INDEX IF NOT EXISTS idx_geo_prefixes_active ON geo_prefixes(active, source);
+
+CREATE TABLE IF NOT EXISTS geo_location_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  network TEXT NOT NULL,
+  country_code TEXT,
+  country TEXT,
+  latitude REAL,
+  longitude REAL,
+  city TEXT,
+  source TEXT NOT NULL,
+  source_confidence INTEGER NOT NULL DEFAULT 0,
+  location_scope TEXT NOT NULL DEFAULT 'network',
+  observed_at TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(network, source, location_scope)
+);
+CREATE INDEX IF NOT EXISTS idx_geo_location_network ON geo_location_observations(network);
+
+CREATE TABLE IF NOT EXISTS geo_resolutions (
+  ip TEXT PRIMARY KEY,
+  network TEXT,
+  asn TEXT,
+  organization TEXT,
+  network_type TEXT,
+  country TEXT,
+  country_code TEXT,
+  latitude REAL,
+  longitude REAL,
+  city TEXT,
+  confidence INTEGER NOT NULL DEFAULT 0,
+  disputed INTEGER NOT NULL DEFAULT 0,
+  location_scope TEXT NOT NULL DEFAULT 'network',
+  source_ids_json TEXT NOT NULL DEFAULT '[]',
+  resolved_at TEXT NOT NULL,
+  expires_at TEXT,
+  ruleset_version TEXT,
+  evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_geo_resolutions_country ON geo_resolutions(country_code);
+CREATE INDEX IF NOT EXISTS idx_geo_resolutions_expiry ON geo_resolutions(expires_at);
+
+CREATE TABLE IF NOT EXISTS geo_change_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip TEXT,
+  network TEXT,
+  previous_country_code TEXT,
+  country_code TEXT,
+  previous_confidence INTEGER,
+  confidence INTEGER,
+  detected_at TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_geo_change_history_ip ON geo_change_history(ip, detected_at);
+
+CREATE TABLE IF NOT EXISTS geo_source_status (
+  source_name TEXT PRIMARY KEY,
+  last_run_at TEXT,
+  last_status TEXT,
+  last_error TEXT,
+  records_upserted INTEGER NOT NULL DEFAULT 0,
+  dataset_version TEXT,
   metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 """
@@ -313,6 +416,15 @@ IP_PROFILE_COLUMNS = {
     "enrichment_attempts": "INTEGER NOT NULL DEFAULT 0",
     "proxy_type": "TEXT",
     "privacy_recheck_due_at": "TEXT",
+    "network_location_json": "TEXT NOT NULL DEFAULT '{}'",
+    "location_confidence": "INTEGER NOT NULL DEFAULT 0",
+    "location_disputed": "INTEGER NOT NULL DEFAULT 0",
+    "location_scope": "TEXT",
+    "network_type_source": "TEXT",
+    "asn_source": "TEXT",
+    "geo_sources_json": "TEXT NOT NULL DEFAULT '[]'",
+    "geo_resolved_at": "TEXT",
+    "geo_expires_at": "TEXT",
 }
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -348,10 +460,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
     }.items():
         if column not in ai_columns:
             conn.execute(f"ALTER TABLE ip_ai_scores ADD COLUMN {column} {definition}")
-    conn.execute(
-        """UPDATE ip_ai_scores SET score_reason='legacy_snapshot', last_window_at=scored_at
-           WHERE last_window_at IS NULL"""
-    )
+    ai_snapshot_marker = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'ai_snapshot_backfilled_v1'"
+    ).fetchone()
+    if not ai_snapshot_marker:
+        conn.execute(
+            """UPDATE ip_ai_scores SET score_reason='legacy_snapshot', last_window_at=scored_at
+               WHERE last_window_at IS NULL"""
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('ai_snapshot_backfilled_v1', '1')"
+        )
     outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(alert_outbox)").fetchall()}
     for column, definition in {
         "lease_owner": "TEXT",
@@ -483,6 +602,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "INSERT INTO schema_meta(key, value) VALUES ('time_buckets_backfilled', '1')"
         )
 
+    # Path aggregates are deliberately separate from minute buckets: the
+    # latter only retain per-minute path membership, while IP Detail needs
+    # lifetime counts without grouping the raw events table on every request.
+    path_stats_marker = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'ip_path_stats_backfilled_v1'"
+    ).fetchone()
+    if not path_stats_marker:
+        conn.execute("DELETE FROM ip_path_stats")
+        conn.execute(
+            """
+            INSERT INTO ip_path_stats
+              (ip, path, requests, status_2xx, status_3xx, status_4xx,
+               status_5xx, first_seen, last_seen)
+            SELECT src_ip, path, COUNT(*),
+              SUM(CASE WHEN status BETWEEN 200 AND 299 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN status BETWEEN 300 AND 399 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END),
+              MIN(timestamp), MAX(timestamp)
+            FROM events
+            WHERE path IS NOT NULL AND path != ''
+            GROUP BY src_ip, path
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('ip_path_stats_backfilled_v1', '1')"
+        )
+
 
 def _seed_region_profiles(conn: sqlite3.Connection) -> None:
     if not REGION_SEED_PATH.exists():
@@ -543,8 +690,9 @@ def region_profile(conn: sqlite3.Connection, country_code: str | None):
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     # WAL: writers don't block readers and each commit no longer needs a full
     # fsync of the rollback journal. synchronous=NORMAL is safe under WAL
     # (durable across app crashes, only a very unlikely OS-crash-at-the-wrong-
@@ -554,7 +702,8 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.executescript(SCHEMA)
-    _migrate(conn)
+    with _migration_lock:
+        _migrate(conn)
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_offset "
         "ON events(source, source_offset) WHERE source_offset IS NOT NULL"

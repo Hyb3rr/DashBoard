@@ -65,17 +65,46 @@ def upsert_buckets(conn: sqlite3.Connection, parsed_events: Iterable[dict]) -> s
                 int(event.get("bytes_sent") or 0), timestamp, timestamp,
             ),
         )
-        conn.execute(
+        path_inserted = conn.execute(
             "INSERT OR IGNORE INTO ip_time_bucket_paths(ip, bucket_minute, path_hash, path) VALUES (?, ?, ?, ?)",
             (ip, minute, _path_hash(event.get("path")), event.get("path")),
         )
-        conn.execute(
-            """UPDATE ip_time_buckets SET unique_paths_approx =
-               (SELECT COUNT(*) FROM ip_time_bucket_paths
-                WHERE ip = ? AND bucket_minute = ?)
-               WHERE ip = ? AND bucket_minute = ?""",
-            (ip, minute, ip, minute),
-        )
+        if path_inserted.rowcount:
+            conn.execute(
+                "UPDATE ip_time_buckets SET unique_paths_approx = unique_paths_approx + 1 "
+                "WHERE ip = ? AND bucket_minute = ?",
+                (ip, minute),
+            )
+
+        raw_path = event.get("path")
+        if raw_path:
+            family = status // 100
+            conn.execute(
+                """
+                INSERT INTO ip_path_stats
+                  (ip, path, requests, status_2xx, status_3xx, status_4xx,
+                   status_5xx, first_seen, last_seen)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ip, path) DO UPDATE SET
+                  requests = requests + 1,
+                  status_2xx = status_2xx + excluded.status_2xx,
+                  status_3xx = status_3xx + excluded.status_3xx,
+                  status_4xx = status_4xx + excluded.status_4xx,
+                  status_5xx = status_5xx + excluded.status_5xx,
+                  first_seen = MIN(first_seen, excluded.first_seen),
+                  last_seen = MAX(last_seen, excluded.last_seen)
+                """,
+                (
+                    ip,
+                    raw_path,
+                    int(family == 2),
+                    int(family == 3),
+                    int(family == 4),
+                    int(family >= 5),
+                    timestamp,
+                    timestamp,
+                ),
+            )
         affected.add(ip)
     return affected
 

@@ -9,12 +9,17 @@ from pathlib import Path
 
 from ..config.settings import DATA_DIR, DB_PATH
 from .db import connect
-from ..providers import vpn_az0, cidr_lists, device_browser_info, firehol, dnsbl, cloudflare
+from ..providers import vpn_az0, cidr_lists, device_browser_info, firehol, dnsbl, cloudflare, global_geo
 
 INTERVALS = {"az0_vpn": 24, "x4b_vpn": 24, "x4b_datacenter": 24, "cloudflare_datacenter": 24, "device_browser_proxy": 6, "dnsbl_new_ips": 1}
+DEFAULT_X4B_URLS = {
+    "x4b_vpn": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt",
+    "x4b_datacenter": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt",
+}
 
 def _due(row, now, hours):
     if not row or not row["last_run_at"]: return True
+    if row["last_status"] == "failed": return True
     try: return now - datetime.fromisoformat(row["last_run_at"]) >= timedelta(hours=hours)
     except ValueError: return True
 
@@ -34,10 +39,23 @@ def run_due_sources(now: datetime | None = None) -> dict:
         try:
             rows={r["source_name"]:r for r in conn.execute("SELECT * FROM intel_source_status")}
             jobs=[("az0_vpn", INTERVALS["az0_vpn"], lambda: vpn_az0.refresh(conn)),
-              ("x4b_vpn",24,lambda: _x4b(conn,"x4b_vpn","vpn",os.getenv("X4B_VPN_LIST_URL",""))),
-              ("x4b_datacenter",24,lambda: _x4b(conn,"x4b_datacenter","datacenter",os.getenv("X4B_DATACENTER_LIST_URL",""))),
+              ("x4b_vpn",24,lambda: _x4b(conn,"x4b_vpn","vpn",os.getenv("X4B_VPN_LIST_URL") or DEFAULT_X4B_URLS["x4b_vpn"])),
+              ("x4b_datacenter",24,lambda: _x4b(conn,"x4b_datacenter","datacenter",os.getenv("X4B_DATACENTER_LIST_URL") or DEFAULT_X4B_URLS["x4b_datacenter"])),
               ("cloudflare_datacenter",24,lambda: cloudflare.refresh(conn)),
               ("device_browser_proxy",6,lambda: device_browser_info.refresh(conn))]
+            rir_urls = {
+                "APNIC": os.getenv("RIR_APNIC_URL", "https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest"),
+                "RIPE": os.getenv("RIR_RIPE_URL", "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"),
+                "ARIN": os.getenv("RIR_ARIN_URL", "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest"),
+                "LACNIC": os.getenv("RIR_LACNIC_URL", "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest"),
+                "AFRINIC": os.getenv("RIR_AFRINIC_URL", "https://ftp.afrinic.net/pub/stats/afrinic/delegated-afrinic-extended-latest"),
+            }
+            if os.getenv("GEO_RIR_REFRESH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+                for rir, url in rir_urls.items():
+                    jobs.append((f"rir:{rir.lower()}", 24, lambda rir=rir, url=url: global_geo.refresh_rir(conn, rir, url)))
+            geofeeds = [item.strip().split("=", 1) for item in os.getenv("GEOFEED_SOURCES", "").split(",") if "=" in item]
+            for name, url in geofeeds:
+                jobs.append((f"geofeed:{name}", 168, lambda name=name, url=url: global_geo.refresh_geofeed(conn, name, url)))
             selected=os.getenv("FIREHOL_LISTS", ",".join(firehol.DEFAULT_LISTS)).split(",")
             for name in selected:
                 name=name.strip()

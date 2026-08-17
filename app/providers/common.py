@@ -67,7 +67,8 @@ def parse_networks(payload: bytes | str) -> list[str]:
     result = []
     import ipaddress
     for raw in text.splitlines():
-        value = raw.split("#", 1)[0].split(";", 1)[0].strip().split()[0] if raw.strip() else ""
+        cleaned = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        value = cleaned.split()[0] if cleaned else ""
         if not value:
             continue
         try:

@@ -7,12 +7,14 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import ipaddress
 import json
+import os
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from .config.settings import APP_DIR
 from .core.db import connect, decode, region_profile
 from .core.logs import effective_risk
+from .core.buckets import upsert_buckets
 from .core.correlation import asn_clusters, cluster_for_ip
 from .tools.calibration import csv_text
 from .services.profiles import (
@@ -23,29 +25,26 @@ from .services.profiles import (
 from .services.dispositions import set_disposition, STATES
 from .services.classification_watcher import run_classification_watcher
 from .services.classification import build_classification_snapshot, detection_snapshot
-from .services.coverage import coverage_matrix, run_coverage_consumer
 from .core.rules import ruleset_hash, ruleset_health
 from .collectors.websocket_collector import bus, collector
+from .core.intel_updater import run_due_sources
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await collector.start()
     watcher = asyncio.create_task(run_classification_watcher())
-    coverage = asyncio.create_task(run_coverage_consumer())
+    intel_task = None
+    if os.getenv("INTEL_AUTO_UPDATE_ON_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        intel_task = asyncio.create_task(
+            asyncio.to_thread(run_due_sources), name="intel-startup-update"
+        )
     try:
         yield
     finally:
         watcher.cancel()
-        coverage.cancel()
-        try:
-            await watcher
-        except asyncio.CancelledError:
-            pass
-        try:
-            await coverage
-        except asyncio.CancelledError:
-            pass
+        if intel_task:
+            intel_task.cancel()
         await collector.stop()
 
 
@@ -90,12 +89,6 @@ def health():
     rules_health = ruleset_health()
     return {"status": "ok" if rules_health["status"] == "ok" else "degraded", "mode": "read_only", "rules": rules_health}
 
-
-@app.get("/api/coverage/rules")
-def rule_coverage(window: str = Query("24h")):
-    if window not in {"1h", "24h"}:
-        raise HTTPException(400, "Unsupported coverage window")
-    return {"window": window, "rules": coverage_matrix(window)}
 
 @app.get("/api/analytics/traffic")
 def traffic_analytics(
@@ -216,7 +209,11 @@ def traffic_analytics(
 
 @app.get("/api/ip/{ip}/traffic")
 def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str | None = None, end: str | None = None):
-    """Return one IP's complete traffic view from one filtered event set."""
+    """Return one IP's traffic view from persisted aggregates.
+
+    Only the recent forensic list reads raw events.  Timeline and status
+    totals come from minute buckets, and top paths come from ip_path_stats.
+    """
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:
@@ -234,46 +231,78 @@ def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str 
     bucket_seconds = max(60, min(3600, seconds // 12))
     conn = connect()
     try:
-        rows = conn.execute(
-            """SELECT timestamp, method, path, status, user_agent FROM events
-               WHERE src_ip=? AND timestamp IS NOT NULL AND timestamp>=? AND timestamp<=?
-               ORDER BY timestamp ASC""",
-            (address, start_stamp.isoformat(), end_stamp.isoformat()),
-        ).fetchall()
-        parsed = []
-        for row in rows:
-            try:
-                stamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-                if stamp.tzinfo is None: stamp = stamp.replace(tzinfo=timezone.utc)
-                parsed.append((stamp.astimezone(timezone.utc), row))
-            except (TypeError, ValueError):
-                continue
+        _ensure_ip_aggregates(conn, address)
         grid_start = datetime.fromtimestamp((start_stamp.timestamp() // bucket_seconds) * bucket_seconds, timezone.utc)
         bucket_count = max(1, int((end_stamp.timestamp() - grid_start.timestamp()) // bucket_seconds) + 1)
         bucket_starts = [grid_start + timedelta(seconds=i * bucket_seconds) for i in range(bucket_count)]
         buckets = {stamp.isoformat().replace("+00:00", "Z"): {"requests": 0, "errors": 0} for stamp in bucket_starts}
         status_codes = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
-        paths = Counter()
-        for stamp, row in parsed:
-            index = max(0, min(bucket_count - 1, int((stamp.timestamp() - grid_start.timestamp()) // bucket_seconds)))
-            item = buckets[bucket_starts[index].isoformat().replace("+00:00", "Z")]
-            item["requests"] += 1
-            status = int(row["status"] or 0)
-            family = f"{status // 100}xx"
-            if family in status_codes: status_codes[family] += 1
-            if status >= 400: item["errors"] += 1
-            if row["path"]: paths[str(row["path"])] += 1
+        bucket_rows = conn.execute(
+            """
+            SELECT bucket_minute, requests, status_2xx, status_3xx,
+                   status_4xx, status_5xx
+            FROM ip_time_buckets
+            WHERE ip = ? AND bucket_minute >= ? AND bucket_minute <= ?
+            ORDER BY bucket_minute
+            """,
+            (
+                address,
+                grid_start.isoformat(),
+                bucket_starts[-1].isoformat(),
+            ),
+        ).fetchall()
+        for row in bucket_rows:
+            try:
+                stamp = datetime.fromisoformat(str(row["bucket_minute"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            key = stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            if key not in buckets:
+                continue
+            item = buckets[key]
+            item["requests"] = int(row["requests"] or 0)
+            item["errors"] = sum(int(row[column] or 0) for column in ("status_4xx", "status_5xx"))
+            for family in status_codes:
+                status_codes[family] += int(row[f"status_{family}"] or 0)
+
+        path_rows = conn.execute(
+            """
+            SELECT path, requests, status_4xx + status_5xx AS errors,
+                   first_seen, last_seen
+            FROM ip_path_stats
+            WHERE ip = ?
+            ORDER BY requests DESC, path ASC
+            LIMIT 12
+            """,
+            (address,),
+        ).fetchall()
+        recent_rows = conn.execute(
+            """
+            SELECT timestamp, method, path, status
+            FROM events
+            WHERE src_ip = ? AND timestamp IS NOT NULL
+              AND timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 50
+            """,
+            (address, start_stamp.isoformat(), end_stamp.isoformat()),
+        ).fetchall()
         recent = [
-            {"timestamp": stamp.isoformat().replace("+00:00", "Z"), "method": row["method"] or "—",
-             "path": row["path"] or "—", "status": row["status"]}
-            for stamp, row in reversed(parsed[-50:])
+            {
+                "timestamp": str(row["timestamp"]).replace("+00:00", "Z"),
+                "method": row["method"] or "—",
+                "path": row["path"] or "—",
+                "status": row["status"],
+            }
+            for row in reversed(recent_rows)
         ]
+        total_requests = sum(item["requests"] for item in buckets.values())
         return {
             "ip": address, "range": range_key, "range_label": f"last {range_key}",
             "start": start_stamp.isoformat(), "end": end_stamp.isoformat(), "as_of": now.isoformat(),
-            "total_requests": len(parsed), "series": [{"timestamp": key, **buckets[key]} for key in buckets],
+            "total_requests": total_requests, "series": [{"timestamp": key, **buckets[key]} for key in buckets],
             "status_codes": status_codes,
-            "top_paths": [{"path": key, "requests": value} for key, value in paths.most_common(12)],
+            "top_paths": [dict(row) for row in path_rows],
             "recent_requests": recent,
         }
     finally:
@@ -290,9 +319,29 @@ def _parse_traffic_time(value: str | None) -> datetime | None:
     except ValueError:
         return None
 
+
+def _ensure_ip_aggregates(conn, address: str) -> None:
+    """Repair only legacy/directly-seeded IPs missing persisted aggregates."""
+    exists = conn.execute(
+        "SELECT 1 FROM ip_time_buckets WHERE ip = ? LIMIT 1", (address,)
+    ).fetchone()
+    if exists:
+        return
+    rows = conn.execute(
+        """
+        SELECT timestamp, src_ip, method, path, status, bytes_sent, user_agent
+        FROM events
+        WHERE src_ip = ? AND timestamp IS NOT NULL
+        """,
+        (address,),
+    ).fetchall()
+    if rows:
+        upsert_buckets(conn, [dict(row) for row in rows])
+        conn.commit()
+
 @app.get("/api/ip/{ip}/paths")
 def ip_path_activity(ip: str, limit: int = 12):
-    """Return the most visited paths for one IP, without enrichment side effects."""
+    """Return lifetime path aggregates for one IP."""
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:
@@ -301,25 +350,23 @@ def ip_path_activity(ip: str, limit: int = 12):
     limit = min(max(limit, 1), 50)
     conn = connect()
     try:
-        total = conn.execute(
-            """SELECT COUNT(*) FROM events
-               WHERE src_ip = ? AND path IS NOT NULL AND path != ''""",
+        _ensure_ip_aggregates(conn, address)
+        total_row = conn.execute(
+            "SELECT COALESCE(SUM(requests), 0) AS requests "
+            "FROM ip_path_stats WHERE ip = ?",
             (address,),
-        ).fetchone()[0]
+        ).fetchone()
+        total = int(total_row["requests"] or 0) if total_row else 0
         rows = conn.execute(
-            """SELECT path,
-                      COUNT(*) AS requests,
-                      SUM(CASE WHEN COALESCE(status, 0) >= 400 THEN 1 ELSE 0 END) AS errors,
-                      MIN(timestamp) AS first_seen,
-                      MAX(timestamp) AS last_seen
-                 FROM events
-                WHERE src_ip = ? AND path IS NOT NULL AND path != ''
-                GROUP BY path
+            """SELECT path, requests,
+                      status_4xx + status_5xx AS errors,
+                      first_seen, last_seen
+                 FROM ip_path_stats
+                WHERE ip = ?
                 ORDER BY requests DESC, path ASC
                 LIMIT ?""",
             (address, limit),
         ).fetchall()
-        total = int(total or 0)
         paths = []
         for row in rows:
             item = dict(row)
@@ -745,6 +792,8 @@ def _ip_rows(conn, only_ips: set[str] | None = None):
           p.is_hosting, p.is_vpn, p.is_proxy, p.is_tor,
           p.enrichment_status, p.core_enrichment_status, p.privacy_enrichment_status, p.threat_enrichment_status, p.next_retry_at,
           p.provider_status_json, p.field_sources_json,
+          p.network_location_json, COALESCE(p.location_confidence, 0) AS location_confidence,
+          COALESCE(p.location_disputed, 0) AS location_disputed, p.location_scope,
           COALESCE(p.risk_score, 0) AS profile_risk_score,
           COALESCE(o.behavior_score, 0) AS behavior_score,
           COALESCE(o.behavior_score_recent, 0) AS behavior_score_recent,
@@ -770,6 +819,7 @@ def _ip_rows(conn, only_ips: set[str] | None = None):
           p.is_hosting, p.is_vpn, p.is_proxy, p.is_tor,
           p.enrichment_status, p.core_enrichment_status, p.privacy_enrichment_status, p.threat_enrichment_status, p.next_retry_at,
           p.provider_status_json, p.field_sources_json,
+          p.network_location_json, COALESCE(p.location_confidence, 0), COALESCE(p.location_disputed, 0), p.location_scope,
           p.risk_score, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, p.fetched_at
         FROM ip_profiles p
         LEFT JOIN ip_observations o ON o.ip = p.ip
@@ -784,6 +834,8 @@ def _build_ip_items(conn, only_ips: set[str] | None = None):
         item = dict(row)
         item["provider_status"] = decode(item.pop("provider_status_json"))
         item["field_sources"] = decode(item.pop("field_sources_json"))
+        item["network_location"] = decode(item.pop("network_location_json"))
+        item["location_disputed"] = bool(item.get("location_disputed"))
         item["effective_risk_score"], item["effective_risk_level"] = effective_risk(item["profile_risk_score"], item["behavior_score"])
         # Keep Overview classification identical to IP Detail.  The detail
         # endpoint classifies from the durable observation totals; passing the

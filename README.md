@@ -62,6 +62,23 @@ TOR_EXIT_LIST_PATH=/absolute/path/tor_exit_nodes.txt
 TOR_EXIT_LIST_URL=https://check.torproject.org/torbulkexitlist
 ```
 
+Global network-location snapshots are refreshed by the existing scheduler and
+remain local-only at lookup time. RIR delegated files and optional RFC 8805
+geofeeds are normalized into prefix snapshots; an optional pyasn database adds
+local BGP ASN/prefix lookups. The resulting `network_location` includes source
+provenance, confidence, scope, and disagreement status. It describes network
+infrastructure, not the end-user's physical location. Configure the refresh
+sources in `.env` with `GEO_RIR_REFRESH_ENABLED`, `GEOFEED_SOURCES`, and
+`GEO_PYASN_DB_PATH`.
+
+To run the due-source updater once in the background on each app startup, set
+`INTEL_AUTO_UPDATE_ON_STARTUP=true` together with
+`INTEL_UPDATER_ENABLED=true`. The refresh uses the existing lock, conditional
+cache, atomic replacement, and last-known-good snapshots; a failed source does
+not block the API from starting. `DEVICEBROWSERINFO_CSV_URL` must be the
+provider's CSV export/API endpoint returning CSV; a local path is also accepted
+for a local fixture and is not an API call.
+
 Core provider priority is field-aware and local-first:
 
 ```text

@@ -13,6 +13,7 @@ from ..core.db import decode, encode, region_profile
 from ..core.enrichment import lookup
 from ..core.correlation import cluster_for_ip
 from ..core.intelligence import classify_ip
+from ..core.geo_resolver import GEO_RULESET_VERSION, persist_resolution
 from .classification import build_classification_snapshot
 
 
@@ -26,8 +27,18 @@ def profile_from_row(row):
         ("provider_errors_json", "provider_errors"),
         ("provider_status_json", "provider_status"),
         ("field_sources_json", "field_sources"),
+        ("network_location_json", "network_location"),
+        ("geo_sources_json", "geo_sources"),
     ):
         data[key] = decode(data.pop(column))
+    data["anonymization"] = {
+        "is_vpn": data.get("is_vpn"),
+        "is_proxy": data.get("is_proxy"),
+        "is_hosting": data.get("is_hosting"),
+        "is_tor": data.get("is_tor"),
+        "confidence": 0,
+        "sources": [],
+    }
     return data
 
 
@@ -118,8 +129,9 @@ def store_profile(conn, data: dict) -> None:
        enrichment_status,core_enrichment_status,privacy_enrichment_status,threat_enrichment_status,
        provider_errors_json,next_retry_at,enrichment_attempts,
        provider_status_json,field_sources_json,
-       risk_score,risk_level,evidence_json,source_json,fetched_at,privacy_recheck_due_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+       risk_score,risk_level,evidence_json,source_json,fetched_at,privacy_recheck_due_at,
+       network_location_json,location_confidence,location_disputed,location_scope,network_type_source,asn_source,geo_sources_json,geo_resolved_at,geo_expires_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
       data["ip"], data.get("country"), data.get("country_code"), data.get("city"), data.get("region"),
       data.get("latitude"), data.get("longitude"), data.get("timezone"), data.get("asn"), data.get("organization"), data.get("isp"),
       data.get("network_type"), data.get("ip_prefix"), int(data.get("organization_confidence", 0)), encode(data.get("identity_evidence")),
@@ -129,12 +141,29 @@ def store_profile(conn, data: dict) -> None:
       data.get("privacy_enrichment_status", "unknown"), data.get("threat_enrichment_status", "unknown"),
       encode(data.get("provider_errors")), data.get("next_retry_at"), data.get("enrichment_attempts", 1),
       encode(data.get("provider_status")), encode(data.get("field_sources")),
-      data["risk_score"], data["risk_level"], encode(data["evidence"]), encode(data["sources"]), data["fetched_at"], data.get("privacy_recheck_due_at")))
+      data["risk_score"], data["risk_level"], encode(data["evidence"]), encode(data["sources"]), data["fetched_at"], data.get("privacy_recheck_due_at"),
+      encode(data.get("network_location")), int(data.get("location_confidence", 0)), int(bool(data.get("location_disputed", False))),
+      data.get("location_scope"), data.get("network_type_source"), data.get("asn_source"), encode(data.get("geo_sources", [])),
+      data.get("geo_resolved_at"), data.get("geo_expires_at")))
 
 
 async def ensure_profile(conn, ip: str, refresh: bool = False):
     row = conn.execute("SELECT * FROM ip_profiles WHERE ip = ?", (ip,)).fetchone()
-    if row and not refresh and not retry_due(row):
+    local_snapshot_newer = False
+    geo_ruleset_stale = False
+    if row and not refresh:
+        latest = conn.execute(
+            "SELECT MAX(checked_at) AS checked_at FROM privacy_networks WHERE active=1"
+        ).fetchone()
+        latest_checked = latest["checked_at"] if latest else None
+        local_snapshot_newer = bool(
+            latest_checked and (not row["fetched_at"] or latest_checked > row["fetched_at"])
+        )
+        geo_row = conn.execute(
+            "SELECT ruleset_version FROM geo_resolutions WHERE ip=?", (ip,)
+        ).fetchone()
+        geo_ruleset_stale = bool(geo_row and geo_row["ruleset_version"] != GEO_RULESET_VERSION)
+    if row and not refresh and not local_snapshot_newer and not geo_ruleset_stale and not retry_due(row):
         return profile_from_row(row), None
     try:
         attempt = (row["enrichment_attempts"] if row else 0) + 1
@@ -142,6 +171,24 @@ async def ensure_profile(conn, ip: str, refresh: bool = False):
     except Exception as exc:
         return None, f"{ip}: {type(exc).__name__}"
     store_profile(conn, data)
+    if data.get("network_location"):
+        location = data["network_location"]
+        persist_resolution(conn, ip, {
+            "network": data.get("ip_prefix"),
+            "asn": data.get("asn"),
+            "organization": data.get("organization"),
+            "network_type": data.get("network_type"),
+            "country": location.get("country") or data.get("country"),
+            "country_code": location.get("country_code") or data.get("country_code"),
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "city": data.get("city"),
+            "confidence": data.get("location_confidence", 0),
+            "disputed": data.get("location_disputed", False),
+            "scope": data.get("location_scope", "network"),
+            "sources": data.get("geo_sources", []),
+        }, ttl_days=int(os.getenv("GEO_REEVALUATION_TTL_DAYS", "14")))
+    conn.commit()
     return data, None
 
 

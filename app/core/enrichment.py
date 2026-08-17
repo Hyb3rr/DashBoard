@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 import ipaddress
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from ..config.settings import TOR_EXIT_LIST
 from .db import connect
+from .geo_resolver import resolve_network_location
 
 try:
     from dotenv import load_dotenv
@@ -46,6 +48,8 @@ def _merge(base: dict, incoming: dict, provider: str, field_sources: dict) -> li
 
 
 def _provider_state(status: dict, name: str, state: str, error: str | None = None) -> None:
+    if state == "not_configured":
+        return
     status[name] = {"status": state, "checked_at": _now()}
     if error:
         status[name]["error"] = error
@@ -167,20 +171,32 @@ def _risk(data: dict) -> tuple[int, str, list[str]]:
     return score, level, evidence
 
 
+def _candidate_networks(address: ipaddress._BaseAddress) -> list[str]:
+    """Return canonical supernets that can contain an address."""
+    return [str(address)] + [
+        str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+        for prefix in range(address.max_prefixlen + 1)
+    ]
+
+
 def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
     """Read the updater's normalized snapshot; this function never performs I/O beyond SQLite."""
     result, providers, fields, errors = {}, {}, {}, []
     try:
         conn = connect()
-        rows = conn.execute("SELECT * FROM privacy_networks WHERE active=1").fetchall()
         address = ipaddress.ip_address(ip)
-        matches = []
-        for row in rows:
+        candidates = _candidate_networks(address)
+        placeholders = ",".join("?" for _ in candidates)
+        matches = conn.execute(
+            f"SELECT * FROM privacy_networks WHERE active=1 AND network IN ({placeholders})",
+            candidates,
+        ).fetchall()
+        for row in matches:
             try:
-                if address in ipaddress.ip_network(row["network"], strict=False): matches.append(row)
+                if address not in ipaddress.ip_network(row["network"], strict=False):
+                    continue
             except ValueError:
                 continue
-        for row in matches:
             kind, source = row["kind"], row["source"]
             field = "is_vpn" if kind == "vpn" else "is_proxy" if kind == "proxy" else "is_hosting"
             result[field] = True
@@ -190,9 +206,10 @@ def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
             if kind == "proxy" and row["proxy_type"] and not result.get("proxy_type"):
                 result["proxy_type"] = row["proxy_type"]; fields["proxy_type"] = source
         threat = []
-        threat_rows = conn.execute("SELECT * FROM threat_indicators WHERE active=1").fetchall()
-        for source in {row["source"] for row in threat_rows}:
-            providers.setdefault(source, {"status":"active", "checked_at":next((row["checked_at"] for row in threat_rows if row["source"] == source), None)})
+        threat_rows = conn.execute(
+            f"SELECT * FROM threat_indicators WHERE active=1 AND network IN ({placeholders})",
+            candidates,
+        ).fetchall()
         for row in threat_rows:
             try:
                 if address not in ipaddress.ip_network(row["network"], strict=False): continue
@@ -201,7 +218,34 @@ def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
             threat.append(row)
         for row in threat:
             providers[row["source"]] = {"status":"active", "checked_at":row["checked_at"], "category":row["category"]}
+            # FireHOL proxy lists are also valid local privacy evidence. Keep
+            # them separate from generic threat categories, but expose the
+            # proxy flag to the privacy scorer when the snapshot is present.
+            if row["source"] in {"firehol:firehol_proxies", "firehol:firehol_anonymous"}:
+                result["is_proxy"] = True
+                fields["is_proxy"] = row["source"]
         if threat: result["threat_indicators"] = [dict(row) for row in threat]
+        resolution = conn.execute("SELECT * FROM geo_resolutions WHERE ip=?", (ip,)).fetchone()
+        if resolution:
+            evidence = json.loads(resolution["evidence_json"] or "{}")
+            result["network_location"] = {
+                "country": resolution["country"],
+                "country_code": resolution["country_code"],
+                "confidence": resolution["confidence"],
+                "disputed": bool(resolution["disputed"]),
+                "scope": resolution["location_scope"],
+                "sources": json.loads(resolution["source_ids_json"] or "[]"),
+                "confidence_breakdown": evidence.get("confidence_breakdown", {}),
+                # `country`/`country_code` above are the *operational* location.
+                # `registration` is separate RIR/WHOIS ownership context and is
+                # expected to differ for global cloud/CDN networks - see
+                # allocation_pattern for whether that's the normal case.
+                "registration": evidence.get("registration"),
+                "allocation_pattern": evidence.get("allocation_pattern", "unknown"),
+                "volatile_location": evidence.get("volatile_location", False),
+            }
+            result.update({key: resolution[key] for key in ("asn", "organization", "network_type", "latitude", "longitude", "city") if resolution[key]})
+            providers["geo_resolution"] = {"status": "active", "checked_at": resolution["resolved_at"]}
         conn.close()
     except Exception as exc:
         errors.append(f"Local intelligence: {type(exc).__name__}: {exc}")
@@ -328,6 +372,10 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
             "abuse_score": None,
             "abuse_reports": None,
             "network_type": "private/non-public",
+            "network_location": None,
+            "location_confidence": 0,
+            "location_disputed": False,
+            "anonymization": {"is_vpn": None, "is_proxy": None, "is_hosting": None, "is_tor": None, "confidence": 0, "sources": []},
         }
 
     ip_text = str(address)
@@ -371,6 +419,45 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     _provider_state(provider_status, "MaxMind City/ASN", mm_state, mm_errors[0] if mm_errors else None)
     if _merge(result, mm, "MaxMind", field_sources):
         sources.append("MaxMind")
+
+    # Prefix and ASN resolution is local-only. The updater populates the
+    # snapshots; this fallback lets MaxMind remain useful before the first
+    # global snapshot has been built.
+    try:
+        def resolve_local():
+            conn = connect()
+            try:
+                return resolve_network_location(conn, ip_text, mm)
+            finally:
+                conn.close()
+
+        geo = await asyncio.to_thread(resolve_local)
+        if geo.get("country_code"):
+            result["network_location"] = {
+                "country": geo.get("country"),
+                "country_code": geo.get("country_code"),
+                "confidence": geo.get("confidence", 0),
+                "disputed": bool(geo.get("disputed")),
+                "scope": geo.get("scope", "network"),
+                "sources": geo.get("sources", []),
+                "confidence_breakdown": geo.get("confidence_breakdown", {}),
+                # See db-backed branch above: registration (RIR/WHOIS) is kept
+                # separate from operational country and is not itself a
+                # dispute signal - check allocation_pattern instead.
+                "registration": geo.get("registration"),
+                "allocation_pattern": geo.get("allocation_pattern", "unknown"),
+                "volatile_location": geo.get("volatile_location", False),
+            }
+            for field in ("country", "country_code", "latitude", "longitude", "city", "asn", "ip_prefix", "organization", "network_type"):
+                if geo.get(field) is not None:
+                    result[field] = geo[field]
+                    field_sources[field] = ", ".join(geo.get("sources", [])) or "geo resolver"
+            result["location_confidence"] = geo.get("confidence", 0)
+            result["location_disputed"] = bool(geo.get("disputed"))
+            result["location_scope"] = geo.get("scope", "network")
+            sources.append("global geo resolver")
+    except Exception as exc:
+        errors.append(f"Global geo resolver: {type(exc).__name__}: {exc}")
 
     # 2) Optional MaxMind Anonymous IP database provides real VPN/proxy flags.
     anonymous, anonymous_errors, anonymous_state = await asyncio.to_thread(_anonymous_ip, ip_text)
@@ -435,6 +522,26 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         "enrichment_status": core_status,
         "next_retry_at": None,  # local-only pass does not schedule online retries
         "enrichment_attempts": attempt,
+        "network_location": result.get("network_location"),
+        "location_confidence": result.get("location_confidence", 0),
+        "location_disputed": result.get("location_disputed", False),
+        "location_scope": result.get("location_scope"),
+        "network_type_source": field_sources.get("network_type"),
+        "asn_source": field_sources.get("asn"),
+        "geo_sources": result.get("network_location", {}).get("sources", []),
+        "geo_resolved_at": fetched_at,
+        "anonymization": {
+            "is_vpn": result.get("is_vpn"),
+            "is_proxy": result.get("is_proxy"),
+            "is_hosting": result.get("is_hosting"),
+            "is_tor": result.get("is_tor"),
+            "confidence": max(
+                (80 if result.get("is_tor") is not None else 0),
+                (70 if result.get("is_vpn") is not None or result.get("is_proxy") is not None else 0),
+                (60 if result.get("is_hosting") is not None else 0),
+            ),
+            "sources": [name for name in sources if "MaxMind Anonymous" in name or "Tor" in name or "local intelligence" in name or "VPN" in name or "Proxy" in name],
+        },
     })
     result["risk_score"], result["risk_level"], result["evidence"] = _risk(result)
 
