@@ -161,7 +161,7 @@ Evidence
 
 ---
 
- 7. Region / Market Intelligence
+## 7. Region / Market Intelligence
 
 Region Score là một chức năng riêng với security scoring.
 Hệ thống sử dụng dữ liệu kinh tế và thương mại để đánh giá **tiềm năng thị trường của quốc gia mà IP truy cập đến từ đó**.
