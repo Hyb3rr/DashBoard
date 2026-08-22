@@ -304,6 +304,7 @@ function list(items){
     :'<div class="evidence-item">No evidence available.</div>'
 }
 function yes(v){return v==null?'Unknown':v?'Yes':'No'}
+function freshness(value){if(!value)return {label:'unknown',tone:'stale'};const age=Math.max(0,Date.now()-Date.parse(value)),minutes=Math.floor(age/60000);return {label:minutes<1?'just now':minutes<60?`${minutes} min ago`:minutes<1440?`${Math.floor(minutes/60)} h ago`:`${Math.floor(minutes/1440)} d ago`,tone:minutes<5?'fresh':minutes<60?'recent':'stale'}}
 function investigationLinks(value){
   const safe=encodeURIComponent(value);
   const links=[
@@ -442,6 +443,7 @@ async function load(){
       displayStatus=formatStatusWithDisposition(label, dispState),
       score=Number(d.threat_signal_score??0),
       src=d.field_sources||{};
+    const freshRules=freshness(o.evaluated_at||o.updated_at),freshRare=freshness((o.rare_path_evidence||[])[0]?.freshness),freshGeo=freshness(d.geo_resolved_at||d.fetched_at),freshIntel=freshness(d.fetched_at);
 
     document.title=`${ip} · Sentinel Hub`;
 
@@ -599,6 +601,14 @@ async function load(){
           <section class="card">
             <div class="card-head"><h2>Identity evidence</h2><small>what data can prove</small></div>
             <div class="body"><div class="evidence">${list(d.identity_evidence)}</div></div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>Rare path evidence</h2><small>supporting evidence only</small></div>
+            <div class="body"><div class="evidence">${(o.rare_path_evidence||[]).length?(o.rare_path_evidence||[]).map(x=>`<div class="evidence-item">${esc(x.path||'Unknown path')} · rarity ${esc(x.rarity_score??'—')}/100 · first seen ${esc(x.first_seen||'unknown')}<br><small>${esc(x.explanation||'Rarity alone does not establish malicious intent.')}</small></div>`).join(''):'<div class="evidence-item">No rare path evidence available.</div>'}</div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>Data freshness</h2><small>source-specific age</small></div>
+            <div class="body">${[['Rules',freshRules],['Rare baseline',freshRare],['Geo',freshGeo],['Threat intel',freshIntel]].map(([name,item])=>`<div class="fact"><span class="label">${name}</span><strong>${item.label}</strong></div>`).join('')}</div>
           </section>
         </div>
       </div>

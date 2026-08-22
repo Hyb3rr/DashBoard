@@ -134,6 +134,18 @@ class ObservationRepository:
                 (ip, _json(observation), ruleset, datetime.now(timezone.utc)),
             )
 
+    def upsert_rare_path_evidence(self, values: dict[str, list[dict[str, Any]]]) -> None:
+        if not values:
+            return
+        with transaction() as conn:
+            for ip, evidence in values.items():
+                conn.execute(
+                    """UPDATE ip_observations_state
+                       SET payload=jsonb_set(payload,'{rare_path_evidence}',%s::jsonb,true), updated_at=now()
+                     WHERE ip=%s""",
+                    (_json(evidence), ip),
+                )
+
 
 class ClassificationRepository:
     def get(self, ip: str) -> dict[str, Any] | None:

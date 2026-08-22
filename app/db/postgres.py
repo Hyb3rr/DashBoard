@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from threading import Lock
+from threading import RLock
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -10,7 +10,8 @@ from ..core import metrics
 
 _pool = None
 _pool_dsn: str | None = None
-_pool_lock = Lock()
+_pool_open = False
+_pool_lock = RLock()
 
 
 def configured() -> bool:
@@ -30,13 +31,14 @@ def connect():
 
 def _connection_pool():
     """Return one process-local pool; repositories borrow connections per transaction."""
-    global _pool, _pool_dsn
+    global _pool, _pool_dsn, _pool_open
     dsn = os.environ["POSTGRES_DSN"]
     with _pool_lock:
         if _pool is not None and _pool_dsn == dsn:
             return _pool
         if _pool is not None:
             _pool.close()
+            _pool_open = False
         try:
             import psycopg
             from psycopg_pool import ConnectionPool
@@ -47,24 +49,36 @@ def _connection_pool():
             kwargs={"row_factory": psycopg.rows.dict_row},
             min_size=max(1, int(os.getenv("POSTGRES_POOL_MIN_SIZE", "1"))),
             max_size=max(1, int(os.getenv("POSTGRES_POOL_MAX_SIZE", "10"))),
-            open=True,
+            open=False,
         )
         _pool_dsn = dsn
-        return _pool
+    return _pool
+
+
+def open_pool() -> Any:
+    """Open process pool explicitly during app startup or test setup."""
+    global _pool_open
+    with _pool_lock:
+        pool = _connection_pool()
+        if not _pool_open:
+            pool.open(wait=True)
+            _pool_open = True
+        return pool
 
 
 def close_pool() -> None:
-    global _pool, _pool_dsn
+    global _pool, _pool_dsn, _pool_open
     with _pool_lock:
         if _pool is not None:
             _pool.close()
         _pool = None
         _pool_dsn = None
+        _pool_open = False
 
 
 @contextmanager
 def transaction() -> Iterator[Any]:
-    with _connection_pool().connection() as conn:
+    with open_pool().connection() as conn:
         with conn.transaction():
             yield conn
 

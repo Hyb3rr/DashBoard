@@ -124,16 +124,19 @@ latencies. Ingest and ClickHouse metrics update per committed batch; queue and
 reconnect gauges update on status checks. No database write or lock occurs per
 event for metrics.
 
+Rare-path shadow batches also expose batch latency, error count and evidence
+count through `/health`. They run periodically, not once per incoming event.
+
 ## 1.3 3. Runtime pipeline
 
 ### 1.3.1 Ingestion
 
 The WebSocket collector is the live event source and uses one normalized event
-pipeline. The dashboard is served by FastAPI and has no upload, file-source or
-offline mode:
+pipeline. The dashboard is served by FastAPI in live-only mode:
 
-All traffic, IP, snapshot, update and refresh APIs are live-only. They do not
-accept file-mode parameters or select a file dataset.
+All traffic, IP, snapshot, update and refresh APIs use live PostgreSQL and
+ClickHouse state. They do not accept file-mode parameters or select a file
+dataset.
 
 ~~~text
 source input
@@ -215,13 +218,12 @@ optional source does not stop the API or other sources. FireHOL is threat
 evidence and does not directly become behavior points.
 
 All live privacy and threat provider refreshes persist through PostgreSQL
-(`privacy_networks`, `privacy_network_history` and `threat_indicators`). Provider
-adapters must not open SQLite or use SQLite-specific SQL. Feed caches remain
-local files; they are input snapshots, not application state.
+(`privacy_networks`, `privacy_network_history` and `threat_indicators`). Feed
+caches remain local files; they are input snapshots, not application state.
 
 AI model metadata and per-IP anomaly scores also persist in PostgreSQL
 (`ai_model_state` and `ip_ai_scores`). The model artifact remains an atomic local
-file snapshot; training and scoring state do not use SQLite.
+file snapshot; training and scoring state remain in PostgreSQL.
 
 Manual refresh:
 
@@ -353,6 +355,10 @@ The investigation page provides:
 - Network location and location-confidence explanation.
 - VPN, proxy, Tor and hosting signals.
 - A–E threat-score explanation and evidence.
+- Rare-path supporting evidence with score, first-seen time and explicit
+  non-maliciousness caveat.
+- Source-specific relative freshness for rules, rare baseline, geo and threat
+  intelligence. No generic freshness badge is used.
 - IP traffic timeline with start/end controls.
 - Status codes, top paths and recent raw requests.
 - Provider status and external investigation pivots.
@@ -362,6 +368,34 @@ The investigation page provides:
 The dashboard subscribes to /api/stream using Server-Sent Events. Change
 notifications trigger incremental IP updates and traffic refreshes. A periodic
 fallback refresh keeps the timeline current when an event is missed.
+
+### Rare-path canonicalization
+
+`app/core/path_canonicalization.py` provides the derived path shape for future
+rare-path analysis. It removes query strings, collapses repeated slashes, and
+replaces complete numeric, UUID, and hash-like segments with `{id}`, `{uuid}`,
+and `{hash}`. It preserves path case and trailing slashes.
+
+This value is evidence-only. Raw paths in ClickHouse, live ingest, existing
+feature counters, and classification semantics remain unchanged. Rare-path
+analysis must consume this derived value in periodic work, never through a
+historical ClickHouse query per incoming event.
+
+### Rare-path shadow detector
+
+The background `rare-path-shadow` task scans a rolling seven-day ClickHouse
+window periodically, then stores supporting evidence in PostgreSQL observation
+state. It calculates population rarity, temporal rarity, and newness into a
+`0–100` score. It never runs from ingest flush, never changes BAD/WATCH, and
+never treats rarity alone as proof of malicious intent. Raw paths remain
+unchanged.
+
+### PostgreSQL pool lifecycle
+
+FastAPI startup calls `open_pool()`, and application shutdown calls
+`close_pool()`. Transactions may still open the pool lazily for direct
+repository tests that do not run FastAPI lifespan; pytest closes that pool in
+`pytest_sessionfinish` so worker threads do not survive interpreter shutdown.
 
 ## 1.6 6. API reference
 
@@ -522,10 +556,9 @@ The script starts PostgreSQL on port `55432`, starts ClickHouse on port `8123` i
 not already running, then launches Uvicorn. `Ctrl-C` stops the API and only the
 ClickHouse process started by the script.
 
-Set these runtime values before enabling split mode:
+Set these runtime values for live operation:
 
 ```env
-DATA_BACKEND=split
 POSTGRES_DSN=postgresql://<user>@127.0.0.1:55432/ipintel
 CLICKHOUSE_HOST=127.0.0.1
 CLICKHOUSE_PORT=8123

@@ -19,6 +19,7 @@ from ..core import metrics
 from ..db.repositories import CheckpointRepository
 from ..core.logs import parse_apache_combined
 from ..services.profiles import ensure_profile_postgres, refresh_due_profiles
+from ..services.rare_path_detector import periodic_shadow
 from ..testing.failpoints import NoopFailpoint
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,7 @@ class WebSocketCollector:
         self._flush_task: asyncio.Task | None = None
         self._enrichment_task: asyncio.Task | None = None
         self._privacy_task: asyncio.Task | None = None
+        self._rare_path_task: asyncio.Task | None = None
         self._enrichment_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
         self._enrichment_pending: set[str] = set()
         self._enrichment_deferred: set[str] = set()
@@ -138,6 +140,8 @@ class WebSocketCollector:
         self.failpoint = NoopFailpoint()
 
     async def start(self) -> None:
+        if os.getenv("RARE_PATH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            self._rare_path_task = asyncio.create_task(periodic_shadow(self._stop), name="rare-path-shadow")
         if self._task or not self.config.enabled or not self.config.valid:
             await self._publish_status()
             return
@@ -158,6 +162,7 @@ class WebSocketCollector:
                 self._flush_task,
                 self._enrichment_task,
                 self._privacy_task,
+                self._rare_path_task,
             )
             if task
         ]
@@ -167,7 +172,7 @@ class WebSocketCollector:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._task = self._flush_task = self._enrichment_task = self._privacy_task = None
+        self._task = self._flush_task = self._enrichment_task = self._privacy_task = self._rare_path_task = None
         self.state = "stopped"
         await self._publish_status()
 

@@ -8,10 +8,10 @@ import ipaddress
 def candidate_networks(address: ipaddress._BaseAddress) -> list[str]:
     """Return every canonical network that can contain ``address``.
 
-    Local intelligence tables store canonical CIDR strings.  Querying these
-    candidates lets SQLite use the network index instead of scanning every
-    stored prefix, while the caller can still perform a final containment
-    check for defensive validation.
+    PostgreSQL intelligence tables store canonical CIDR strings. Querying
+    these candidates lets the database use its network index instead of
+    scanning every stored prefix, while the caller performs a final
+    containment check for defensive validation.
     """
     return list(dict.fromkeys(
         [str(address)]

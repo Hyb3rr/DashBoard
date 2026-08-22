@@ -234,6 +234,7 @@ async function detail(ip){
     const privacyItems=[`Tor: ${yes(d.is_tor)}`,`VPN: ${yes(d.is_vpn)}`,`Proxy: ${yes(d.is_proxy)}`,`Hosting: ${yes(d.is_hosting)}`];
     const threatItems=[`Abuse score: ${d.abuse_score??'Unknown'}`,`Abuse reports: ${d.abuse_reports??'Unknown'}`];
     const classificationItems=[`Label: ${d.classification?.label||'unknown'}`,`Summary: ${d.classification?.summary||'No classification summary'}`,`Confidence: ${d.classification?.confidence??'—'}%`];
+    const rareItems=(o.rare_path_evidence||[]).map(x=>`${x.path||'Unknown path'} · rarity ${x.rarity_score??'—'}/100 · first seen ${x.first_seen||'unknown'}`);
     const economicIndicators=Array.isArray(r.economic_indicators)?r.economic_indicators:Object.values((r.economic_indicators||{}).indicators||{});
     const regionItems=[...economicIndicators.map(x=>`${x.label||x.name||'Indicator'}: ${x.value??x.raw_value??'Unknown'}`),...(r.cultural_context||[]).map(x=>`${x.label}: ${x.value}`),...(r.conflict_indicators||[]).map(x=>`${x.label}: ${x.value}`)];
     const sourceItems=Object.entries(d.field_sources||{}).map(([field,source])=>`${field}: ${source}`);
@@ -277,6 +278,7 @@ async function detail(ip){
       <div class="section"><h3>Threat reputation</h3><div class="evidence">${evidence(threatItems)}</div></div>
       <div class="section"><h3>Observed behavior</h3><div class="detail-grid"><div class="detail"><span>Requests</span><strong>${num(o.requests)}</strong></div><div class="detail"><span>Unique paths</span><strong>${num(o.unique_paths)}</strong></div><div class="detail"><span>4xx responses</span><strong>${num(o.status_4xx)}</strong></div><div class="detail"><span>Sensitive probes</span><strong>${num(o.sensitive_probe_requests)}</strong></div></div></div>
       <div class="section"><h3>Risk assessment</h3><div class="evidence">${evidence([...(d.evidence||[]),...(o.behavior_evidence||[])])}</div></div>
+      <div class="section"><h3>Rare path evidence</h3><div class="evidence">${evidence(rareItems.length?rareItems:['No rare path evidence available'])}</div></div>
       <div class="section"><h3>Sources</h3><div class="evidence">${evidence([...statusSummary,...providerItems(d),...sourceItems,`Country profile sources: ${(r.sources||[]).map(x=>x.name).join(', ')||'none'}`,`Next retry: ${d.next_retry_at||'not scheduled'}`])}</div></div>
       <div class="section"><h3>Identity confidence</h3><div class="evidence">${evidence(d.identity_evidence)}</div></div>`;
 
@@ -464,5 +466,4 @@ $('toast')?.addEventListener('click',()=>{
 });
 loadIpSnapshot();loadRegions();loadTraffic();startRealtime();startDurableRealtimeSync();fetchHealthStatus();
 setInterval(fetchHealthStatus,10000);
-
 

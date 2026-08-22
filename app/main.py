@@ -26,6 +26,7 @@ from .routers.regions import router as regions_router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    postgres_store.open_pool()
     postgres_store.ensure_schema()
     clickhouse_store.ensure_schema()
     await collector.start()

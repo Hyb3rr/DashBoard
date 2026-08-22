@@ -98,15 +98,18 @@ def test_postgres_down_replays_after_clickhouse_success(monkeypatch):
     dataset = f"m2c-pg-down-{uuid4().hex}"
     event = _event(ip, f"m2c-pg-event-{uuid4().hex}")
     rows = [{**event, "dataset_id": dataset, "source_id": source}]
-    original_connect = postgres.connect
+    original_pool_factory = postgres._connection_pool
     try:
         clickhouse.insert_events(rows)
-        monkeypatch.setattr(postgres, "connect", lambda: (_ for _ in ()).throw(ConnectionError("PG down")))
+        monkeypatch.setattr(
+            postgres, "_connection_pool",
+            lambda: (_ for _ in ()).throw(ConnectionError("PG down")),
+        )
         with pytest.raises(ConnectionError, match="PG down"):
             PgDetectionRepository().process_events(
                 rows, batch, dataset, source, 0, 100, "access", "live", now=NOW
             )
-        monkeypatch.setattr(postgres, "connect", original_connect)
+        monkeypatch.setattr(postgres, "_connection_pool", original_pool_factory)
         clickhouse.insert_events(rows)
         result = PgDetectionRepository().process_events(
             rows, batch, dataset, source, 0, 100, "access", "live", now=NOW
@@ -126,7 +129,7 @@ def test_postgres_down_replays_after_clickhouse_success(monkeypatch):
         assert traffic["total_requests"] == 1
         assert traffic["unique_ips"] == 1
     finally:
-        monkeypatch.setattr(postgres, "connect", original_connect)
+        monkeypatch.setattr(postgres, "_connection_pool", original_pool_factory)
         _cleanup_pg(ip, source, (batch,))
         _cleanup_ch(dataset)
 

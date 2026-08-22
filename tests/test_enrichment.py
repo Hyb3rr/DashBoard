@@ -516,7 +516,10 @@ def test_frontend_uses_only_canonical_threat_signal_score():
     client = TestClient(app)
     dashboard = client.get("/").text
     detail = client.get("/ip/8.8.8.8").text
-    assert "const signalScore=x=>Number(x.threat_signal_score??0)" in dashboard
+    assert '<script src="/static/dashboard.js"></script>' in dashboard
+    dashboard_js = client.get("/static/dashboard.js")
+    assert dashboard_js.status_code == 200
+    assert "const signalScore=x=>Number(x.threat_signal_score??0)" in dashboard_js.text
     assert "effective_risk_score" not in dashboard
     assert "Number(d.threat_signal_score??0)" in detail
     assert "Number(c.score||0)" not in detail

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import ipaddress
 from typing import Any, Iterable
 from ..core import metrics
+from ..core.path_canonicalization import canonicalize_path
 
 
 def configured() -> bool:
@@ -233,5 +234,44 @@ def traffic_for_ip(start: datetime, end: datetime, bucket_seconds: int, ip: str,
             "top_paths": [{**row, "requests": int(row["requests"]), "errors": int(row["errors"])} for row in paths],
             "recent_requests": [{"timestamp": _iso_utc(row["timestamp"]), "method": row["method"] or "—", "path": row["path"] or "—", "status": row["status"]} for row in reversed(recent)],
         }
+    finally:
+        client.close()
+
+
+def rare_path_baseline(start: datetime, end: datetime, dataset_id: str = "live") -> list[dict[str, Any]]:
+    """Return bounded aggregate evidence for periodic rare-path analysis."""
+    client = connect()
+    try:
+        rows = _rows(client.query(
+            """SELECT DISTINCT path, IPv6NumToString(src_ip) AS ip,
+                      uniqExact(src_ip) OVER (PARTITION BY path) AS path_ips,
+                      uniqExact(toStartOfInterval(event_time, INTERVAL 1 HOUR))
+                        OVER (PARTITION BY path) AS temporal_buckets,
+                      min(event_time) OVER (PARTITION BY path) AS first_seen,
+                      max(event_time) OVER (PARTITION BY path) AS last_seen,
+                      count() OVER (PARTITION BY path) AS path_requests
+               FROM http_events FINAL
+              WHERE event_time >= {start:DateTime64(3)}
+                AND event_time <= {end:DateTime64(3)}
+                AND dataset_id = {dataset_id:String}
+                AND path != ''""",
+            parameters={"start": start.astimezone(timezone.utc), "end": end.astimezone(timezone.utc), "dataset_id": dataset_id},
+        ))
+        population = client.query(
+            """SELECT uniqExact(src_ip) AS total_ips
+               FROM http_events FINAL
+              WHERE event_time >= {start:DateTime64(3)}
+                AND event_time <= {end:DateTime64(3)}
+                AND dataset_id = {dataset_id:String}""",
+            parameters={"start": start.astimezone(timezone.utc), "end": end.astimezone(timezone.utc), "dataset_id": dataset_id},
+        )
+        total_ips = int(population.result_rows[0][0] or 0) if population.result_rows else 0
+        return [{
+            "path": canonicalize_path(row["path"]), "ip": _display_ip(row["ip"]),
+            "path_ips": int(row["path_ips"]), "total_ips": total_ips,
+            "temporal_buckets": int(row["temporal_buckets"]),
+            "first_seen": _iso_utc(row["first_seen"]), "last_seen": _iso_utc(row["last_seen"]),
+            "path_requests": int(row["path_requests"]),
+        } for row in rows]
     finally:
         client.close()

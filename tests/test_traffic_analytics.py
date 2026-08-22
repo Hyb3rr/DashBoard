@@ -91,11 +91,6 @@ def test_traffic_dataset_selector_separates_stream_and_file():
 
 
 @pytest.mark.integration
-def test_file_mode_uses_separate_database_snapshot():
-    pytest.skip("Requires ClickHouse integration environment")
-
-
-@pytest.mark.integration
 def test_ip_page_is_server_paginated_and_searches_global_dataset():
     pytest.skip("Requires PostgreSQL integration environment")
 
