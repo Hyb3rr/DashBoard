@@ -5,10 +5,28 @@ import ipaddress
 import os
 from pathlib import Path
 
+from ..config import settings
 from ..config.settings import TOR_EXIT_LIST
-from .db import connect
-from .geo_resolver import resolve_network_location
+def connect():
+    """Stub kept for test isolation monkeypatching."""
+    return None
+
+
+def resolve_network_location(*args, **kwargs):
+    from ..db.pg_intelligence import resolve_network_location as resolve_pg
+    force_refresh = kwargs.get("force_refresh", False)
+    if len(args) >= 2 and isinstance(args[0], (str, ipaddress._BaseAddress)):
+        return resolve_pg(str(args[0]), args[1] if len(args) > 1 else kwargs.get("vendor"), force_refresh=force_refresh)
+    if len(args) >= 2:  # legacy (conn, ip, vendor) signature
+        return resolve_pg(str(args[1]), args[2] if len(args) > 2 else kwargs.get("vendor"), force_refresh=force_refresh)
+    if len(args) == 1:
+        return resolve_pg(str(args[0]), kwargs.get("vendor"), force_refresh=force_refresh)
+    return resolve_pg(kwargs.get("ip", ""), kwargs.get("vendor"), force_refresh=force_refresh)
+
+
 from .net_utils import candidate_networks
+
+
 
 try:
     from dotenv import load_dotenv
@@ -173,8 +191,10 @@ def _risk(data: dict) -> tuple[int, str, list[str]]:
 
 
 def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
-    """Read the updater's normalized snapshot; this function never performs I/O beyond SQLite."""
-    result, providers, fields, errors = {}, {}, {}, []
+    """Read normalized intelligence snapshot from PostgreSQL."""
+    from ..db.pg_intelligence import local_intelligence
+    return local_intelligence(ip)
+
     try:
         conn = connect()
         address = ipaddress.ip_address(ip)
@@ -224,6 +244,9 @@ def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
             result["network_location"] = {
                 "country": resolution["country"],
                 "country_code": resolution["country_code"],
+                "city": resolution["city"],
+                "latitude": resolution["latitude"],
+                "longitude": resolution["longitude"],
                 "confidence": resolution["confidence"],
                 "disputed": bool(resolution["disputed"]),
                 "scope": resolution["location_scope"],
@@ -399,7 +422,8 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     if local:
         sources.append("local intelligence")
 
-    # 1) MaxMind local first.
+    # 1) SAPICS local MMDB layer owns Geo/ASN data. No provider API or direct
+    # MaxMind/DB-IP download is used here.
     # The _maxmind and _tor_exit_list calls are synchronous, blocking
     # disk/mmap reads. Running each one via asyncio.to_thread means the event
     # loop is free while the read happens, so when the caller (main.py) fires
@@ -407,32 +431,51 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     # file reads for *different IPs* genuinely overlap on OS threads instead of
     # running one-IP-at-a-time. Reader objects are still cached/reused (see
     # _reader_cache) so this doesn't reopen the mmap per call.
-    mm, mm_errors, mm_state = await asyncio.to_thread(_maxmind, ip_text)
-    errors.extend(mm_errors)
-    _provider_state(provider_status, "MaxMind City/ASN", mm_state, mm_errors[0] if mm_errors else None)
-    if _merge(result, mm, "MaxMind", field_sources):
-        sources.append("MaxMind")
+    mm = {}
 
     # Prefix and ASN resolution is local-only. The updater populates the
     # snapshots; this fallback lets MaxMind remain useful before the first
     # global snapshot has been built.
     try:
         def resolve_local():
-            conn = connect()
-            try:
-                return resolve_network_location(conn, ip_text, mm)
-            finally:
-                conn.close()
+            return resolve_network_location(None, ip_text, mm, force_refresh=refresh)
+
 
         geo = await asyncio.to_thread(resolve_local)
-        if geo.get("country_code"):
+        sapics = {}
+        try:
+            from ..services.sapics_reader import lookup as sapics_lookup
+            sapics = await asyncio.to_thread(sapics_lookup, ip_text)
+        except Exception as exc:
+            errors.append(f"SAPICS local resolver: {type(exc).__name__}: {exc}")
+        ip2region = {}
+        try:
+            from ..services.ip2region_reader import lookup as ip2region_lookup
+            ip2region = await asyncio.to_thread(ip2region_lookup, ip_text)
+        except Exception as exc:
+            errors.append(f"ip2region local resolver: {type(exc).__name__}: {exc}")
+        if geo.get("country_code") or sapics.get("country", {}).get("value"):
+            owner_override = any("geofeed" in str(source).lower() or "cloud" in str(source).lower()
+                                 for source in geo.get("sources", []))
+            sap_country = sapics.get("country", {})
+            sap_city = sapics.get("city", {})
+            selected_country = geo.get("country") if owner_override else (sap_country.get("value") or geo.get("country"))
+            selected_code = geo.get("country_code") if owner_override else (sap_country.get("value") or geo.get("country_code"))
+            selected_city = sap_city.get("value") or geo.get("city")
+            selected_lat = sap_city.get("latitude") if sap_city.get("latitude") is not None else geo.get("latitude")
+            selected_lon = sap_city.get("longitude") if sap_city.get("longitude") is not None else geo.get("longitude")
             result["network_location"] = {
-                "country": geo.get("country"),
-                "country_code": geo.get("country_code"),
+                "country": selected_country,
+                "country_code": selected_code,
+                "city": selected_city,
+                "latitude": selected_lat,
+                "longitude": selected_lon,
                 "confidence": geo.get("confidence", 0),
                 "disputed": bool(geo.get("disputed")),
-                "scope": geo.get("scope", "network"),
-                "sources": geo.get("sources", []),
+                "scope": geo.get("scope", "network") if owner_override else "sapics",
+                "sources": geo.get("sources", []) if owner_override else [
+                    "sapics:user-country", "sapics:server-country", "sapics:geolite2", "sapics:dbip", "sapics:origin-asn"
+                ],
                 "confidence_breakdown": geo.get("confidence_breakdown", {}),
                 # See db-backed branch above: registration (RIR/WHOIS) is kept
                 # separate from operational country and is not itself a
@@ -440,8 +483,28 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
                 "registration": geo.get("registration"),
                 "allocation_pattern": geo.get("allocation_pattern", "unknown"),
                 "volatile_location": geo.get("volatile_location", False),
+                "geo": sapics,
+                "ip2region": ip2region,
+                "country_conflict": bool(sap_country.get("conflict")),
+                "country_conflict_severity": sap_country.get("conflict_severity", "none"),
+                "city_conflict": bool(sap_city.get("conflict")),
+                "city_conflict_severity": sap_city.get("conflict_severity", "none"),
+                "coordinate_conflict": bool(sap_city.get("conflict")),
+                "cross_region_infrastructure": sapics.get("infrastructure", {}).get("cross_region", False),
             }
-            for field in ("country", "country_code", "latitude", "longitude", "city", "asn", "ip_prefix", "organization", "network_type"):
+            for field, value in (("country", selected_country), ("country_code", selected_code),
+                                 ("city", selected_city), ("latitude", selected_lat), ("longitude", selected_lon)):
+                if value is not None:
+                    result[field] = value
+                    field_sources[field] = "SAPICS" if not owner_override else "owner-declared + SAPICS"
+            origin_asn = sapics.get("asn", {})
+            if origin_asn.get("number") is not None:
+                result["asn"] = origin_asn["number"]
+                field_sources["asn"] = "SAPICS origin-asn"
+            if origin_asn.get("organization"):
+                result["organization"] = origin_asn["organization"]
+                field_sources["organization"] = "SAPICS origin-asn"
+            for field in ("ip_prefix", "network_type"):
                 if geo.get(field) is not None:
                     result[field] = geo[field]
                     field_sources[field] = ", ".join(geo.get("sources", [])) or "geo resolver"
@@ -452,14 +515,22 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     except Exception as exc:
         errors.append(f"Global geo resolver: {type(exc).__name__}: {exc}")
 
-    # 2) Optional MaxMind Anonymous IP database provides real VPN/proxy flags.
+    # 2) MaxMind City/ASN is a local fallback when the local resolver has no
+    # mapping. It never overrides SAPICS/global-geo fields selected above.
+    maxmind, maxmind_errors, maxmind_state = await asyncio.to_thread(_maxmind, ip_text)
+    errors.extend(maxmind_errors)
+    _provider_state(provider_status, "MaxMind City/ASN", maxmind_state, maxmind_errors[0] if maxmind_errors else None)
+    if _merge(result, maxmind, "MaxMind City/ASN", field_sources):
+        sources.append("MaxMind City/ASN")
+
+    # 3) Optional MaxMind Anonymous IP database provides real VPN/proxy flags.
     anonymous, anonymous_errors, anonymous_state = await asyncio.to_thread(_anonymous_ip, ip_text)
     errors.extend(anonymous_errors)
     _provider_state(provider_status, "MaxMind Anonymous IP", anonymous_state, anonymous_errors[0] if anonymous_errors else None)
     if _merge(result, anonymous, "MaxMind Anonymous IP", field_sources):
         sources.append("MaxMind Anonymous IP")
 
-    # 3) Optional local CIDR lists are explicit, auditable VPN/proxy sources.
+    # 4) Optional local CIDR lists are explicit, auditable VPN/proxy sources.
     for env_name, label in (("VPN_NETWORKS_PATH", "VPN CIDR list"), ("PROXY_NETWORKS_PATH", "Proxy CIDR list")):
         matched, matched_errors, matched_state = await asyncio.to_thread(_cidr_flag, ip_text, env_name, label)
         errors.extend(matched_errors)
@@ -467,7 +538,7 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         if _merge(result, matched, label, field_sources):
             sources.append(label)
 
-    # 4) Tor remains a separate local privacy source.
+    # 5) Tor remains a separate local privacy source.
     tor, tor_errors, tor_state = await asyncio.to_thread(_tor_exit_list, ip_text)
     errors.extend(tor_errors)
     _provider_state(provider_status, "Tor exit list", tor_state, tor_errors[0] if tor_errors else None)
@@ -542,9 +613,9 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         provider_status.get(name, {}).get("status") in {"active", "partial"}
         for name in ("MaxMind City/ASN",)
     )
-    if core_status == "failed" and not geo_provider_active and not errors:
+    if core_status == "failed" and not geo_provider_active:
         result["provider_errors"].append(
-            "No local GeoIP database configured. Set MAXMIND_CITY_DB and/or MAXMIND_ASN_DB."
+            "No local GeoIP database configured. Run SAPICS release updater or configure MaxMind City/ASN."
         )
 
     return result

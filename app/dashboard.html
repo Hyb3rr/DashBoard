@@ -18,6 +18,7 @@
   button,input,select{font:inherit}
   button:focus-visible,input:focus-visible,select:focus-visible,tr:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
   .shell{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh}
+  .pagination{display:flex;align-items:center;justify-content:center;gap:14px;padding:14px 0;color:var(--secondary)}
   aside{position:sticky;top:0;height:100vh;padding:20px 12px;border-right:1px solid var(--hairline);background:var(--void)}
   .brand{display:flex;align-items:center;gap:10px;padding:0 8px 22px}
   .brand-mark{width:30px;height:30px;display:grid;place-items:center;border:1px solid rgba(89,216,230,.34);border-radius:7px;color:var(--radar);font:700 15px ui-monospace,SFMono-Regular,Menlo,monospace;box-shadow:inset 0 0 18px rgba(89,216,230,.07)}
@@ -25,9 +26,40 @@
   nav{display:grid;gap:3px}.nav-item{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 10px;border-radius:var(--r-sm);color:var(--tertiary);text-decoration:none;font-weight:550}
   .nav-item.active{color:var(--ink);background:var(--deck);box-shadow:inset 2px 0 var(--radar)}.nav-item:hover{color:var(--secondary);background:rgba(255,255,255,.025)}
   .nav-icon{width:18px;text-align:center;font:12px ui-monospace,monospace;color:inherit}
-  .site-state{position:absolute;left:12px;right:12px;bottom:16px;padding:12px;border:1px solid var(--hairline);border-radius:var(--r-md);background:var(--console)}
+  .site-state{position:absolute;left:12px;right:12px;bottom:16px;padding:12px;border:1px solid var(--hairline);border-radius:var(--r-md);background:var(--console);cursor:pointer;transition:border-color 150ms ease,background-color 150ms ease,box-shadow 150ms ease}
+  .site-state:hover{border-color:var(--radar);background:var(--deck);box-shadow:0 4px 12px rgba(0,0,0,.15)}
+  .health-head{display:flex;align-items:center;justify-content:space-between}
+  .health-head .online{margin-top:0}
+  .health-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:10px}
+  .health-chip{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:var(--r-sm);background:var(--void);border:1px solid var(--hairline-soft);font:600 11px ui-monospace,monospace;color:var(--secondary);transition:background-color 120ms ease}
+  .health-chip .dot-sm{width:6px;height:6px;border-radius:50%;background:var(--disabled)}
+  .health-chip.ok{color:var(--ink);border-color:rgba(8,124,85,.25)}
+  .health-chip.ok .dot-sm{background:var(--stable);box-shadow:0 0 0 2px rgba(8,124,85,.18)}
+  .health-chip.warn{color:var(--watch);border-color:rgba(154,107,0,.25)}
+  .health-chip.warn .dot-sm{background:var(--watch);box-shadow:0 0 0 2px rgba(154,107,0,.18)}
+  .health-chip.err{color:var(--critical);border-color:rgba(179,38,61,.25)}
+  .health-chip.err .dot-sm{background:var(--critical);box-shadow:0 0 0 2px rgba(179,38,61,.18)}
+  .health-dialog{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(3,6,8,.75);backdrop-filter:blur(6px)}
+  .health-dialog.open{display:flex}
+  .health-dialog-card{width:min(580px,100%);background:var(--console);border:1px solid var(--hairline);border-radius:var(--r-lg);box-shadow:0 24px 48px rgba(0,0,0,.5);overflow:hidden;animation:modalIn 180ms cubic-bezier(.23,1,.32,1)}
+  @keyframes modalIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+  .dialog-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--hairline);background:var(--deck)}
+  .dialog-head h2{margin:2px 0 0;font-size:16px}
+  .dialog-body{padding:20px;display:grid;gap:12px;max-height:calc(85vh - 120px);overflow-y:auto}
+  .dialog-foot{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-top:1px solid var(--hairline);background:var(--deck);font-size:12px;color:var(--tertiary)}
+  .health-svc-card{padding:14px;border:1px solid var(--hairline);border-radius:var(--r-md);background:var(--void);display:grid;gap:8px}
+  .health-svc-head{display:flex;align-items:center;justify-content:space-between}
+  .health-svc-title{font-weight:700;font-size:13px;display:flex;align-items:center;gap:8px}
+  .health-svc-badge{padding:2px 8px;border-radius:12px;font:700 10px ui-monospace,monospace;text-transform:uppercase}
+  .health-svc-badge.ok{background:rgba(8,124,85,.15);color:var(--stable)}
+  .health-svc-badge.warn{background:rgba(154,107,0,.15);color:var(--watch)}
+  .health-svc-badge.err{background:rgba(179,38,61,.15);color:var(--critical)}
+  .health-svc-details{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;padding-top:6px;border-top:1px solid var(--hairline-soft);font-size:11px}
+  .health-svc-detail span{color:var(--tertiary);display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+  .health-svc-detail strong{font-family:ui-monospace,monospace;color:var(--ink)}
   .eyebrow{font:600 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--tertiary)}
   .online{display:flex;align-items:center;gap:7px;margin-top:7px;color:var(--secondary)}.dot{width:7px;height:7px;border-radius:50%;background:var(--stable);box-shadow:0 0 0 4px rgba(100,213,154,.08)}
+
   main{min-width:0;padding:20px 24px 32px}
   .topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:22px}
   h1{margin:2px 0 3px;font-family:"Arial Narrow","Avenir Next Condensed",sans-serif;font-size:28px;line-height:1.1;letter-spacing:-.025em}.subtitle{color:var(--tertiary)}
@@ -55,12 +87,41 @@
   th,td{padding:11px 14px;border-bottom:1px solid var(--hairline-soft);text-align:left;vertical-align:middle}
   th{position:sticky;top:0;z-index:1;background:var(--deck);color:var(--tertiary);font:600 10px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.09em;text-transform:uppercase}
   th.sortable{cursor:pointer;user-select:none}th.sortable:hover,th.sortable.active{color:var(--radar)}
-  tbody tr{cursor:pointer;transition:background-color 120ms ease-out}tbody tr:hover,tbody tr:focus{background:rgba(89,216,230,.035)}tbody tr:last-child td{border-bottom:0}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.ip{font-weight:650;color:var(--ink)}.secondary-text{display:block;color:var(--tertiary);font-size:11px;margin-top:2px;max-width:230px;overflow:hidden;text-overflow:ellipsis}
+  tbody tr{cursor:pointer;transition:background-color 120ms ease-out}tbody tr:hover,tbody tr:focus{background:rgba(89,216,230,.06)}tbody tr:last-child td{border-bottom:0}
+  tbody tr.row-bad{background:rgba(255,118,109,.11);box-shadow:inset 3px 0 0 var(--critical)}
+  tbody tr.row-bad:hover,tbody tr.row-bad:focus{background:rgba(255,118,109,.18)}
+  tbody tr.row-watch{background:rgba(232,189,91,.09);box-shadow:inset 3px 0 0 var(--watch)}
+  tbody tr.row-watch:hover,tbody tr.row-watch:focus{background:rgba(232,189,91,.16)}
+  tbody tr.row-good{background:rgba(100,213,154,.065);box-shadow:inset 3px 0 0 var(--stable)}
+  tbody tr.row-good:hover,tbody tr.row-good:focus{background:rgba(100,213,154,.13)}
+  tbody tr.row-resolved{background:rgba(100,213,154,.09)!important;box-shadow:inset 3px 0 0 var(--stable)!important}
+  tbody tr.row-resolved:hover,tbody tr.row-resolved:focus{background:rgba(100,213,154,.16)!important}
+
+
+
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.ip{font-weight:650;color:var(--ink)}.secondary-text{display:block;color:var(--tertiary);font-size:11px;margin-top:2px;max-width:230px;overflow:hidden;text-overflow:ellipsis}.disposition-inline{font-weight:800;letter-spacing:.03em}.disposition-inline.monitor{color:var(--radar)}.disposition-inline.investigate{color:var(--watch)}.disposition-inline.escalate{color:var(--critical)}.disposition-inline.resolved{color:var(--stable)}
   .flag{display:inline-flex;align-items:center;height:22px;padding:0 7px;border:1px solid var(--hairline);border-radius:4px;color:var(--tertiary);font:600 10px ui-monospace,monospace;text-transform:uppercase}.flag.on{color:var(--hostile);border-color:rgba(255,118,109,.25);background:rgba(255,118,109,.06)}
   .risk-cell{min-width:152px}.risk-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.risk-level{font:700 10px ui-monospace,monospace;text-transform:uppercase}.risk-level.low{color:var(--stable)}.risk-level.medium{color:var(--watch)}.risk-level.high{color:var(--hostile)}.risk-level.critical{color:var(--critical)}.ai-cell{min-width:118px}.ai-score{font:700 12px ui-monospace,monospace;color:var(--radar)}.ai-score.alert{color:var(--critical)}.ai-score.none{color:var(--tertiary)}.ai-note{display:block;margin-top:3px;color:var(--tertiary);font-size:10px}.ai-score.alert+.ai-note{color:var(--critical)}
-  .region-score-cell{min-width:116px}.region-score{font:700 12px ui-monospace,monospace;color:var(--radar)}.region-score.none{color:var(--tertiary)}.region-score-note{display:block;margin-top:3px;color:var(--tertiary);font-size:10px;text-transform:uppercase}
+  .disp-badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:4px;font:800 10px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;border:1px solid transparent;box-shadow:0 0 0 1px rgba(255,255,255,.04);text-shadow:0 0 8px currentColor}
+  .disp-badge.new{color:var(--tertiary);background:rgba(255,255,255,.05);border-color:var(--hairline)}
+  .disp-badge.monitor{color:var(--radar);background:rgba(89,216,230,.1);border-color:rgba(89,216,230,.25)}
+  .disp-badge.investigate{color:var(--watch);background:rgba(232,189,91,.12);border-color:rgba(232,189,91,.3)}
+  .disp-badge.escalate{color:var(--critical);background:rgba(255,118,109,.15);border-color:rgba(255,118,109,.35)}
+  .disp-badge.resolved{color:var(--stable);background:rgba(100,213,154,.12);border-color:rgba(100,213,154,.3)}
+  .triage-box{padding:14px;background:var(--raised);border:1px solid var(--hairline);border-radius:var(--r-sm);margin:14px 0}
+  .triage-states{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-bottom:10px}
+  .triage-btn{padding:6px 4px;font:700 10px ui-monospace,monospace;border:1px solid var(--hairline);border-radius:4px;background:var(--deck);color:var(--secondary);text-transform:uppercase;cursor:pointer;text-align:center}
+  .triage-btn:hover{background:var(--raised);color:var(--ink)}
+  .triage-btn.active.new{background:var(--console);color:var(--ink);border-color:var(--secondary)}
+  .triage-btn.active.monitor{background:rgba(89,216,230,.2);color:var(--radar);border-color:var(--radar)}
+  .triage-btn.active.investigate{background:rgba(232,189,91,.2);color:var(--watch);border-color:var(--watch)}
+  .triage-btn.active.escalate{background:rgba(255,118,109,.25);color:var(--critical);border-color:var(--critical)}
+  .triage-btn.active.resolved{background:rgba(100,213,154,.2);color:var(--stable);border-color:var(--stable)}
+  .triage-form{display:grid;gap:8px}
+  .triage-input{width:100%!important;background:var(--console)!important;font-size:12px}
+  .triage-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px}
   .signal{height:3px;margin-top:7px;background:rgba(255,255,255,.06);overflow:hidden}.signal span{display:block;height:100%;background:var(--stable)}.signal.medium span{background:var(--watch)}.signal.high span{background:var(--hostile)}.signal.critical span{background:var(--critical)}
+
   .state{padding:52px 20px;text-align:center;color:var(--tertiary)}.state strong{display:block;color:var(--secondary);margin-bottom:4px}
   .risk-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--hairline);border:1px solid var(--hairline);border-radius:var(--r-lg);overflow:hidden;margin-bottom:16px}.risk-tab{min-height:92px;padding:15px 16px;border:0;border-radius:0;background:var(--console);color:var(--ink);text-align:left;cursor:pointer}.risk-tab:hover{background:var(--deck)}.risk-tab.selected{background:var(--deck);box-shadow:inset 0 -3px var(--radar)}.risk-tab .tab-label{display:flex;align-items:center;gap:7px;color:var(--tertiary);font-size:11px;font-weight:700}.risk-tab .tab-count{display:block;margin-top:8px;font:700 24px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.risk-tab.critical .tab-count{color:var(--critical)}.risk-tab.watch .tab-count{color:var(--watch)}.risk-tab.healthy .tab-count{color:var(--stable)}.risk-tab.unknown .tab-count{color:var(--tertiary)}
   .overview-layout{display:grid;grid-template-columns:1fr;gap:16px;margin-bottom:16px}.overview-panel{border:1px solid var(--hairline);border-radius:var(--r-lg);background:var(--console);overflow:hidden}.overview-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:15px 16px;border-bottom:1px solid var(--hairline)}.overview-head h2{margin:0;font-size:14px}.overview-head p{margin:4px 0 0;color:var(--tertiary);font-size:11px}.overview-body{padding:14px 16px}.priority-list{display:grid;gap:8px}.priority-item{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(140px,.9fr) 76px auto;align-items:center;gap:12px;min-height:62px;padding:10px 12px;border:1px solid var(--hairline);border-radius:var(--r-sm);background:var(--deck);cursor:pointer}.priority-item:hover{border-color:rgba(89,216,230,.35);background:var(--raised)}.priority-score{font:700 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.priority-score.bad{color:var(--critical)}.priority-score.watch{color:var(--watch)}.priority-score.good{color:var(--stable)}.priority-ip,.priority-reason,.priority-meta{min-width:0}.priority-ip strong,.priority-reason strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.priority-ip strong{font:650 12px ui-monospace,SFMono-Regular,Menlo,monospace}.priority-ip span,.priority-reason span,.priority-meta span{display:block;margin-top:2px;color:var(--tertiary);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.priority-reason strong{font-size:11px}.priority-meta strong{display:block;font:650 11px ui-monospace,SFMono-Regular,Menlo,monospace}.priority-badge{font:700 9px ui-monospace,monospace;text-transform:uppercase}.priority-badge.bad{color:var(--critical)}.priority-badge.watch{color:var(--watch)}.priority-badge.good{color:var(--stable)}
@@ -69,7 +130,17 @@
   .panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:18px;border-bottom:1px solid var(--hairline)}.panel h2{margin:4px 0 0;font:650 21px ui-monospace,monospace}.icon-button{width:40px;padding:0;background:var(--deck)!important;color:var(--secondary)!important;border-color:var(--hairline)!important}
   .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin:16px 0;background:var(--hairline)}.detail{padding:13px;background:var(--console)}.detail span{display:block;color:var(--tertiary);font-size:11px}.detail strong{display:block;margin-top:4px;font:600 13px ui-monospace,monospace;overflow-wrap:anywhere}
   .section{padding:16px 0;border-top:1px solid var(--hairline)}.section h3{margin:0 0 10px;font-size:12px}.evidence{display:grid;gap:7px}.evidence-item{padding-left:12px;border-left:2px solid var(--hairline);color:var(--secondary);font-size:12px}
-  .toast{position:fixed;left:50%;bottom:20px;z-index:40;transform:translate(-50%,12px);padding:10px 14px;border:1px solid var(--hairline);border-radius:var(--r-sm);background:var(--raised);color:var(--secondary);opacity:0;pointer-events:none;transition:opacity 160ms ease-out,transform 160ms cubic-bezier(.23,1,.32,1)}.toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast{position:fixed;right:24px;bottom:24px;left:auto;z-index:40;transform:translateY(12px);padding:12px 18px;border:1px solid var(--hairline);border-radius:var(--r-sm);background:var(--raised);color:var(--ink);font-size:13px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity 200ms ease-out,transform 200ms cubic-bezier(.23,1,.32,1);display:flex;align-items:center;gap:12px;max-width:min(420px,calc(100vw - 32px))}
+  .toast.show{opacity:1;transform:translateY(0);pointer-events:auto}
+  .toast.clickable{cursor:pointer}
+  .toast.clickable:hover{filter:brightness(1.08);transform:translateY(-2px)}
+  .toast.clickable:active{transform:translateY(0) scale(.98)}
+  .toast-link-icon{margin-left:auto;font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:4px;background:rgba(255,255,255,.2);color:#fff;white-space:nowrap}
+  .toast.error,.toast.bad,.toast.critical{background:#b3263d!important;color:#fff!important;border-color:#d43852!important;box-shadow:0 8px 28px rgba(179,38,61,.45)!important}
+  .toast.warn,.toast.warning{background:#9a6b00!important;color:#fff!important;border-color:#b88206!important;box-shadow:0 8px 28px rgba(154,107,0,.45)!important}
+  .toast.success{background:#087c55!important;color:#fff!important;border-color:#0ea874!important;box-shadow:0 8px 28px rgba(8,124,85,.45)!important}
+
+
   .analytics{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:16px;margin:0 0 16px}.analytics-card{padding:18px;border:1px solid var(--hairline);border-radius:var(--r-lg);background:var(--console)}.analytics-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:16px}.analytics-head h2{margin:0;font-size:14px}.analytics-head span{color:var(--tertiary);font:700 10px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em}.chart-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--secondary);font-size:11px;margin-bottom:14px}.chart-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}.risk-chart{display:grid;gap:10px}.risk-chart-row{display:grid;grid-template-columns:64px 1fr 42px;align-items:center;gap:10px;font-size:12px}.risk-chart-row label{color:var(--secondary)}.risk-track{height:10px;border-radius:99px;background:var(--raised);overflow:hidden}.risk-fill{height:100%;border-radius:inherit}.risk-chart-row b{text-align:right;font:600 12px ui-monospace,monospace}.ai-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:0}.ai-stat{padding:10px;background:var(--raised);border-radius:5px}.ai-stat span{display:block;color:var(--tertiary);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.ai-stat strong{display:block;margin-top:5px;color:var(--radar);font:650 20px ui-monospace,monospace}.signal-bars{display:grid;gap:8px}.signal-bar{display:grid;grid-template-columns:110px 1fr 42px;gap:8px;align-items:center;font-size:11px}.signal-bar label{color:var(--secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.signal-bar .risk-track{height:8px}.signal-bar b{text-align:right;font:600 11px ui-monospace,monospace;color:var(--secondary)}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:0;align-items:stretch}.pipeline-step{position:relative;padding:14px 12px;background:var(--raised);border:1px solid var(--hairline);min-height:86px}.pipeline-step:first-child{border-radius:5px 0 0 5px}.pipeline-step:last-child{border-radius:0 5px 5px 0}.pipeline-step:not(:last-child)::after{content:'›';position:absolute;right:-9px;top:28px;z-index:1;width:18px;height:28px;text-align:center;color:var(--radar);background:var(--console);font-size:25px;line-height:25px}.pipeline-step .step-no{color:var(--radar);font:700 10px ui-monospace,monospace}.pipeline-step strong{display:block;margin:7px 0 3px;font-size:12px}.pipeline-step small{color:var(--tertiary);line-height:1.35}.pipeline-note{margin-top:12px;color:var(--tertiary);font-size:11px}
   @media(max-width:900px){.shell{display:block}aside{display:none}main{padding:16px}.metrics{grid-template-columns:1fr 1fr}.metric:nth-child(2){border-right:0}.metric:nth-child(-n+2){border-bottom:1px solid var(--hairline-soft)}.workbench-head{align-items:flex-start;flex-direction:column}.filters{width:100%}input{width:100%}.topbar{align-items:center}.subtitle{display:none}.region-grid{grid-template-columns:1fr}.overview-layout,.analytics,.traffic-tables{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr;gap:8px}.pipeline-step,.pipeline-step:first-child,.pipeline-step:last-child{border-radius:5px}.pipeline-step:not(:last-child)::after{content:'↓';right:calc(50% - 9px);top:auto;bottom:-17px;font-size:21px}.ai-summary{grid-template-columns:repeat(3,1fr)}}
   @media(max-width:560px){.risk-strip{grid-template-columns:repeat(2,1fr)}.risk-tab:last-child{grid-column:1/-1}.priority-item{grid-template-columns:38px minmax(0,1fr) auto}.priority-reason,.priority-meta{display:none}}
@@ -130,7 +201,19 @@ html[data-theme="light"] .signal{background:rgba(22,54,64,.1)}
       <a class="nav-item" data-view="threats" href="#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
       <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
     </nav>
-    <div class="site-state"><div class="eyebrow">Hub state</div><div class="online"><span class="dot" id="collector-dot"></span><span id="collector-state">Connecting…</span></div></div>
+    <div class="site-state" id="health-widget" role="button" tabindex="0" title="Click to view infrastructure health diagnostics">
+      <div class="health-head">
+        <div class="eyebrow">System Health</div>
+        <div class="online"><span class="dot" id="collector-dot"></span><span id="collector-state">Checking…</span></div>
+      </div>
+      <div class="health-grid">
+        <div class="health-chip" id="chip-pg"><span class="dot-sm"></span>PG</div>
+        <div class="health-chip" id="chip-ch"><span class="dot-sm"></span>CH</div>
+        <div class="health-chip" id="chip-rules"><span class="dot-sm"></span>Rules</div>
+        <div class="health-chip" id="chip-stream"><span class="dot-sm"></span>Stream</div>
+      </div>
+    </div>
+
   </aside>
   <main>
     <header class="topbar">
@@ -178,19 +261,20 @@ html[data-theme="light"] .signal{background:rgba(22,54,64,.1)}
     <section id="threats" class="view-panel" data-view-panel="threats" hidden>
     <section class="workbench" id="network-identities">
       <div class="workbench-head">
-        <h2>Network identities <span class="count" id="visible-count">0 visible</span></h2>
+        <h2>Network identities <span class="count" id="visible-count">0 visible</span> <span class="count" id="ip-realtime-latency">realtime —</span></h2>
         <div class="filters">
           <input id="search" type="search" aria-label="Search network identities" placeholder="Search IP, country, ASN, organization">
           <select id="privacy" aria-label="Filter privacy"><option value="">All networks</option><option value="privacy">Privacy signal</option><option value="tor">Tor exit</option><option value="hosting">Hosting</option></select>
           <select id="classification" aria-label="Filter classification"><option value="">All classes</option><option value="bad">Bad</option><option value="watch">Watch</option><option value="good">Good</option><option value="unknown">Unknown</option></select>
           <select id="disposition" aria-label="Filter disposition"><option value="">All dispositions</option><option value="new">New</option><option value="monitor">Monitor</option><option value="investigate">Investigate</option><option value="escalate">Escalate</option><option value="resolved">Resolved</option></select>
-          <select id="region-score-filter" aria-label="Filter region score"><option value="">All region scores</option><option value="very_high">Very high · 75+</option><option value="high">High · 50–74</option><option value="medium">Medium · 25–49</option><option value="low">Low · 0–24</option><option value="unknown">Unknown</option></select>
         </div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Identity</th><th>Operational location</th><th class="hide-mobile">Network attribution</th><th class="sortable" data-sort="requests">Requests</th><th class="sortable hide-mobile" data-sort="status_4xx">4xx</th><th class="sortable hide-mobile" data-sort="unique_paths">Paths</th><th>Signals</th><th class="sortable" data-sort="region_score">Region score</th><th>AI anomaly</th><th class="sortable active" data-sort="threat_signal_score">Threat signal</th></tr></thead>
+        <thead><tr><th>Identity</th><th class="sortable active" data-sort="last_seen">Last seen</th><th>Operational location</th><th class="sortable" data-sort="requests">Requests</th><th class="sortable hide-mobile" data-sort="status_4xx">4xx</th><th class="sortable hide-mobile" data-sort="unique_paths">Paths</th><th>Signals</th><th>AI anomaly</th><th class="sortable" data-sort="threat_signal_score">Threat signal</th><th>Triage</th></tr></thead>
         <tbody id="rows"><tr><td colspan="10"><div class="state"><strong>Loading observations…</strong>Reading aggregated intelligence from the Hub.</div></td></tr></tbody>
       </table></div>
+
+      <div class="pagination" id="ip-pagination"><button class="secondary" id="ip-prev" type="button">Previous</button><span id="ip-page-label">Page 1</span><button class="secondary" id="ip-next" type="button">Next</button></div>
     </section>
     </section>
     </section>
@@ -200,23 +284,41 @@ html[data-theme="light"] .signal{background:rgba(22,54,64,.1)}
   <div class="panel-head"><div><div class="eyebrow">Investigation profile</div><h2 id="detail-title">IP address</h2></div><button class="icon-button" data-close aria-label="Close investigation">×</button></div>
   <div id="detail-body"><div class="state"><strong>Loading profile…</strong>Correlating network and behavior signals.</div></div>
 </aside></div>
+<div class="health-dialog" id="health-dialog" aria-hidden="true">
+  <div class="health-dialog-card" role="dialog" aria-modal="true" aria-labelledby="health-dialog-title">
+    <div class="dialog-head">
+      <div>
+        <div class="eyebrow">Infrastructure Diagnostics</div>
+        <h2 id="health-dialog-title">System Health Status</h2>
+      </div>
+      <button class="icon-button" id="close-health-btn" type="button" aria-label="Close dialog">×</button>
+    </div>
+    <div class="dialog-body" id="health-dialog-body">
+      <div class="state"><strong>Checking infrastructure…</strong>Loading component diagnostics.</div>
+    </div>
+    <div class="dialog-foot">
+      <span id="health-last-checked">Last checked: —</span>
+      <button class="secondary" id="recheck-health-btn" type="button">Check now</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
 <script>
 const initialTheme=localStorage.getItem('sentinel-theme')||'dark';document.documentElement.dataset.theme=initialTheme;
-let ips=[],regions=[],regionDemand=[],sortField='threat_signal_score',sortDir='desc',lastFocus=null;
+let ips=[],regions=[],regionDemand=[],ipSummary=null,sortField='last_seen',sortDir='desc',lastFocus=null;
+let ipPage=1,ipPageSize=50,ipTotalPages=1,ipCursor=0,deltaBusy=false,realtimeFlushTimer=null,realtimeFlushRunning=false,realtimeFlushPending=false,collectorState='unknown';
 let ipsReady=false,regionsReady=false;
 const $=id=>document.getElementById(id);
 const API_BASE=(location.protocol==='file:'||!['127.0.0.1:8000','localhost:8000'].includes(location.host))?'http://127.0.0.1:8000':'';
-const apiUrl=path=>API_BASE+path;
+const apiUrl=path=>{if(path.startsWith('/api/')&&!/[?&]mode=/.test(path))path+=`${path.includes('?')?'&':'?'}mode=live`;return API_BASE+path};
 const esc=value=>String(value??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
 const num=value=>{const n=Number(value);return Number.isFinite(n)?n.toLocaleString('en-US',{maximumFractionDigits:2}).replace(/,/g,' '):'—'};
-const displayValue=value=>{const n=Number(value);return value!==null&&value!==undefined&&value!==''&&Number.isFinite(n)?num(n):String(value??'Unknown')};
-const yes=value=>value===null||value===undefined?'<span class="flag">unknown</span>':value?'<span class="flag on">yes</span>':'<span class="flag">no</span>';
+const isTrue=v=>v===true||v===1||v==='1'||v==='true';
+const yes=value=>value===null||value===undefined?'<span class="flag">unknown</span>':isTrue(value)?'<span class="flag on">yes</span>':'<span class="flag">no</span>';
+
 const classification=x=>x.classification?.label||'unknown';
 const signalScore=x=>Number(x.threat_signal_score??0);
-const regionScore=x=>{const value=x.region_profile?.market_score,n=Number(value);return value==null||value===''||!Number.isFinite(n)?null:n};
-const regionLevel=x=>{const score=regionScore(x);if(score==null||!Number.isFinite(score))return 'unknown';if(score>=75)return 'very_high';if(score>=50)return 'high';if(score>=25)return 'medium';return 'low'};
-const sortValue=(x,field)=>field==='region_score'?(regionScore(x)??-1):Number(x[field]||0);
 const classTone=label=>label==='bad'?'bad':label==='watch'?'watch':label==='good'?'good':'unknown';
 const networkLocation=x=>x?.network_location&&typeof x.network_location==='object'&&!Array.isArray(x.network_location)?x.network_location:{};
 const registrationOf=x=>networkLocation(x).registration&&typeof networkLocation(x).registration==='object'?networkLocation(x).registration:null;
@@ -224,12 +326,14 @@ const locationDisputed=x=>Boolean(networkLocation(x).disputed??x?.location_dispu
 const allocationPattern=x=>networkLocation(x).allocation_pattern||'unknown';
 const allocationLabel=value=>({cross_region_allocation:'cross-region allocation',consistent:'registration aligned',registration_estimate_only:'RIR estimate only',registration_unavailable:'RIR unavailable',no_operational_evidence:'no operational evidence',unknown:'allocation unknown'})[value]||String(value||'unknown').replaceAll('_',' ');
 function locationCell(x){
-  const loc=networkLocation(x),reg=registrationOf(x),country=loc.country||x.country||'Unknown',code=loc.country_code||x.country_code||'—',confidence=Number(loc.confidence??x.location_confidence??0),disputed=locationDisputed(x),pattern=allocationPattern(x);
+  const loc=networkLocation(x),reg=registrationOf(x),country=loc.country||x.country||'Unknown',code=loc.country_code||x.country_code||'—',disputed=locationDisputed(x),pattern=allocationPattern(x);
+  const city=loc.city||x.city||loc.geo?.city?.value||'';
   const regCode=reg?.country_code||'—',regSource=reg?.source||'RIR';
   const regContext=reg?`<span class="geo-chip registration" title="Registration/ownership context; not an operational location vote">RIR ${esc(regCode)}</span>`:'';
-  const disputeChip=disputed?'<span class="geo-chip disputed" title="Operational location sources disagree">geo dispute</span>':'';
+  const countryConflict=Boolean(loc.country_conflict),cityConflict=Boolean(loc.city_conflict);
+  const disputeChip=disputed||countryConflict||cityConflict?`<span class="geo-chip disputed" title="${countryConflict?'Country conflict':cityConflict?'City conflict':'Operational location sources disagree'}">${countryConflict?'country conflict':cityConflict?'city conflict':'geo dispute'}</span>`:'';
   const allocation=reg&&pattern==='cross_region_allocation'?`<span class="allocation" title="Operational Geo differs from RIR registration; this alone is not a dispute">${esc(allocationLabel(pattern))}</span>`:'';
-  return `<div class="location-cell"><div class="location-primary"><strong title="${esc(country)}">${esc(country)}</strong><span class="geo-chip operational">op geo</span>${disputeChip}</div><span class="secondary-text">${esc(code)} · ${num(confidence)}% confidence</span>${reg?`<div class="location-context">${regContext}<span>${esc(regSource)}</span>${allocation}</div>`:''}</div>`;
+  return `<div class="location-cell"><div class="location-primary"><strong title="${esc(country)}">${esc(country)}</strong><span class="geo-chip operational">op geo</span>${disputeChip}</div><span class="secondary-text">${city?`${esc(city)} · `:''}${esc(code)}</span>${reg?`<div class="location-context">${regContext}<span>${esc(regSource)}</span>${allocation}</div>`:''}</div>`;
 }
 function geoSourceRows(location){
   const breakdown=location?.confidence_breakdown||{},sources=Array.isArray(breakdown.sources)?breakdown.sources:[];
@@ -237,21 +341,28 @@ function geoSourceRows(location){
   return sources.map(item=>{const registration=item.scope==='registration';return `<div class="geo-source-row ${registration?'registration':''}"><span>${esc(item.source||'unknown')} · ${esc(item.country_code||'—')} · ${esc(item.scope||'network')}${registration?' · excluded from operational vote':''}</span><strong>${item.confidence==null?'—':`${num(item.confidence)}%`}</strong></div>`}).join('');
 }
 function geoSummary(d){
-  const loc=networkLocation(d),reg=registrationOf(d),disputed=locationDisputed(d),pattern=allocationPattern(d),country=loc.country||d.country||'Unknown',code=loc.country_code||d.country_code||'—',confidence=Number(loc.confidence??d.location_confidence??0),scope=loc.scope||d.location_scope||'unknown';
+  const loc=networkLocation(d),reg=registrationOf(d),disputed=locationDisputed(d),pattern=allocationPattern(d),country=loc.country||d.country||'Unknown',code=loc.country_code||d.country_code||'—',scope=loc.scope||d.location_scope||'unknown';
+  const city=loc.city||d.city||'',lat=loc.latitude??d.latitude,lon=loc.longitude??d.longitude;
+  const coordStr=lat!=null&&lon!=null?`${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}`:'—';
+  const mapUrl=lat!=null&&lon!=null?`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}&zoom=10`:null;
   let note='Operational Geo is resolved from location-capable sources. RIR/WHOIS registration is shown separately and does not vote against operational Geo.';
   let tone='';
-  if(disputed){note='Operational location sources disagree closely enough to mark this result disputed. RIR/WHOIS registration is still excluded from that dispute decision.';tone='warning'}
+  if(loc.country_conflict){note=`Country conflict ${String(loc.country_conflict_severity||'').toUpperCase()}. SAPICS user-country is primary; other datasets disagree.`;tone='warning'}
+  else if(loc.city_conflict){note=`City conflict ${String(loc.city_conflict_severity||'').toUpperCase()}. Coordinate distance: ${loc.geo?.city?.distance_km??'—'} km.`;tone='warning'}
+  else if(disputed){note='Operational location sources disagree closely enough to mark this result disputed. RIR/WHOIS registration is still excluded from that dispute decision.';tone='warning'}
   else if(pattern==='cross_region_allocation'&&reg){note=`Operational Geo ${code} differs from RIR registration ${reg.country_code||'—'}. This is a cross-region allocation pattern and is not itself a geo dispute.`}
   else if(pattern==='registration_estimate_only'){note='No operational location evidence is available, so the resolver is using RIR registration only as a weak fallback estimate.';tone='warning'}
   const regText=reg?`${reg.country||reg.country_code||'Unknown'} (${reg.country_code||'—'}) · ${reg.source||'RIR'}`:'Unavailable';
-  return `<div class="geo-summary"><div class="geo-summary-grid"><div class="geo-summary-item"><span>Operational country</span><strong>${esc(country)} (${esc(code)})</strong></div><div class="geo-summary-item"><span>Operational confidence</span><strong>${num(confidence)}% · ${disputed?'DISPUTED':'RESOLVED'}</strong></div><div class="geo-summary-item"><span>RIR registration</span><strong>${esc(regText)}</strong></div><div class="geo-summary-item"><span>Allocation pattern</span><strong>${esc(allocationLabel(pattern))}</strong></div><div class="geo-summary-item"><span>Location scope</span><strong>${esc(scope)}</strong></div><div class="geo-summary-item"><span>Operational sources</span><strong>${esc((loc.sources||[]).join(', ')||'none')}</strong></div></div><div class="geo-callout ${tone}">${esc(note)}</div><div class="geo-source-list">${geoSourceRows(loc)}</div></div>`;
+  const cityRow=city?`<div class="geo-summary-item"><span>City</span><strong>${esc(city)}</strong></div>`:'';
+  const coordRow=`<div class="geo-summary-item"><span>Coordinates</span><strong>${mapUrl?`<a href="${mapUrl}" target="_blank" rel="noopener" style="color:var(--radar);text-decoration:none">${coordStr} ↗</a>`:coordStr}</strong></div>`;
+  const ip2=loc.ip2region,ip2Text=ip2&&(ip2.city||ip2.region||ip2.isp)?`${ip2.city||'Unknown'}${ip2.region?` · ${ip2.region}`:''}${ip2.isp?` · ${ip2.isp}`:''}`:null;
+  return `<div class="geo-summary"><div class="geo-summary-grid">${cityRow}${coordRow}<div class="geo-summary-item"><span>Operational country</span><strong>${esc(country)} (${esc(code)})</strong></div>${ip2Text?`<div class="geo-summary-item"><span>ip2region context</span><strong>${esc(ip2Text)}</strong></div>`:''}<div class="geo-summary-item"><span>RIR registration</span><strong>${esc(regText)}</strong></div><div class="geo-summary-item"><span>Allocation pattern</span><strong>${esc(allocationLabel(pattern))}</strong></div><div class="geo-summary-item"><span>Location scope</span><strong>${esc(scope)}</strong></div><div class="geo-summary-item"><span>Operational sources</span><strong>${esc((loc.sources||[]).join(', ')||'none')}</strong></div></div><div class="geo-callout ${tone}">${esc(note)}</div><div class="geo-source-list">${geoSourceRows(loc)}</div></div>`;
 }
 function renderClassificationAnalytics(){
-  const counts={bad:0,watch:0,good:0,unknown:0};ips.forEach(x=>{counts[classification(x)]=(counts[classification(x)]||0)+1});
-  const total=Math.max(1,ips.length), colors={bad:'var(--critical)',watch:'var(--watch)',good:'var(--stable)',unknown:'var(--tertiary)'};
+  const counts=ipSummary?.classification||{bad:0,watch:0,good:0,unknown:0};
+  const total=Math.max(1,Number(ipSummary?.total_ips||0)), colors={bad:'var(--critical)',watch:'var(--watch)',good:'var(--stable)',unknown:'var(--tertiary)'};
   $('classification-chart').innerHTML=Object.entries(counts).map(([label,count])=>`<div class="risk-chart-row"><label>${label}</label><div class="risk-track"><div class="risk-fill" style="width:${(count/total)*100}%;background:${colors[label]}"></div></div><b>${num(count)}</b></div>`).join('');
-  const scored=ips.filter(x=>Object.keys(x.ai_profile||{}).length>0),flagged=scored.filter(x=>Number(x.ai_profile?.ai_anomaly_score||0)>=70);
-  $('ai-scored').textContent=num(scored.length);$('ai-flagged').textContent=num(flagged.length);$('ai-coverage').textContent=ips.length?`${(scored.length/ips.length*100).toFixed(2)}%`:'—';
+  $('ai-scored').textContent=num(ipSummary?.ai?.scored||0);$('ai-flagged').textContent=num(ipSummary?.ai?.flagged||0);$('ai-coverage').textContent=ipSummary?.ai?`${Number(ipSummary.ai.coverage||0).toFixed(2)}%`:'—';
 }
 function renderRegionAnalytics(){
   const market=regions.filter(x=>x.market_score!=null).sort((a,b)=>Number(b.market_score)-Number(a.market_score)).slice(0,5),maxMarket=Math.max(1,...market.map(x=>Number(x.market_score)));
@@ -263,6 +374,7 @@ function renderAnalytics(){
 }
 function trafficTime(value){return new Date(value).toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}
 function trafficClock(value){return new Date(value).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}
+function seenTime(value){if(!value)return '—';const date=new Date(value);return Number.isNaN(date.getTime())?'—':date.toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
 const TRAFFIC_WINDOW_KEY='hub:v2:traffic-window';let trafficRange='1h',trafficStart='',trafficEnd='',trafficFilterType='',trafficFilterValue='',trafficExclude=false;
 function localIso(value){return value?new Date(value).toISOString():''}
 function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
@@ -296,7 +408,7 @@ function renderTraffic(data){
     chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<line class="traffic-now-line" x1="${w-padR}" y1="${padT}" x2="${w-padR}" y2="${padT+innerH}"></line><polygon class="traffic-area" points="${area}"></polygon><polyline class="traffic-line" points="${points}"></polyline><line id="traffic-guide-line" class="traffic-guide-line" style="display:none"></line><circle id="traffic-guide-dot" class="traffic-guide-dot" style="display:none"></circle>${axis}${hits}</svg><div class="traffic-tooltip" id="traffic-tooltip"></div>`;
     const tooltip=$('traffic-tooltip');chart.querySelectorAll('.traffic-hit').forEach(hit=>{hit.addEventListener('mouseenter',event=>{const item=series[Number(event.currentTarget.dataset.index)],rect=chart.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;const cx=xFor(item.timestamp),cy=yFor(item.requests),req=Number(item.requests||0),isPeak=req>=max&&max>0;const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine&&guideDot){guideLine.setAttribute('x1',cx.toFixed(1));guideLine.setAttribute('y1',padT);guideLine.setAttribute('x2',cx.toFixed(1));guideLine.setAttribute('y2',padT+innerH);guideLine.classList.toggle('at-peak',isPeak);guideLine.style.display='block';guideDot.setAttribute('cx',cx.toFixed(1));guideDot.setAttribute('cy',cy.toFixed(1));guideDot.setAttribute('r',isPeak?6:4.5);guideDot.classList.toggle('at-peak',isPeak);guideDot.style.display='block'};tooltip.innerHTML=`<div class="time">${trafficTime(item.timestamp)}${isPeak?' <span style="color:var(--critical);font-weight:700">· PEAK</span>':''}</div><div class="value"><span>Requests</span><strong>${num(item.requests||0)}</strong></div><div class="value"><span>Errors</span><strong>${num(item.errors||0)}</strong></div>`;tooltip.style.left=`${Math.max(8,Math.min(rect.width-165,x+12))}px`;tooltip.style.top=`${Math.max(8,y-70)}px`;tooltip.classList.add('show')});hit.addEventListener('mouseleave',()=>{tooltip.classList.remove('show');const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine)guideLine.style.display='none';if(guideDot)guideDot.style.display='none'})});
   }
-  const actions=(type,value)=>`<span class="row-actions"><button type="button" data-traffic-action="filter" data-filter-type="${type}" data-filter-value="${esc(value)}">Filter</button><button type="button" data-traffic-action="exclude" data-filter-type="${type}" data-filter-value="${esc(value)}">Exclude</button></span>`;
+  const actions=(type,value)=>value?`<span class="row-actions"><button type="button" data-traffic-action="filter" data-filter-type="${type}" data-filter-value="${esc(value)}">Filter</button><button type="button" data-traffic-action="exclude" data-filter-type="${type}" data-filter-value="${esc(value)}">Exclude</button></span>`:'';
   const renderRows=(items,displayFn,type,valueFn=displayFn)=>{const maxValue=Math.max(1,...items.map(x=>Number(x.requests||0)));return items.length?items.map(x=>{const display=displayFn(x),value=valueFn(x),req=Number(x.requests||0),pct=Math.max(3,(req/maxValue)*100);return `<div class="traffic-row"><span class="name" title="${esc(display)}">${esc(display)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="count">${num(x.requests)}</span>${actions(type,value)}</div>`}).join(''):'<div class="state">No data.</div>'};
   const renderIpRows=(items)=>{const maxValue=Math.max(1,...items.map(x=>Number(x.requests||0)));return items.length?items.map(x=>{const req=Number(x.requests||0),pct=Math.max(3,(req/maxValue)*100);return `<div class="traffic-row" tabindex="0" data-traffic-ip="${esc(x.ip)}"><span class="name" title="${esc(x.ip)}">${esc(x.ip)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="count">${num(x.requests)}</span>${actions('ip',x.ip)}</div>`}).join(''):'<div class="state">No data.</div>'};
   $('top-ips').innerHTML=renderIpRows(data.top_ips||[]);
@@ -305,7 +417,7 @@ function renderTraffic(data){
 }
 async function loadTraffic(force=false){
   try{
-    const params=new URLSearchParams({range:trafficRange});
+    const params=new URLSearchParams({range:trafficRange,source:'stream',mode:'live'});
     if(trafficStart)params.set('start',localIso(trafficStart));if(trafficEnd)params.set('end',localIso(trafficEnd));
     if(trafficFilterType){params.set('filter_type',trafficFilterType);params.set('filter_value',trafficFilterValue);if(trafficExclude)params.set('exclude','true')}
     const response=await fetch(apiUrl(`/api/analytics/traffic?${params.toString()}`),{cache:'no-store'});
@@ -315,49 +427,94 @@ async function loadTraffic(force=false){
 }
 function applyTrafficWindow(){trafficStart=$('traffic-start').value;trafficEnd=$('traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notify('End must be after start');return}saveTrafficWindow();loadTraffic(true)}
 function clearTrafficWindow(){trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';trafficRange='1h';document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item.dataset.range===trafficRange));saveTrafficWindow();loadTraffic(true)}
-function notify(message){$('toast').textContent=message;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),2200)}
+let toastTimer=null;
+let toastClickTarget=null;
+function notify(message,type='info',duration=null,targetIp=null){
+  const toast=$('toast');
+  if(!toast)return;
+  if(toastTimer){clearTimeout(toastTimer);toastTimer=null}
+  const isBad=type==='error'||type==='bad'||type==='danger'||type==='critical'||/error|fail|cannot reach|unavailable|bad|critical|alert|reconnecting/i.test(message);
+  const isWarn=type==='warn'||type==='warning'||/watch|degraded/i.test(message);
+  toast.className='toast';
+  if(isBad)toast.classList.add('error');
+  else if(isWarn)toast.classList.add('warn');
+  else if(type==='success')toast.classList.add('success');
+  toastClickTarget=targetIp||null;
+  if(toastClickTarget){
+    toast.classList.add('clickable');
+    toast.innerHTML=`<span>${esc(message)}</span><span class="toast-link-icon">View case ›</span>`;
+  }else{
+    toast.textContent=message;
+  }
+  toast.classList.add('show');
+  const stayTime=duration||(isBad?5000:isWarn?4000:2500);
+  toastTimer=setTimeout(()=>{toast.classList.remove('show');toastTimer=null;toastClickTarget=null},stayTime);
+}
+
 function setBusy(busy){$('refresh').disabled=busy}
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('sentinel-theme',theme);$('theme-toggle').textContent=theme==='dark'?'Light mode':'Dark mode'}
+function formatStatusWithDisposition(label, disposition){
+  const base=label||'unknown';
+  const disp=(typeof disposition==='object'?disposition?.state:disposition)||'';
+  if(disp && disp.toLowerCase()!=='new'){
+    return `${base} (${disp.toLowerCase()})`;
+  }
+  return base;
+}
+
 function summary(){
-  const requests=ips.reduce((sum,x)=>sum+Number(x.requests||0),0);
-  const risky=ips.filter(x=>['bad','watch'].includes(x.classification?.label)).length;
-    const privacy=ips.filter(x=>x.is_tor===1||x.is_vpn===1||x.is_proxy===1).length;
-  // Traffic Overview owns the request/IP/country metrics because they are
-  // scoped to the selected traffic window. Do not overwrite them with the
-  // lifetime IP snapshot while snapshot/delta polling is running.
-  $('m-risk').textContent=num(risky);$('m-privacy').textContent=num(privacy);renderRiskOverview(requests);
+  const data=ipSummary||{total_ips:0,classification:{bad:0,watch:0,good:0,unknown:0},privacy:{total:0},priority_items:[]};
+  $('m-risk').textContent=num(Number(data.classification?.bad||0)+Number(data.classification?.watch||0));
+  $('m-privacy').textContent=num(data.privacy?.total||0);
+  renderRiskOverview(data.priority_items||[]);
 }
-function renderRiskOverview(requests){
-  const counts={bad:0,watch:0,good:0,unknown:0};ips.forEach(x=>{const label=classification(x);counts[label]=(counts[label]||0)+1});
-  const queue=ips.filter(x=>classification(x)!=='good').sort((a,b)=>signalScore(b)-signalScore(a)||Number(b.requests||0)-Number(a.requests||0)).slice(0,5);
-  $('priority-list').innerHTML=queue.length?queue.map(x=>{const label=classification(x),tone=classTone(label),o=x.organization||x.network_type||'Unattributed network',reason=x.classification?.summary||x.classification?.evidence?.[0]||x.observation?.behavior_evidence?.[0]||'No classification evidence';return `<article class="priority-item" tabindex="0" data-ip="${esc(x.ip)}"><div class="priority-score ${tone}">${num(signalScore(x))}</div><div class="priority-ip"><strong>${esc(x.ip)}</strong><span>${esc(o)}</span></div><div class="priority-reason"><strong>${esc(reason)}</strong><span>${esc(x.country||'Unknown')} · ${num(x.requests)} requests</span></div><div class="priority-meta"><strong>${num(x.status_4xx)}</strong><span>4xx responses</span></div><span class="priority-badge ${tone}">${esc(label)}</span></article>`}).join(''):'<div class="state"><strong>No priority identities</strong>Observed traffic has no watch or bad classification.</div>';
+function renderRiskOverview(queue){
+  const activeQueue=queue.filter(x=>((typeof x.disposition==='object'?x.disposition?.state:x.disposition)||'new').toLowerCase()!=='resolved');
+  $('priority-list').innerHTML=activeQueue.length?activeQueue.map(x=>{const label=classification(x),tone=classTone(label),disp=x.disposition?.state||x.disposition||'new',displayLabel=formatStatusWithDisposition(label,disp),o=x.organization||x.network_type||'Unattributed network',reason=x.classification?.summary||x.classification?.evidence?.[0]||x.observation?.behavior_evidence?.[0]||'No classification evidence';return `<article class="priority-item" tabindex="0" data-ip="${esc(x.ip)}"><div class="priority-score ${tone}">${num(signalScore(x))}</div><div class="priority-ip"><strong>${esc(x.ip)}</strong><span>${esc(o)}</span></div><div class="priority-reason"><strong>${esc(reason)}</strong><span>${esc(x.country||'Unknown')} · ${num(x.requests)} requests</span></div><div class="priority-meta"><strong>${num(x.status_4xx)}</strong><span>4xx responses</span></div><span class="priority-badge ${tone}">${esc(displayLabel)}</span></article>`}).join(''):'<div class="state"><strong>No priority identities</strong>Observed traffic has no unresolved watch or bad classification.</div>';
 }
+
 function updateHeaders(){document.querySelectorAll('th.sortable').forEach(th=>{const base=th.textContent.replace(/[ ↓↑]$/,'');th.textContent=base+(sortField===th.dataset.sort?(sortDir==='desc'?' ↓':' ↑'):'');th.classList.toggle('active',th.dataset.sort===sortField)})}
 function render(){
-  const q=$('search').value.trim().toLowerCase(),privacy=$('privacy').value,classificationFilter=$('classification').value,dispositionFilter=$('disposition').value,regionFilter=$('region-score-filter').value;
-  const filtered=ips.filter(x=>{
-    const reg=registrationOf(x),hay=[x.ip,x.country,x.country_code,x.asn,x.organization,x.network_type,reg?.country,reg?.country_code].join(' ').toLowerCase();
-    const privacyMatch=!privacy||(privacy==='privacy'&&(x.is_tor===1||x.is_vpn===1||x.is_proxy===1))||(privacy==='tor'&&x.is_tor===1)||(privacy==='hosting'&&x.is_hosting===1);
-    const classMatch=!classificationFilter||((x.classification?.label||'unknown')===classificationFilter);
-    const dispositionMatch=!dispositionFilter||((x.disposition?.state||'new')===dispositionFilter);
-    const regionMatch=!regionFilter||regionLevel(x)===regionFilter;
-    return (!q||hay.includes(q))&&privacyMatch&&classMatch&&dispositionMatch&&regionMatch;
-  }).sort((a,b)=>{const diff=sortValue(b,sortField)-sortValue(a,sortField),stable=diff||Number(b.requests||0)-Number(a.requests||0);return sortDir==='desc'?stable:-stable});
-  $('visible-count').textContent=`${num(filtered.length)} visible`;updateHeaders();
+  const filtered=ips; $('visible-count').textContent=`${num(ipSummary?.total_ips||filtered.length)} total · page ${ipPage}/${ipTotalPages}`;updateHeaders();
   $('rows').innerHTML=filtered.length?filtered.map(x=>{
-  const label=classification(x),level=label==='bad'?'critical':label==='watch'?'medium':label==='good'?'low':'low',score=signalScore(x),market=regionScore(x),marketLabel=regionLevel(x),ai=x.ai_profile||{},aiKnown=Object.keys(ai).length>0,aiScore=Number(ai.ai_anomaly_score||0),aiTone=aiScore>=70?'alert':aiScore?'':'none',aiWindows=Number(ai.anomalous_windows||0),aiLabel=!aiKnown?'not scored':aiScore?`${aiWindows} anomalous window${aiWindows===1?'':'s'}`:(ai.score_reason||'not flagged');
-    return `<tr tabindex="0" data-ip="${esc(x.ip)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text">${esc(label)} · Seen ${esc(x.last_seen||'profile only')}</span></td><td>${locationCell(x)}</td><td class="hide-mobile"><span class="mono">${esc(x.asn||'—')}</span><span class="secondary-text">${esc(x.organization||x.network_type||'Unattributed network')}</span></td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${x.is_tor===1?'<span class="flag on">tor</span> ':''}${x.is_vpn===1?'<span class="flag on">vpn</span> ':''}${x.is_proxy===1?'<span class="flag on">proxy</span> ':''}${x.is_hosting===1?'<span class="flag">host</span>':''}${[x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].every(v=>v!==1)?'<span class="flag">unknown</span>':''}</td><td class="region-score-cell"><span class="region-score ${market==null?'none':''}">${market==null?'—':`${num(market)}/100`}</span><span class="region-score-note">${esc(marketLabel.replace('_',' '))}</span></td><td class="ai-cell"><span class="ai-score ${aiTone}">${aiKnown?`${aiScore}/100`:'—'}</span><span class="ai-note">${esc(aiLabel)}${aiKnown&&ai.confidence_level?` · ${esc(ai.confidence_level)}`:''}</span></td><td class="risk-cell"><div class="risk-top"><span class="risk-level ${level}">${esc(label)}</span><span class="mono">${num(score)}/100</span></div><div class="signal ${level}"><span style="width:${Math.min(100,Math.max(0,score))}%"></span></div></td></tr>`
+  const label=classification(x),level=label==='bad'?'critical':label==='watch'?'medium':label==='good'?'low':'low',score=signalScore(x),ai=x.ai_profile||{},aiKnown=Object.keys(ai).length>0,aiScore=Number(ai.ai_anomaly_score||0),aiTone=aiScore>=70?'alert':aiScore?'':'none',aiWindows=Number(ai.anomalous_windows||0),aiLabel=!aiKnown?'not scored':aiScore?`${aiWindows} anomalous window${aiWindows===1?'':'s'}`:(ai.score_reason||'not flagged'),disp=x.disposition?.state||x.disposition||'new',rowClass=disp==='resolved'?'row-resolved':`row-${label}`,displayStatus=formatStatusWithDisposition(label,disp);
+    return `<tr tabindex="0" data-ip="${esc(x.ip)}" class="${esc(rowClass)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text">${esc(label)}${disp.toLowerCase()!=='new'?` <span class="disposition-inline ${esc(disp.toLowerCase())}">(${esc(disp.toLowerCase())})</span>`:''}</span></td><td class="mono last-seen" title="${esc(x.last_seen||'—')}">${esc(seenTime(x.last_seen))}</td><td>${locationCell(x)}</td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${isTrue(x.is_tor)?'<span class="flag on">tor</span> ':''}${isTrue(x.is_vpn)?'<span class="flag on">vpn</span> ':''}${isTrue(x.is_proxy)?'<span class="flag on">proxy</span> ':''}${isTrue(x.is_hosting)?'<span class="flag">host</span>':''}${![x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].some(isTrue)?'<span class="flag">unknown</span>':''}</td><td class="ai-cell"><span class="ai-score ${aiTone}">${aiKnown?`${aiScore}/100`:'—'}</span><span class="ai-note">${esc(aiLabel)}${aiKnown&&ai.confidence_level?` · ${esc(ai.confidence_level)}`:''}</span></td><td class="risk-cell"><div class="risk-top"><span class="risk-level ${level}">${esc(displayStatus)}</span><span class="mono">${num(score)}/100</span></div><div class="signal ${level}"><span style="width:${Math.min(100,Math.max(0,score))}%"></span></div></td><td><span class="disp-badge ${esc(disp)}">${esc(disp)}</span></td></tr>`
   }).join(''):'<tr><td colspan="10"><div class="state"><strong>No matching identities</strong>Adjust the search or intelligence filters.</div></td></tr>';
+
+
+
+  $('ip-page-label').textContent=`Page ${ipPage} of ${ipTotalPages} · ${num(ipSummary?.total_ips||0)} identities`;
+  $('ip-prev').disabled=ipPage<=1;$('ip-next').disabled=ipPage>=ipTotalPages;
 }
-const IP_SNAPSHOT_KEY='hub:v3:ip-snapshot';let ipCursor=0,deltaBusy=false,trafficTimer=null,eventSource=null;
-function readIpSnapshot(){try{const saved=JSON.parse(sessionStorage.getItem(IP_SNAPSHOT_KEY)||'null');if(saved&&Array.isArray(saved.items)){ipCursor=Number(saved.cursor||0);return saved.items}}catch(_){}return null}
-function saveIpSnapshot(){try{sessionStorage.setItem(IP_SNAPSHOT_KEY,JSON.stringify({items:ips,cursor:ipCursor,ts:Date.now()}))}catch(_){} }
-function mergeIpItems(items){const byIp=new Map(ips.map(item=>[item.ip,item]));(items||[]).forEach(item=>byIp.set(item.ip,item));ips=Array.from(byIp.values());ipsReady=true;saveIpSnapshot();summary();render();renderAnalytics()}
-async function loadIpSnapshot(force=false){setBusy(true);try{if(!force){const saved=readIpSnapshot();if(saved){ips=saved;ipsReady=true;summary();render();renderAnalytics();await syncIpDelta();return}}const response=await fetch(apiUrl('/api/ips/snapshot?limit=500'),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipsReady=true;ipCursor=Number(data.cursor||0);saveIpSnapshot();summary();render();renderAnalytics()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="10"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}finally{setBusy(false)}}
-async function syncIpDelta(){if(deltaBusy)return;deltaBusy=true;try{let after=ipCursor,more=true;while(more){const response=await fetch(apiUrl(`/api/ips/updates?after=${encodeURIComponent(after)}&limit=500`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();if(data.reset_required){await loadIpSnapshot(true);return}if(data.items?.length)mergeIpItems(data.items);after=Number(data.cursor||after);more=Boolean(data.has_more);ipCursor=after;saveIpSnapshot()}}catch(_){}finally{deltaBusy=false}}
+const IP_SNAPSHOT_KEY='hub:v4:ip-page';let trafficTimer=null,eventSource=null,fallbackPollTimer=null,durableRealtimeTimer=null,sseConnected=false;
+function snapshotKey(){return IP_SNAPSHOT_KEY}
+function pageQuery(){const params=new URLSearchParams({page:String(ipPage),page_size:String(ipPageSize),sort:sortField,direction:sortDir});const q=$('search').value.trim();if(q)params.set('q',q);if($('privacy').value)params.set('privacy',$('privacy').value);if($('classification').value)params.set('classification',$('classification').value);if($('disposition').value)params.set('disposition',$('disposition').value);return params}
+async function loadIpSummary(){try{const response=await fetch(apiUrl('/api/ips/summary'),{cache:'no-store'});if(!response.ok)throw new Error();ipSummary=await response.json();summary();renderAnalytics()}catch(_){} }
+function recordRealtimeLatency(items){const renderedAt=Date.now(),event=window.__ipRealtimeLastEvent||{},samples=(items||[]).map(item=>{const p=item.pipeline||{},received=Date.parse(p.received_at||'');if(!Number.isFinite(received))return null;const total=Math.max(0,renderedAt-received),backend=Number(p.backend_ready_ms),published=Date.parse(event.published_at||''),delivered=Number(event.received_at),profiled=Boolean(p.profile_ready_at);return {ip:item.ip,segment:profiled?'profiled':'profile-pending',end_to_end_ms:total,backend_ready_ms:Number.isFinite(backend)?backend:null,publish_to_sse_ms:Number.isFinite(published)&&Number.isFinite(delivered)?Math.max(0,delivered-published):null,delivery_render_ms:Number.isFinite(delivered)?Math.max(0,renderedAt-delivered):null,rendered_at:new Date(renderedAt).toISOString()}}).filter(Boolean);if(!samples.length)return;const history=[...(Array.isArray(window.__ipRealtimeMetrics)?window.__ipRealtimeMetrics:[]),...samples].slice(-200),percentile=(list,p)=>{const ordered=list.map(x=>x.end_to_end_ms).sort((a,b)=>a-b);return ordered.length?ordered[Math.min(ordered.length-1,Math.ceil(ordered.length*p)-1)]:null},profiled=history.filter(x=>x.segment==='profiled'),pending=history.filter(x=>x.segment==='profile-pending'),latest=samples[samples.length-1];window.__ipRealtimeMetrics=history;$('ip-realtime-latency').textContent=`realtime p95 ${num(percentile(history,.95))} ms · profile ${num(percentile(profiled,.95))} · pending ${num(percentile(pending,.95))}`;$('ip-realtime-latency').title=`Latest ${num(latest.end_to_end_ms)} ms · backend ${num(latest.backend_ready_ms)} ms · publish/SSE ${num(latest.publish_to_sse_ms)} ms · render ${num(latest.delivery_render_ms)} ms · ${latest.segment} · ${latest.ip} · ${history.length} samples`}
+async function loadIpSnapshot(force=false,realtimeItems=[]){setBusy(true);try{const response=await fetch(apiUrl(`/api/ips/page?${pageQuery()}`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipPage=Number(data.page||ipPage);ipTotalPages=Math.max(1,Number(data.total_pages||1));ipCursor=Number(data.change_cursor||ipCursor);ipsReady=true;summary();render();recordRealtimeLatency(realtimeItems);renderAnalytics();await loadIpSummary()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="10"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}finally{setBusy(false)}}
+function applyIpChanges(items){const known=new Set(ips.map(item=>item.ip));if(items.some(item=>!known.has(item.ip)))return false;const changes=new Map(items.map(item=>[item.ip,item]));ips=ips.map(item=>changes.get(item.ip)||item);render();recordRealtimeLatency(items);loadIpSummary();return true}
+async function syncIpDelta(){if(deltaBusy)return false;deltaBusy=true;try{let after=ipCursor,more=true,transitions=[],changedItems=[];while(more){const response=await fetch(apiUrl(`/api/ips/updates?after=${encodeURIComponent(after)}&limit=500`),{cache:'no-store'});if(!response.ok)throw new Error();const data=await response.json();if(data.reset_required){await loadIpSnapshot(true);return true}transitions.push(...(data.transitions||[]));changedItems.push(...(data.items||[]));after=Number(data.cursor||after);more=Boolean(data.has_more);ipCursor=after}if(transitions.length)showRiskTransitions(transitions);if(!changedItems.length)return false;if(!applyIpChanges(changedItems))await loadIpSnapshot(true,changedItems);return true}catch(_){return false}finally{deltaBusy=false}}
+function showRiskTransitions(transitions){
+  const fresh=transitions.filter(x=>['watch','bad'].includes(x.new_label)&&x.new_label!==x.old_label);
+  if(!fresh.length)return;
+  const bad=fresh.filter(x=>x.new_label==='bad').length;
+  if(fresh.length===1){
+    const item=fresh[0];
+    const type=item.new_label==='bad'?'bad':'warn';
+    notify(`🚨 IP ${item.ip} elevated to ${item.new_label.toUpperCase()}`,type,6000,item.ip);
+  }else{
+    const targetIp=fresh.find(x=>x.new_label==='bad')?.ip||fresh[0].ip;
+    notify(`${fresh.length} new risk changes · ${bad} BAD · ${fresh.length-bad} WATCH`,bad?'bad':'warn',6000,targetIp);
+  }
+}
+
+function scheduleRealtimeFlush(delay=1000){if(collectorState==='backlog')return;if(realtimeFlushTimer)return;realtimeFlushTimer=setTimeout(async()=>{realtimeFlushTimer=null;if(realtimeFlushRunning){realtimeFlushPending=true;return}realtimeFlushRunning=true;try{if(await syncIpDelta())await loadTraffic(true)}finally{realtimeFlushRunning=false;if(realtimeFlushPending){realtimeFlushPending=false;scheduleRealtimeFlush(0)}}},delay)}
+function startDurableRealtimeSync(){if(durableRealtimeTimer)return;durableRealtimeTimer=setInterval(()=>{if(collectorState==='live')scheduleRealtimeFlush(0)},1000)}
 function scheduleTrafficRefresh(){if(trafficTimer)return;trafficTimer=window.setTimeout(()=>{trafficTimer=null;loadTraffic(true)},1000)}
-function setCollectorStatus(data){const state=data.status||'unknown';$('collector-state').textContent=state==='backlog'?'Replaying log…':state.charAt(0).toUpperCase()+state.slice(1);$('collector-dot').style.background=state==='live'?'var(--stable)':state==='retrying'||state==='config_error'?'var(--hostile)':'var(--watch)'}
-function startRealtime(){if(!window.EventSource)return;eventSource=new EventSource('/api/stream');window.setInterval(()=>loadTraffic(true),5000);eventSource.addEventListener('ip_changes',()=>{syncIpDelta();scheduleTrafficRefresh()});eventSource.addEventListener('collector_status',event=>{try{setCollectorStatus(JSON.parse(event.data))}catch(_){}});eventSource.addEventListener('ai_trained',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI training: ${data.status}`);syncIpDelta()}catch(_){}});eventSource.addEventListener('ai_scored',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI scoring: ${data.status}`);syncIpDelta()}catch(_){}});eventSource.onerror=()=>{ $('collector-state').textContent='Reconnecting…';$('collector-dot').style.background='var(--watch)'};fetch('/api/collector/status',{cache:'no-store'}).then(r=>r.json()).then(setCollectorStatus).catch(()=>{})}
+function setCollectorStatus(data){const state=data.status||'unknown',previous=collectorState;collectorState=state;$('collector-state').textContent=state==='backlog'?'Replaying log…':state.charAt(0).toUpperCase()+state.slice(1);$('collector-dot').style.background=state==='live'?'var(--stable)':state==='retrying'||state==='config_error'?'var(--hostile)':'var(--watch)';if(state==='live'&&previous==='backlog')scheduleRealtimeFlush()}
+function startFallbackPolling(){if(fallbackPollTimer)return;fallbackPollTimer=setInterval(()=>scheduleRealtimeFlush(),5000)}
+function stopFallbackPolling(){if(fallbackPollTimer){clearInterval(fallbackPollTimer);fallbackPollTimer=null}}
+function startRealtime(){if(!window.EventSource){startFallbackPolling();return}const streamUrl=API_BASE?`${API_BASE}/api/stream`:'/api/stream';try{eventSource=new EventSource(streamUrl)}catch(_){startFallbackPolling();return}eventSource.addEventListener('open',()=>{sseConnected=true;stopFallbackPolling();if(collectorState==='live')scheduleRealtimeFlush(0)});eventSource.addEventListener('ip_changes',event=>{try{window.__ipRealtimeLastEvent={...JSON.parse(event.data),received_at:Date.now()}}catch(_){window.__ipRealtimeLastEvent={received_at:Date.now()}}if(collectorState==='live')scheduleRealtimeFlush(0)});eventSource.addEventListener('collector_status',event=>{try{setCollectorStatus(JSON.parse(event.data))}catch(_){}});eventSource.addEventListener('ai_trained',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI training: ${data.status}`);if(collectorState==='live')scheduleRealtimeFlush(0)}catch(_){}});eventSource.addEventListener('ai_scored',event=>{try{const data=JSON.parse(event.data);if(data.status)notify(`AI scoring: ${data.status}`);if(collectorState==='live')scheduleRealtimeFlush(0)}catch(_){}});eventSource.onerror=()=>{sseConnected=false;startFallbackPolling();$('collector-state').textContent='Reconnecting…';$('collector-dot').style.background='var(--watch)'};fetch(apiUrl('/api/collector/status'),{cache:'no-store'}).then(r=>r.json()).then(setCollectorStatus).catch(()=>{})}
 async function loadRegions(){
   const regionRequest=cachedFetch(apiUrl('/api/regions?limit=200'),600000).then(data=>{regions=data;regionsReady=true;renderRegionAnalytics();return data}).catch(()=>{$('region-signal-bars').innerHTML='<div class="state"><strong>Market signals unavailable.</strong>Regions widget failed independently.</div>';return null});
   cachedFetch(apiUrl('/api/regions/demand-signal?limit=24'),45000).then(data=>{regionDemand=data}).catch(()=>{});
@@ -376,7 +533,8 @@ async function detail(ip){
   try{
     const response=await fetch(apiUrl('/api/ip/'+encodeURIComponent(ip)));
     if(!response.ok)throw new Error();
-    const d=await response.json(),o=d.observation||{},r=d.region_profile||{};
+    const d=await response.json(),o=d.observation||{},r=d.region_profile||{},dispObj=d.disposition||{};
+    const currentDisp=(dispObj.state||'new').toLowerCase();
     const statusSummary=[`Core: ${d.core_enrichment_status||d.enrichment_status||'unknown'}`,`Privacy: ${d.privacy_enrichment_status||'unknown'}`,`Threat: ${d.threat_enrichment_status||'unknown'}`];
     const networkItems=[`ASN: ${d.asn||'—'}`,`Organization: ${d.organization||'Unattributed'}`,`Prefix: ${d.ip_prefix||'—'}`,`Network type: ${d.network_type||'Unknown'}`];
     const privacyItems=[`Tor: ${yes(d.is_tor)}`,`VPN: ${yes(d.is_vpn)}`,`Proxy: ${yes(d.is_proxy)}`,`Hosting: ${yes(d.is_hosting)}`];
@@ -385,14 +543,37 @@ async function detail(ip){
     const economicIndicators=Array.isArray(r.economic_indicators)?r.economic_indicators:Object.values((r.economic_indicators||{}).indicators||{});
     const regionItems=[...economicIndicators.map(x=>`${x.label||x.name||'Indicator'}: ${x.value??x.raw_value??'Unknown'}`),...(r.cultural_context||[]).map(x=>`${x.label}: ${x.value}`),...(r.conflict_indicators||[]).map(x=>`${x.label}: ${x.value}`)];
     const sourceItems=Object.entries(d.field_sources||{}).map(([field,source])=>`${field}: ${source}`);
+    
+    let selectedState=currentDisp;
+    const dispThreatLabel=formatStatusWithDisposition(d.threat_signal_label||'unknown',currentDisp);
+    const dispClassLabel=formatStatusWithDisposition(d.classification?.label||'unknown',currentDisp);
     $('detail-body').innerHTML=`
       <div class="detail-grid">
-        <div class="detail"><span>Threat signal</span><strong>${esc(d.threat_signal_score??0)}/100 · ${esc(d.threat_signal_label||'unknown')}</strong></div>
-        <div class="detail"><span>Classification</span><strong>${esc(d.classification?.label||'unknown')}</strong></div>
+        <div class="detail"><span>Threat signal</span><strong>${esc(d.threat_signal_score??0)}/100 · ${esc(dispThreatLabel)}</strong></div>
+        <div class="detail"><span>Classification</span><strong>${esc(dispClassLabel)}</strong></div>
         <div class="detail"><span>Core enrichment</span><strong>${esc(d.core_enrichment_status||d.enrichment_status||'unknown')}</strong></div>
         <div class="detail"><span>Privacy enrichment</span><strong>${esc(d.privacy_enrichment_status||'unknown')}</strong></div>
         <div class="detail"><span>Threat enrichment</span><strong>${esc(d.threat_enrichment_status||'unknown')}</strong></div>
         <div class="detail"><span>Identity confidence</span><strong>${esc(d.organization_confidence||0)}%</strong></div>
+      </div>
+
+      <div class="section">
+        <h3>Case Triage & Disposition</h3>
+        <div class="triage-box">
+          <div class="triage-states" id="drawer-triage-states">
+            ${['new','monitor','investigate','escalate','resolved'].map(st=>`
+              <button type="button" class="triage-btn ${st} ${currentDisp===st?'active':''}" data-state="${st}">${st}</button>
+            `).join('')}
+          </div>
+          <div class="triage-form">
+            <input type="text" id="drawer-disp-assignee" class="triage-input" placeholder="Assigned analyst (e.g. alex@soc)" value="${esc(dispObj.assigned_to||'')}">
+            <input type="text" id="drawer-disp-note" class="triage-input" placeholder="Investigation note / reason..." value="${esc(dispObj.note||'')}">
+            <div class="triage-actions">
+              <small class="tertiary" id="drawer-disp-updated">${dispObj.updated_at?`Updated: ${seenTime(dispObj.updated_at)}`:'State: '+currentDisp.toUpperCase()}</small>
+              <button type="button" class="secondary" id="drawer-disp-save" style="padding:4px 12px;font-size:11px;font-weight:700">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="section"><h3>Network location</h3>${geoSummary(d)}</div>
       <div class="section"><h3>Network intelligence</h3><div class="evidence">${evidence(networkItems)}</div></div>
@@ -404,10 +585,41 @@ async function detail(ip){
       <div class="section"><h3>Risk assessment</h3><div class="evidence">${evidence([...(d.evidence||[]),...(o.behavior_evidence||[])])}</div></div>
       <div class="section"><h3>Sources</h3><div class="evidence">${evidence([...statusSummary,...providerItems(d),...sourceItems,`Country profile sources: ${(r.sources||[]).map(x=>x.name).join(', ')||'none'}`,`Next retry: ${d.next_retry_at||'not scheduled'}`])}</div></div>
       <div class="section"><h3>Identity confidence</h3><div class="evidence">${evidence(d.identity_evidence)}</div></div>`;
+
+    document.querySelectorAll('#drawer-triage-states .triage-btn').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        selectedState=btn.dataset.state;
+        document.querySelectorAll('#drawer-triage-states .triage-btn').forEach(b=>b.classList.toggle('active',b.dataset.state===selectedState));
+      });
+    });
+
+    $('drawer-disp-save')?.addEventListener('click',async()=>{
+      const assignee=$('drawer-disp-assignee')?.value.trim()||null;
+      const note=$('drawer-disp-note')?.value.trim()||null;
+      const saveBtn=$('drawer-disp-save');
+      if(saveBtn)saveBtn.disabled=true;
+      try{
+        const res=await fetch(apiUrl(`/api/ip/${encodeURIComponent(ip)}/disposition`),{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({state:selectedState,assigned_to:assignee,note:note,actor:'analyst'})
+        });
+        if(!res.ok)throw new Error('HTTP '+res.status);
+        notify(`IP ${ip} disposition set to ${selectedState.toUpperCase()}`,selectedState==='escalate'?'bad':(selectedState==='investigate'||selectedState==='monitor'?'warn':'success'));
+        $('drawer-disp-updated').textContent='Updated just now';
+        await loadIpSnapshot(true);
+      }catch(err){
+        notify('Failed to save disposition: '+err.message,'error');
+      }finally{
+        if(saveBtn)saveBtn.disabled=false;
+      }
+    });
+
   }catch{
     $('detail-body').innerHTML='<div class="state"><strong>Profile unavailable</strong>The enrichment provider did not return this identity.</div>';
   }
 }
+
 const viewMeta={overview:{kicker:'Intelligence / Overview',title:'Threat Signal',subtitle:'Operational snapshot of observed traffic, risk and data health.'},threats:{kicker:'Intelligence / Network identities',title:'IP Intelligence',subtitle:'Inspect network identities by behavior, reputation, AI anomaly and region context.'}};
 function applyView(){
   const requested=location.hash.replace(/^#/,'')||'overview',view=viewMeta[requested]?requested:'overview',meta=viewMeta[view];
@@ -418,17 +630,148 @@ function applyView(){
 window.addEventListener('hashchange',applyView);
 applyView();
 restoreTrafficWindow();document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item.dataset.range===trafficRange));
- $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);$('refresh').addEventListener('click',refreshDashboard);for(const id of ['search','privacy','classification','disposition','region-score-filter'])$(id).addEventListener('input',render);$('classification').addEventListener('input',()=>{document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===$('classification').value));});document.querySelectorAll('#traffic-range button').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.range;trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item===button));saveTrafficWindow();loadTraffic(true)}));
+ $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);$('refresh').addEventListener('click',refreshDashboard);let searchTimer=null;['privacy','classification','disposition'].forEach(id=>$(id).addEventListener('input',()=>{ipPage=1;loadIpSnapshot(true)}));$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ipPage=1;loadIpSnapshot(true)},300)});$('classification').addEventListener('input',()=>{document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===$('classification').value));});document.querySelectorAll('#traffic-range button').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.range;trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item===button));saveTrafficWindow();loadTraffic(true)}));
 $('traffic-apply').addEventListener('click',applyTrafficWindow);$('traffic-clear').addEventListener('click',clearTrafficWindow);
 $('traffic-tables').addEventListener('click',event=>{const action=event.target.closest('[data-traffic-action]');if(!action)return;event.preventDefault();event.stopPropagation();applyTrafficFilter(action.dataset.filterType,action.dataset.filterValue,action.dataset.trafficAction==='exclude')});
-document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{if(sortField===th.dataset.sort)sortDir=sortDir==='desc'?'asc':'desc';else{sortField=th.dataset.sort;sortDir='desc'}render()}));
+document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{if(sortField===th.dataset.sort)sortDir=sortDir==='desc'?'asc':'desc';else{sortField=th.dataset.sort;sortDir='desc'}ipPage=1;loadIpSnapshot(true)}));
+$('ip-prev').addEventListener('click',()=>{if(ipPage>1){ipPage--;loadIpSnapshot(true)}});$('ip-next').addEventListener('click',()=>{if(ipPage<ipTotalPages){ipPage++;loadIpSnapshot(true)}});
 document.querySelectorAll('.risk-tab').forEach(tab=>tab.addEventListener('click',()=>{const value=tab.dataset.classification;$('classification').value=value;document.querySelectorAll('.risk-tab').forEach(item=>item.classList.toggle('selected',item===tab));render()}));
-$('rows').addEventListener('click',event=>{const row=event.target.closest('tr[data-ip]');if(row)window.location.href='/ip/'+encodeURIComponent(row.dataset.ip)});$('rows').addEventListener('keydown',event=>{const row=event.target.closest('tr[data-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href='/ip/'+encodeURIComponent(row.dataset.ip)}});
- $('top-ips').addEventListener('click',event=>{if(event.target.closest('[data-traffic-action]'))return;const row=event.target.closest('[data-traffic-ip]');if(row)window.location.href='/ip/'+encodeURIComponent(row.dataset.trafficIp)});$('top-ips').addEventListener('keydown',event=>{const row=event.target.closest('[data-traffic-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href='/ip/'+encodeURIComponent(row.dataset.trafficIp)}});
-const openIp=ip=>{window.location.href='/ip/'+encodeURIComponent(ip)};
+const ipHref=ip=>`/ip/${encodeURIComponent(ip)}?mode=live`;
+$('rows').addEventListener('click',event=>{const row=event.target.closest('tr[data-ip]');if(row)window.location.href=ipHref(row.dataset.ip)});$('rows').addEventListener('keydown',event=>{const row=event.target.closest('tr[data-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.ip)}});
+ $('top-ips').addEventListener('click',event=>{if(event.target.closest('[data-traffic-action]'))return;const row=event.target.closest('[data-traffic-ip]');if(row)window.location.href=ipHref(row.dataset.trafficIp)});$('top-ips').addEventListener('keydown',event=>{const row=event.target.closest('[data-traffic-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.trafficIp)}});
+const openIp=ip=>{window.location.href=ipHref(ip)};
 document.querySelector('#priority-list').addEventListener('click',event=>{const row=event.target.closest('[data-ip]');if(row)openIp(row.dataset.ip)});
 document.querySelector('#priority-list').addEventListener('keydown',event=>{const row=event.target.closest('[data-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();openIp(row.dataset.ip)}});
-document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',closeDrawer));document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('drawer').classList.contains('open'))closeDrawer()});loadIpSnapshot();loadRegions();loadTraffic();startRealtime();
+let latestHealth=null;
+async function fetchHealthStatus(notifyUser=false){
+  try{
+    const res=await fetch(apiUrl('/health'),{cache:'no-store'});
+    if(!res.ok)throw new Error('Health check failed: '+res.status);
+    const data=await res.json();
+    latestHealth=data;
+    if(data.collector)setCollectorStatus(data.collector);
+    renderHealthWidget(data);
+    if($('health-dialog')?.classList.contains('open')){
+      renderHealthDialog(data);
+    }
+    if(notifyUser)notify('Health check completed: '+(data.status==='ok'?'All systems nominal':'Degraded state'));
+  }catch(err){
+    renderHealthWidgetError(err);
+  }
+}
+function updateChip(id,isOk,overrideClass){
+  const el=$(id);
+  if(!el)return;
+  el.classList.remove('ok','warn','err');
+  el.classList.add(overrideClass||(isOk?'ok':'err'));
+}
+function renderHealthWidget(data){
+  const isHealthy=data.status==='ok';
+  const pgOk=data.storage?.postgres?.status==='ok';
+  const chOk=data.storage?.clickhouse?.status==='ok';
+  const rulesOk=data.rules?.status==='ok';
+  const streamState=data.collector?.status||collectorState||'unknown';
+  const streamOk=streamState==='live';
+  $('collector-state').textContent=isHealthy?(streamState==='live'?'Live Stream':(streamState==='backlog'?'Replaying':'Healthy')):'Degraded';
+  $('collector-dot').style.background=isHealthy?'var(--stable)':'var(--watch)';
+  updateChip('chip-pg',pgOk);
+  updateChip('chip-ch',chOk);
+  updateChip('chip-rules',rulesOk);
+  updateChip('chip-stream',streamOk,streamState==='backlog'?'warn':(streamOk?'ok':'err'));
+}
+function renderHealthWidgetError(err){
+  $('collector-state').textContent='Unreachable';
+  $('collector-dot').style.background='var(--critical)';
+  ['chip-pg','chip-ch','chip-rules','chip-stream'].forEach(id=>updateChip(id,false,'err'));
+}
+function renderHealthDialog(data){
+  if(!data)return;
+  const pg=data.storage?.postgres||{},ch=data.storage?.clickhouse||{},rules=data.rules||{},col=data.collector||{};
+  $('health-last-checked').textContent='Last checked: '+new Date().toLocaleTimeString();
+  $('health-dialog-body').innerHTML=`
+    <div class="health-svc-card">
+      <div class="health-svc-head">
+        <div class="health-svc-title"><span class="dot-sm" style="background:${data.status==='ok'?'var(--stable)':'var(--watch)'}"></span>Overall Cluster Status</div>
+        <span class="health-svc-badge ${data.status==='ok'?'ok':'warn'}">${esc(data.status)}</span>
+      </div>
+      <div class="health-svc-details">
+        <div class="health-svc-detail"><span>Architecture Mode</span><strong>${esc(data.mode||'split')}</strong></div>
+        <div class="health-svc-detail"><span>Cluster Health</span><strong>${data.status==='ok'?'All systems nominal':'Degraded state'}</strong></div>
+      </div>
+    </div>
+    <div class="health-svc-card">
+      <div class="health-svc-head">
+        <div class="health-svc-title"><span class="dot-sm" style="background:${pg.status==='ok'?'var(--stable)':'var(--critical)'}"></span>PostgreSQL (State & Relational)</div>
+        <span class="health-svc-badge ${pg.status==='ok'?'ok':'err'}">${esc(pg.status||'unknown')}</span>
+      </div>
+      <div class="health-svc-details">
+        <div class="health-svc-detail"><span>Role</span><strong>State & Profiles DB</strong></div>
+        <div class="health-svc-detail"><span>Connection</span><strong>${pg.status==='ok'?'Active / Connected':esc(pg.error||'Disconnected')}</strong></div>
+      </div>
+    </div>
+    <div class="health-svc-card">
+      <div class="health-svc-head">
+        <div class="health-svc-title"><span class="dot-sm" style="background:${ch.status==='ok'?'var(--stable)':'var(--critical)'}"></span>ClickHouse (Events & Analytics)</div>
+        <span class="health-svc-badge ${ch.status==='ok'?'ok':'err'}">${esc(ch.status||'unknown')}</span>
+      </div>
+      <div class="health-svc-details">
+        <div class="health-svc-detail"><span>Role</span><strong>High-throughput Log Store</strong></div>
+        <div class="health-svc-detail"><span>Connection</span><strong>${ch.status==='ok'?'Active / Connected':esc(ch.error||'Disconnected')}</strong></div>
+      </div>
+    </div>
+    <div class="health-svc-card">
+      <div class="health-svc-head">
+        <div class="health-svc-title"><span class="dot-sm" style="background:${rules.status==='ok'?'var(--stable)':'var(--critical)'}"></span>Detection Rules Engine</div>
+        <span class="health-svc-badge ${rules.status==='ok'?'ok':'err'}">${esc(rules.status||'unknown')}</span>
+      </div>
+      <div class="health-svc-details">
+        <div class="health-svc-detail"><span>Active Rules</span><strong>${rules.rule_count??14} rules active</strong></div>
+        <div class="health-svc-detail"><span>Ruleset Hash</span><strong>${rules.ruleset_hash?esc(rules.ruleset_hash.slice(0,12))+'…':'—'}</strong></div>
+      </div>
+    </div>
+    <div class="health-svc-card">
+      <div class="health-svc-head">
+        <div class="health-svc-title"><span class="dot-sm" style="background:${col.status==='live'?'var(--stable)':(col.status==='backlog'?'var(--watch)':'var(--critical)')}"></span>Log Stream (WebSocket Ingest)</div>
+        <span class="health-svc-badge ${col.status==='live'?'ok':(col.status==='backlog'?'warn':'err')}">${esc(col.status||'unknown')}</span>
+      </div>
+      <div class="health-svc-details">
+        <div class="health-svc-detail"><span>Source ID</span><strong>${esc(col.source_id||'azure-access')}</strong></div>
+        <div class="health-svc-detail"><span>Stream Offset</span><strong>${col.offset!==undefined?num(col.offset):'—'}</strong></div>
+      </div>
+    </div>
+  `;
+}
+function openHealthDialog(){
+  $('health-dialog').classList.add('open');
+  $('health-dialog').setAttribute('aria-hidden','false');
+  if(latestHealth)renderHealthDialog(latestHealth);
+  fetchHealthStatus();
+}
+function closeHealthDialog(){
+  $('health-dialog').classList.remove('open');
+  $('health-dialog').setAttribute('aria-hidden','true');
+}
+document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',closeDrawer));
+$('health-widget')?.addEventListener('click',openHealthDialog);
+$('health-widget')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openHealthDialog()}});
+$('close-health-btn')?.addEventListener('click',closeHealthDialog);
+$('recheck-health-btn')?.addEventListener('click',()=>fetchHealthStatus(true));
+$('health-dialog')?.addEventListener('click',e=>{if(e.target===$('health-dialog'))closeHealthDialog()});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape'){
+    if($('health-dialog')?.classList.contains('open'))closeHealthDialog();
+    if($('drawer').classList.contains('open'))closeDrawer();
+  }
+});
+$('toast')?.addEventListener('click',()=>{
+  if(toastClickTarget){
+    window.location.href=`/ip/${encodeURIComponent(toastClickTarget)}?mode=live`;
+  }
+});
+loadIpSnapshot();loadRegions();loadTraffic();startRealtime();startDurableRealtimeSync();fetchHealthStatus();
+setInterval(fetchHealthStatus,10000);
+
+
 </script>
 </body>
 </html>

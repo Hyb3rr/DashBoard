@@ -203,7 +203,36 @@ button.button{font:700 13px/1 "Avenir Next",Avenir,"Segoe UI",sans-serif;cursor:
 .confidence-row.registration span::after{content:' · excluded from operational vote';color:var(--tertiary)}
 .confidence-factors span.registration-factor{border-style:dashed;color:var(--tertiary)}
 .confidence-factors span.dispute-factor{color:var(--yellow);border-color:#e8bd5b55;background:#e8bd5b0b}
+
+/* Case Triage & Disposition Card */
+.triage-card{border-color:rgba(89,216,230,.25)!important}
+.triage-badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:4px;font:700 10px ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}
+.triage-badge.new{color:var(--secondary);background:rgba(255,255,255,.07);border:1px solid var(--line)}
+.triage-badge.monitor{color:var(--cyan);background:rgba(89,216,230,.12);border:1px solid rgba(89,216,230,.3)}
+.triage-badge.investigate{color:var(--yellow);background:rgba(232,189,91,.15);border:1px solid rgba(232,189,91,.35)}
+.triage-badge.escalate{color:var(--red);background:rgba(255,118,109,.18);border:1px solid rgba(255,118,109,.4)}
+.triage-badge.resolved{color:var(--green);background:rgba(100,213,154,.15);border:1px solid rgba(100,213,154,.35)}
+
+.triage-selector{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:12px 0}
+.triage-opt{min-height:36px;padding:6px 4px;border:1px solid var(--line);border-radius:6px;background:var(--deck);color:var(--secondary);font:700 11px ui-monospace,monospace;text-transform:uppercase;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 140ms ease}
+.triage-opt:hover{color:var(--ink);background:var(--raised)}
+.triage-opt.active.new{background:var(--console);color:var(--ink);border-color:var(--secondary);box-shadow:0 0 0 1px var(--secondary)}
+.triage-opt.active.monitor{background:rgba(89,216,230,.2);color:var(--cyan);border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)}
+.triage-opt.active.investigate{background:rgba(232,189,91,.2);color:var(--yellow);border-color:var(--yellow);box-shadow:0 0 0 1px var(--yellow)}
+.triage-opt.active.escalate{background:rgba(255,118,109,.25);color:var(--red);border-color:var(--red);box-shadow:0 0 0 1px var(--red)}
+.triage-opt.active.resolved{background:rgba(100,213,154,.2);color:var(--green);border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
+
+.triage-fields{display:grid;gap:10px;margin-top:12px}
+.triage-field label{display:block;margin-bottom:4px;color:var(--tertiary);font:600 10px monospace;text-transform:uppercase;letter-spacing:.05em}
+.triage-field input,.triage-field textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--deck);color:var(--ink);font:12px "Avenir Next",Avenir,"Segoe UI",sans-serif}
+.triage-field textarea{resize:vertical;min-height:60px}
+.triage-actions{display:flex;justify-content:space-between;align-items:center;margin-top:14px}
+.triage-history{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.triage-history-item{padding:8px 10px;border-radius:5px;background:var(--deck);border:1px solid var(--line);margin-bottom:6px;font-size:11px}
+.triage-history-head{display:flex;justify-content:space-between;color:var(--tertiary);font:600 10px monospace}
+.triage-history-note{margin-top:4px;color:var(--secondary)}
 </style>
+
 
 <style>
 html[data-theme="light"]{
@@ -249,7 +278,8 @@ html[data-theme="light"]{
 const initialTheme=localStorage.getItem('sentinel-theme')||'dark';
 document.documentElement.dataset.theme=initialTheme;
 const API_BASE=(location.protocol==='file:'||!['127.0.0.1:8000','localhost:8000'].includes(location.host))?'http://127.0.0.1:8000':'';
-const apiUrl=path=>API_BASE+path;
+const mode='live';
+const apiUrl=path=>{if(path.startsWith('/api/')&&!/[?&]mode=/.test(path))path+=`${path.includes('?')?'&':'?'}mode=${mode}`;return API_BASE+path};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=v=>{const n=Number(v);return Number.isFinite(n)?n.toLocaleString('en-US',{maximumFractionDigits:2}).replace(/,/g,' '):'—'};
 const displayMetric=v=>{
@@ -274,18 +304,18 @@ function list(items){
     :'<div class="evidence-item">No evidence available.</div>'
 }
 function yes(v){return v==null?'Unknown':v?'Yes':'No'}
-function pathActivity(data){
-  const paths=data?.paths||[], max=Math.max(1,...paths.map(x=>Number(x.requests)||0));
-  if(!paths.length)return '<div class="state"><strong>No path activity</strong>No request paths are available for this IP.</div>';
-  return `<div class="path-list">${paths.map(x=>{
-    const width=Math.min(100,Math.max(0,(Number(x.requests)||0)/max*100));
-    const share=num((Number(x.share)||0)*100);
-    return `<div class="path-row"><div class="path-meta"><strong>${esc(x.path)}</strong><span>${num(x.requests)} · ${share}%</span></div><div class="path-bar"><i style="width:${width}%"></i></div><span class="path-dates">${num(x.errors)} error(s) · ${esc(x.first_seen||'Unknown')} → ${esc(x.last_seen||'Unknown')}</span></div>`
-  }).join('')}</div>`
-}
 function investigationLinks(value){
   const safe=encodeURIComponent(value);
-  return `<div class="investigate-links"><a class="external-link" href="https://www.abuseipdb.com/check/${safe}" target="_blank" rel="noopener noreferrer">AbuseIPDB <span>↗</span></a><a class="external-link" href="https://app.crowdsec.net/cti/${safe}" target="_blank" rel="noopener noreferrer">CrowdSec CTI <span>↗</span></a></div>`
+  const links=[
+    ['AbuseIPDB',`https://www.abuseipdb.com/check/${safe}`],
+    ['CrowdSec CTI',`https://app.crowdsec.net/cti/${safe}`],
+    ['VirusTotal',`https://www.virustotal.com/gui/ip-address/${safe}`],
+    ['Cisco Talos',`https://www.talosintelligence.com/reputation_center/lookup?search=${safe}`],
+    ['Shodan',`https://www.shodan.io/host/${safe}`],
+    ['Censys',`https://platform.censys.io/search?q=${encodeURIComponent(`host.ip="${value}"`)}`],
+    ['WHOIS / MSK-IX',`https://whois.msk-ix.ru/en/?dmn=${safe}&tp=auto&cb=anasini6rtr6dn&src=rir`],
+  ];
+  return `<div class="investigate-links">${links.map(([label,href])=>`<a class="external-link" href="${href}" target="_blank" rel="noopener noreferrer">${label} <span>↗</span></a>`).join('')}</div>`
 }
 function scoreExplainer(b,c){
   const parts=[
@@ -385,24 +415,19 @@ async function loadIpTraffic(){
     const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent='Traffic widget unavailable';
   }
 }
-async function loadIpPaths(){
-  const body=document.querySelector('#ip-path-body'),head=document.querySelector('#ip-path-head');
-  if(!body)return;
-  body.innerHTML='<div class="state">Loading path activity…</div>';
-  try{
-    const res=await fetch('/api/ip/'+encodeURIComponent(ip)+'/paths?limit=12',{cache:'no-store'});
-    if(!res.ok)throw Error(`HTTP ${res.status}`);
-    const data=await res.json();
-    if(head)head.textContent=`top paths for this IP · ${num(data.total_requests)} requests`;
-    body.innerHTML=pathActivity(data);
-  }catch(error){body.innerHTML=`<div class="state"><strong>Path activity unavailable</strong>${esc(error.message)}</div>`}
-}
 function applyTrafficWindow(){trafficStart=document.querySelector('#ip-traffic-start').value;trafficEnd=document.querySelector('#ip-traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notifyIpTraffic('End must be after start');return}saveIpTrafficWindow();loadIpTraffic()}
-function notifyIpTraffic(message){const summary=document.querySelector('#ip-traffic-summary');if(summary)summary.textContent=message}
+function formatStatusWithDisposition(label, disposition){
+  const base=label||'unknown';
+  const disp=(typeof disposition==='object'?disposition?.state:disposition)||'';
+  if(disp && disp.toLowerCase()!=='new'){
+    return `${base} (${disp.toLowerCase()})`;
+  }
+  return base;
+}
 
 async function load(){
   try{
-    const res=await fetch('/api/ip/'+encodeURIComponent(ip));
+    const res=await fetch('/api/ip/'+encodeURIComponent(ip)+'?mode=live',{cache:'no-store'});
     if(!res.ok)throw Error(res.status===404?'IP case not found':'Could not load profile');
 
     const d=await res.json();
@@ -413,6 +438,8 @@ async function load(){
       c=d.classification||{},
       b=c.score_breakdown||{},
       label=c.label||'unknown',
+      dispState=(d.disposition?.state||'new').toLowerCase(),
+      displayStatus=formatStatusWithDisposition(label, dispState),
       score=Number(d.threat_signal_score??0),
       src=d.field_sources||{};
 
@@ -430,7 +457,6 @@ async function load(){
         <div class="actions">
           <a class="button" href="/regions/${encodeURIComponent(d.country_code||"unknown")}">Region profile</a>
           <a class="button" href="/#threats">Return to table</a>
-          <a class="button primary" href="/api/ip/${encodeURIComponent(ip)}?refresh=true">Refresh enrichment</a>
           <button id="theme-toggle" class="button" type="button">${initialTheme==='dark'?'Light mode':'Dark mode'}</button>
         </div>
       </section>
@@ -438,9 +464,10 @@ async function load(){
       <section class="hero-grid">
         <div class="stat classification-stat ${esc(label)}">
           <div class="eyebrow">Classification</div>
-          <span class="value accent">${esc(label.toUpperCase())}</span>
+          <span class="value accent">${esc(displayStatus.toUpperCase())}</span>
           <span class="note">${esc(c.summary||'Insufficient evidence')}</span>
         </div>
+
         <div class="stat">
           <div class="eyebrow">Rule score</div>
           <span class="value">${score}/100</span>
@@ -480,17 +507,18 @@ async function load(){
             <div class="card-head"><h2>Network location</h2><small>operational geo · ${esc(d.network_location?.scope||d.location_scope||'unknown')} scope</small></div>
             <div class="body">${facts([
               ['Operational country', `${d.network_location?.country||d.country||'Unknown'} (${d.network_location?.country_code||d.country_code||'—'})`, (d.network_location?.sources||[]).join(', ')||src.country_code],
-              ['Location confidence', `${Number(d.network_location?.confidence??d.location_confidence??0)}%`, d.network_location?.disputed||d.location_disputed?'operational sources disputed':'operational sources resolved'],
+              ['City', d.network_location?.geo?.city?.value||d.network_location?.city||d.city||'Unknown', d.network_location?.geo?.city?.source||d.network_location?.city_source||'GeoIP vendor'],
+              ['Coordinates', d.network_location?.geo?.city?.latitude!=null&&d.network_location?.geo?.city?.longitude!=null?`${d.network_location.geo.city.latitude}, ${d.network_location.geo.city.longitude}`:d.network_location?.latitude!=null&&d.network_location?.longitude!=null?`${d.network_location.latitude}, ${d.network_location.longitude}`:'Unavailable', d.network_location?.geo?.city?.source||d.network_location?.city_source||'GeoIP vendor'],
+              ...(()=>{const c=d.network_location?.geo?.city?.candidates||{};const rows=[];for(const [source,item] of Object.entries(c)){if(item)rows.push([`${source} city`,`${item.city||'Unknown'}${item.latitude!=null&&item.longitude!=null?` (${Number(item.latitude).toFixed(4)}, ${Number(item.longitude).toFixed(4)})`:''}`, 'city candidate']);}return rows;})(),
+              ...(()=>{const r=d.network_location?.ip2region;if(!r?.city&&!r?.region&&!r?.isp)return [];return [['ip2region context',`${r.city||'Unknown'}${r.region?` · ${r.region}`:''}${r.isp?` · ${r.isp}`:''}`, 'aggregated validation']];})(),
               ['Operational status', d.network_location?.disputed||d.location_disputed?'Disputed — review operational source disagreement':'Resolved', 'RIR registration does not affect this status'],
+              ...(d.network_location?.country_conflict?[['Country conflict', `${String(d.network_location.country_conflict_severity||'').toUpperCase()} — SAPICS user-country primary`, 'other SAPICS datasets disagree']]:[]),
+              ...(d.network_location?.city_conflict?[[(d.network_location.geo?.city?.value?'City':'Coordinate')+' conflict', `${String(d.network_location.city_conflict_severity||'').toUpperCase()} — ${d.network_location.geo?.city?.distance_km??'—'} km`, 'GeoLite2 vs DB-IP']]:[]),
+              ...(d.network_location?.city_disputed?[['City warning', `MaxMind and DB-IP differ ~${d.network_location.city_distance_km}km — MaxMind used`, 'city-level vendor conflict']]:[]),
               ['RIR registration', d.network_location?.registration?`${d.network_location.registration.country||d.network_location.registration.country_code||'Unknown'} (${d.network_location.registration.country_code||'—'})`:'Unavailable', d.network_location?.registration?.source||'registration context only'],
               ['Allocation pattern', allocationLabel(d.network_location?.allocation_pattern), d.network_location?.allocation_pattern==='cross_region_allocation'?'Geo ≠ RIR is not a dispute':'resolver context'],
               ['ASN / organization', `${d.asn||'—'} · ${d.organization||'Unattributed'}`, d.asn_source||src.asn]
-            ])}${(()=>{const note=locationContextNote(d.network_location);return `<div class="location-status-note ${note.tone}">${note.html}</div><div class="location-legend"><span class="operational">Operational Geo</span><span class="registration">RIR / ownership</span>${d.network_location?.disputed||d.location_disputed?'<span class="disputed">Operational dispute</span>':''}</div>`})()}${geoConfidenceDetails(d.network_location)}</div>
-          </section>
-
-          <section class="card">
-            <div class="card-head"><h2>Path activity</h2><small id="ip-path-head">Loading path activity…</small></div>
-            <div class="body" id="ip-path-body"><div class="state">Loading path activity…</div></div>
+            ])}${(()=>{const note=locationContextNote(d.network_location);return `<div class="location-status-note ${note.tone}">${note.html}</div><div class="location-legend"><span class="operational">Operational Geo</span><span class="registration">RIR / ownership</span>${d.network_location?.country_conflict||d.network_location?.city_conflict?'<span class="disputed">Geo conflict</span>':''}</div>`})()}</div>
           </section>
 
           <section class="card">
@@ -503,6 +531,49 @@ async function load(){
         </div>
 
         <div class="column">
+          <section class="card triage-card">
+            <div class="card-head">
+              <h2>Case Triage & Disposition</h2>
+              <span class="triage-badge ${(d.disposition?.state||'new').toLowerCase()}" id="triage-status-badge">${esc((d.disposition?.state||'new').toUpperCase())}</span>
+            </div>
+            <div class="body">
+              <div class="triage-selector" id="detail-triage-selector">
+                ${['new','monitor','investigate','escalate','resolved'].map(st=>`
+                  <button type="button" class="triage-opt ${st} ${(d.disposition?.state||'new').toLowerCase()===st?'active':''}" data-state="${st}">${st}</button>
+                `).join('')}
+              </div>
+              <div class="triage-fields">
+                <div class="triage-field">
+                  <label for="detail-disp-assignee">Assigned Analyst</label>
+                  <input type="text" id="detail-disp-assignee" placeholder="e.g. analyst@soc" value="${esc(d.disposition?.assigned_to||'')}">
+                </div>
+                <div class="triage-field">
+                  <label for="detail-disp-note">Investigation Note</label>
+                  <textarea id="detail-disp-note" placeholder="Reasoning, actions taken, or evidence summary...">${esc(d.disposition?.note||'')}</textarea>
+                </div>
+              </div>
+              <div class="triage-actions">
+                <span class="note" id="detail-disp-time">${d.disposition?.updated_at?`Last updated: ${new Date(d.disposition.updated_at).toLocaleString()}`:'Not triaged yet'}</span>
+                <button type="button" class="button primary" id="detail-disp-save">Save Triage</button>
+              </div>
+              ${(d.disposition?.history && d.disposition.history.length>0)?`
+                <div class="triage-history">
+                  <div class="eyebrow" style="margin-bottom:8px">Audit Trail (${d.disposition.history.length})</div>
+                  ${d.disposition.history.slice().reverse().map(h=>`
+                    <div class="triage-history-item">
+                      <div class="triage-history-head">
+                        <span>${esc(h.actor||'analyst')} : <strong>${esc((h.from||'new').toUpperCase())} → ${esc((h.to||'').toUpperCase())}</strong></span>
+                        <span>${new Date(h.at).toLocaleDateString()} ${new Date(h.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>
+                      </div>
+                      ${h.assigned_to?`<div class="source" style="margin-top:2px">Assigned: ${esc(h.assigned_to)}</div>`:''}
+                      ${h.note?`<div class="triage-history-note">"${esc(h.note)}"</div>`:''}
+                    </div>
+                  `).join('')}
+                </div>
+              `:''}
+            </div>
+          </section>
+
           <section class="card">
             <div class="card-head"><h2>Privacy intelligence</h2><small>${esc(d.privacy_enrichment_status||'unknown')}</small></div>
             <div class="body">${facts([
@@ -532,6 +603,42 @@ async function load(){
         </div>
       </div>
     `
+    let activeDispState=(d.disposition?.state||'new').toLowerCase();
+    document.querySelectorAll('#detail-triage-selector .triage-opt').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        activeDispState=btn.dataset.state;
+        document.querySelectorAll('#detail-triage-selector .triage-opt').forEach(b=>b.classList.toggle('active',b.dataset.state===activeDispState));
+      });
+    });
+
+    document.querySelector('#detail-disp-save')?.addEventListener('click',async()=>{
+      const saveBtn=document.querySelector('#detail-disp-save');
+      const assignee=document.querySelector('#detail-disp-assignee')?.value.trim()||null;
+      const note=document.querySelector('#detail-disp-note')?.value.trim()||null;
+      if(saveBtn){saveBtn.disabled=true;saveBtn.textContent='Saving…';}
+      try{
+        const res=await fetch(apiUrl(`/api/ip/${encodeURIComponent(ip)}/disposition`),{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({state:activeDispState,assigned_to:assignee,note:note,actor:'analyst'})
+        });
+        if(!res.ok)throw new Error('HTTP '+res.status);
+        const saved=await res.json();
+        const badge=document.querySelector('#triage-status-badge');
+        if(badge){
+          badge.className=`triage-badge ${activeDispState}`;
+          badge.textContent=activeDispState.toUpperCase();
+        }
+        const timeNote=document.querySelector('#detail-disp-time');
+        if(timeNote)timeNote.textContent='Saved just now';
+        load();
+      }catch(err){
+        alert('Failed to save disposition: '+err.message);
+      }finally{
+        if(saveBtn){saveBtn.disabled=false;saveBtn.textContent='Save Triage';}
+      }
+    });
+
     document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item===button));saveIpTrafficWindow();loadIpTraffic()}));
     document.querySelector('#ip-traffic-apply').addEventListener('click',applyTrafficWindow);
     document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{trafficStart='';trafficEnd='';trafficRange='1h';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));saveIpTrafficWindow();loadIpTraffic()});
@@ -539,7 +646,7 @@ async function load(){
     syncTrafficInputs(trafficStart&&localIso(trafficStart)||new Date(Date.now()-3600000).toISOString(),trafficEnd&&localIso(trafficEnd)||new Date().toISOString());
     const themeButton=document.querySelector('#theme-toggle');themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;localStorage.setItem('sentinel-theme',next);themeButton.textContent=next==='dark'?'Light mode':'Dark mode'});
     loadIpTraffic();
-    loadIpPaths();
+
   }catch(e){
     document.querySelector('#app').innerHTML=`
       <div class="state">

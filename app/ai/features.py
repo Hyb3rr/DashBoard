@@ -1,7 +1,13 @@
+"""AI feature extraction — pure Python, no database dependency.
+
+build_window_features() now accepts pre-fetched bucket rows as plain dicts
+instead of a SQLite connection. The caller (PgDetectionRepository or
+score_cycle) is responsible for fetching the rows from PostgreSQL.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
-import sqlite3
 from collections.abc import Sequence
 
 import pandas as pd
@@ -34,92 +40,75 @@ def _empty() -> pd.DataFrame:
 
 
 def build_window_features(
-    conn: sqlite3.Connection,
+    bucket_rows: Sequence[dict],
+) -> pd.DataFrame:
+    """Build one row per IP/minute from pre-fetched PG bucket rows.
+
+    Each row dict must have: ip, bucket_minute, requests, unique_paths_approx,
+    status_404, status_403, status_5xx, post_requests, sensitive_hits,
+    wp_login_hits, bytes_sum.
+    """
+    if not bucket_rows:
+        return _empty()
+
+    grouped = []
+    for row in bucket_rows:
+        requests = int(row.get("requests") or 0)
+        grouped.append({
+            "ip": row["ip"],
+            "window_start": pd.Timestamp(str(row["bucket_minute"])),
+            "requests": requests,
+            "unique_paths": int(row.get("unique_paths_approx") or 0),
+            "ratio_404": int(row.get("status_404") or 0) / requests if requests else 0.0,
+            "ratio_403": int(row.get("status_403") or 0) / requests if requests else 0.0,
+            "ratio_5xx": int(row.get("status_5xx") or 0) / requests if requests else 0.0,
+            "post_ratio": int(row.get("post_requests") or 0) / requests if requests else 0.0,
+            "sensitive_hits": int(row.get("sensitive_hits") or 0),
+            "login_attempts": int(row.get("wp_login_hits") or 0),
+            "avg_request_interval": 0.0,
+            "std_request_interval": 0.0,
+            "unique_user_agents": 0,
+            "bytes_avg": int(row.get("bytes_sum") or 0) / requests if requests else 0.0,
+        })
+    return pd.DataFrame(grouped, columns=WINDOW_COLUMNS)
+
+
+def build_window_features_from_events(
+    events: Sequence[dict],
     start_at: datetime | str | None = None,
     end_at: datetime | str | None = None,
     ips: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """Build one row per IP/minute inside a bounded UTC event-time range."""
-    bucket_where = []
-    bucket_params: list[object] = []
-    if start_at is not None and end_at is not None:
-        bucket_where.extend(["bucket_minute >= ?", "bucket_minute < ?"])
-        bucket_params.extend([
-            start_at.isoformat() if isinstance(start_at, datetime) else start_at,
-            end_at.isoformat() if isinstance(end_at, datetime) else end_at,
-        ])
-    if ips is not None:
-        unique_ips = tuple(dict.fromkeys(ips))
-        if not unique_ips:
-            return _empty()
-        bucket_where.append("ip IN (" + ",".join("?" for _ in unique_ips) + ")")
-        bucket_params.extend(unique_ips)
-    bucket_clause = " WHERE " + " AND ".join(bucket_where) if bucket_where else ""
-    bucket_rows = conn.execute(
-        "SELECT * FROM ip_time_buckets" + bucket_clause + " ORDER BY ip, bucket_minute", bucket_params
-    ).fetchall()
-    if bucket_rows:
-        grouped = []
-        for row in bucket_rows:
-            requests = int(row["requests"] or 0)
-            grouped.append({
-                "ip": row["ip"],
-                "window_start": pd.Timestamp(row["bucket_minute"]),
-                "requests": requests,
-                "unique_paths": int(row["unique_paths_approx"] or 0),
-                "ratio_404": int(row["status_404"] or 0) / requests if requests else 0.0,
-                "ratio_403": int(row["status_403"] or 0) / requests if requests else 0.0,
-                "ratio_5xx": int(row["status_5xx"] or 0) / requests if requests else 0.0,
-                "post_ratio": int(row["post_requests"] or 0) / requests if requests else 0.0,
-                "sensitive_hits": int(row["sensitive_hits"] or 0),
-                "login_attempts": int(row["wp_login_hits"] or 0),
-                # Inter-arrival and user-agent cardinality are intentionally
-                # neutral until their own persisted aggregates are added.
-                "avg_request_interval": 0.0,
-                "std_request_interval": 0.0,
-                "unique_user_agents": 0,
-                "bytes_avg": int(row["bytes_sum"] or 0) / requests if requests else 0.0,
-            })
-        return pd.DataFrame(grouped, columns=WINDOW_COLUMNS)
-
-    if start_at is None or end_at is None:
-        bounds = conn.execute("SELECT MIN(timestamp) AS start_at, MAX(timestamp) AS end_at FROM events WHERE timestamp IS NOT NULL").fetchone()
-        if not bounds or not bounds["start_at"] or not bounds["end_at"]:
-            return _empty()
-        start_at, end_at = bounds["start_at"], bounds["end_at"] + "\uffff"
-    where = "timestamp IS NOT NULL AND timestamp >= ? AND timestamp < ?"
-    params: list[object] = [start_at.isoformat() if isinstance(start_at, datetime) else start_at,
-                            end_at.isoformat() if isinstance(end_at, datetime) else end_at]
-    if ips is not None:
-        unique_ips = tuple(dict.fromkeys(ips))
-        if not unique_ips:
-            return _empty()
-        placeholders = ",".join("?" for _ in unique_ips)
-        where += f" AND src_ip IN ({placeholders})"
-        params.extend(unique_ips)
-    rows = conn.execute(
-        f"""
-        SELECT timestamp, src_ip, method, path, status, bytes_sent, user_agent
-        FROM events
-        WHERE {where}
-        """,
-        params,
-    ).fetchall()
-    if not rows:
+    """Build window features directly from raw event dicts (for testing/replay)."""
+    if not events:
         return _empty()
 
-    frame = pd.DataFrame([dict(row) for row in rows])
+    frame = pd.DataFrame(events)
+    if "timestamp" not in frame.columns or "src_ip" not in frame.columns:
+        return _empty()
+
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame = frame.dropna(subset=["timestamp", "src_ip"])
     if frame.empty:
         return _empty()
 
+    if start_at is not None:
+        start_ts = pd.Timestamp(start_at if isinstance(start_at, str) else start_at.isoformat(), tz="UTC")
+        frame = frame[frame["timestamp"] >= start_ts]
+    if end_at is not None:
+        end_ts = pd.Timestamp(end_at if isinstance(end_at, str) else end_at.isoformat(), tz="UTC")
+        frame = frame[frame["timestamp"] < end_ts]
+    if ips is not None:
+        frame = frame[frame["src_ip"].isin(set(ips))]
+    if frame.empty:
+        return _empty()
+
     frame["window_start"] = frame["timestamp"].dt.floor("1min")
-    frame["path_text"] = frame["path"].fillna("").astype(str).str.lower()
-    frame["method_text"] = frame["method"].fillna("").astype(str).str.upper()
-    frame["user_agent_text"] = frame["user_agent"].fillna("").astype(str)
-    frame["status_num"] = pd.to_numeric(frame["status"], errors="coerce").fillna(0)
-    frame["bytes_num"] = pd.to_numeric(frame["bytes_sent"], errors="coerce")
+    frame["path_text"] = frame.get("path", pd.Series(dtype=str)).fillna("").astype(str).str.lower()
+    frame["method_text"] = frame.get("method", pd.Series(dtype=str)).fillna("").astype(str).str.upper()
+    frame["user_agent_text"] = frame.get("user_agent", pd.Series(dtype=str)).fillna("").astype(str)
+    frame["status_num"] = pd.to_numeric(frame.get("status", pd.Series(dtype=int)), errors="coerce").fillna(0)
+    frame["bytes_num"] = pd.to_numeric(frame.get("bytes_sent", pd.Series(dtype=int)), errors="coerce")
     frame["is_404"] = (frame["status_num"] == 404).astype(int)
     frame["is_403"] = (frame["status_num"] == 403).astype(int)
     frame["is_5xx"] = (frame["status_num"] >= 500).astype(int)

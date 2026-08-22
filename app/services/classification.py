@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..core.db import decode, region_profile
+from ..core.json_utils import decode
 from ..core.intelligence import classify_ip
 from ..core.rules import ruleset_hash
 
@@ -110,25 +110,6 @@ def _observation(row) -> dict:
     return result
 
 
-def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:
-    profile = _decode_profile(conn.execute("SELECT * FROM ip_profiles WHERE ip=?", (ip,)).fetchone())
-    profile.setdefault("ip", ip)
-    observation = _observation(conn.execute("SELECT * FROM ip_observations WHERE ip=?", (ip,)).fetchone())
-    history = conn.execute("SELECT MIN(bucket_minute) AS first_bucket, MAX(bucket_minute) AS last_bucket FROM ip_time_buckets WHERE ip=?", (ip,)).fetchone()
-    if history and history["first_bucket"] and history["last_bucket"]:
-        try:
-            first = datetime.fromisoformat(history["first_bucket"].replace("Z", "+00:00"))
-            last = datetime.fromisoformat(history["last_bucket"].replace("Z", "+00:00"))
-            observation["bucket_history_hours"] = max(0, (last - first).total_seconds() / 3600)
-            observation["rule_coverage"] = observation["bucket_history_hours"] >= 24
-        except ValueError:
-            pass
-    region = region_profile(conn, profile.get("country_code")) or {}
-    ai_row = conn.execute("SELECT * FROM ip_ai_scores WHERE ip=?", (ip,)).fetchone()
-    ai_profile = dict(ai_row) if ai_row else None
-    if ai_profile:
-        ai_profile["ai_evidence"] = decode(ai_profile.pop("ai_evidence_json", "[]"))
-    classification = classify_ip(profile, observation, region, ai_profile)
-    classification["ruleset_hash"] = observation.get("ruleset_hash_24h") or ruleset_hash()
-    classification["detections_recent"] = observation.get("detections_recent", [])
-    return ClassificationSnapshot(ip, profile, observation, region, ai_profile, classification)
+def build_classification_snapshot(conn, ip: str) -> ClassificationSnapshot:  # pragma: no cover
+    """Deprecated: SQLite-backed snapshot. Use StateRepository in live mode."""
+    raise NotImplementedError("SQLite removed – use StateRepository for classification snapshots")

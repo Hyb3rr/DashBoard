@@ -2,52 +2,58 @@ from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 import asyncio
 import ipaddress
 import json
 import os
 import time
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from .config import settings
 from .config.settings import APP_DIR
-from .core.db import connect, decode, region_profile
 from .core.logs import effective_risk
-from .core.buckets import upsert_buckets
 from .core.intelligence import classify_ip
 from .tools.calibration import csv_text
 from .services.profiles import (
-    attach_region_and_classification,
-    ai_profile_for_ip,
     classification_observation,
-    ensure_profile,
+    ensure_profile_postgres,
 )
-from .services.dispositions import set_disposition, STATES
+from .services.dispositions import STATES
 from .services.classification_watcher import run_classification_watcher
-from .services.classification import build_classification_snapshot, detection_snapshot
+from .services.coverage import run_coverage_consumer
 from .core.rules import ruleset_hash, ruleset_health
 from .collectors.websocket_collector import bus, collector
 from .core.intel_updater import run_due_sources
+from .db import clickhouse as clickhouse_store
+from .db import postgres as postgres_store
+from .db.repositories import StateRepository, DispositionRepository, RegionRepository
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    connect().close()
+    postgres_store.ensure_schema()
+    clickhouse_store.ensure_schema()
     await collector.start()
     watcher = asyncio.create_task(run_classification_watcher())
-    intel_task = None
+    coverage = asyncio.create_task(run_coverage_consumer())
     if os.getenv("INTEL_AUTO_UPDATE_ON_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}:
-        intel_task = asyncio.create_task(
-            asyncio.to_thread(run_due_sources), name="intel-startup-update"
-        )
+        # Remote provider downloads have no reliable cancellation point. Keep
+        # this best-effort job outside the server's asyncio default executor so
+        # graceful shutdown never waits indefinitely on a remote socket.
+        threading.Thread(target=run_due_sources, name="intel-startup-update", daemon=True).start()
     try:
         yield
     finally:
         watcher.cancel()
-        if intel_task:
-            intel_task.cancel()
-        await collector.stop()
+        coverage.cancel()
+        await asyncio.gather(watcher, coverage, return_exceptions=True)
+        try:
+            await collector.stop()
+        finally:
+            postgres_store.close_pool()
 
 
 app = FastAPI(title="Remote Web Monitoring Hub - IP Intelligence", lifespan=lifespan)
@@ -71,47 +77,14 @@ app.add_middleware(
 )
 
 
-def _build_ip_details_sync(ip: str, refresh: bool) -> tuple[dict | None, str | None]:
-    """Build an IP detail response entirely inside one worker thread.
-
-    SQLite connections are thread-affine by default.  Opening the connection
-    inside this worker avoids moving a connection created by the ASGI thread
-    across threads while keeping profile IO and classification off the event
-    loop.
-    """
-    conn = connect()
-    try:
-        data, error = asyncio.run(ensure_profile(conn, ip, refresh=refresh))
-        if error or not data:
-            return data, error
-        obs = conn.execute(
-            "SELECT * FROM ip_observations WHERE ip = ?", (ip,)
-        ).fetchone()
-        if obs:
-            obs_data = dict(obs)
-            obs_data["behavior_evidence"] = decode(
-                obs_data.pop("behavior_evidence_json")
-            )
-            obs_data["behavior_evidence_recent"] = decode(
-                obs_data.pop("behavior_evidence_recent_json")
-            )
-            obs_data["detections"] = decode(obs_data.pop("detections_json", "[]"))
-            data["observation"] = obs_data
-            data["effective_risk_score"], data["effective_risk_level"] = effective_risk(
-                data.get("risk_score"), obs["behavior_score"]
-            )
-            attach_region_and_classification(conn, data, obs_data)
-        else:
-            attach_region_and_classification(conn, data, None)
-        conn.commit()
-        return data, None
-    finally:
-        conn.close()
-
-
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return HTMLResponse((APP_DIR / "dashboard.html").read_text())
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/ip/{ip}", response_class=HTMLResponse)
@@ -135,11 +108,86 @@ def region_profile_page(country_code: str):
     """Serve the shell even for unknown codes so the page degrades cleanly."""
     return HTMLResponse((APP_DIR / "region_detail.html").read_text())
 
+
 @app.get("/health")
 def health():
-    connect().close()
     rules_health = ruleset_health()
-    return {"status": "ok" if rules_health["status"] == "ok" else "degraded", "mode": "read_only", "rules": rules_health}
+    collector_info = collector.status() if collector else {"status": "disabled"}
+    storage = {
+        "backend": settings.DATA_BACKEND,
+        "postgres": postgres_store.health(),
+        "clickhouse": clickhouse_store.health()
+    }
+    healthy = rules_health["status"] == "ok" and all(
+        item.get("status") == "ok" for item in storage.values() if isinstance(item, dict) and "status" in item
+    )
+    return {
+        "status": "ok" if healthy else "degraded",
+        "mode": settings.DATA_BACKEND,
+        "rules": rules_health,
+        "storage": storage,
+        "collector": collector_info,
+    }
+
+
+
+def _split_allowed_country_ips(country_code: str, exclude: bool = False) -> list[str]:
+    if exclude:
+        return []
+    try:
+        with postgres_store.transaction() as conn:
+            rows = conn.execute(
+                "SELECT ip::text AS ip FROM ip_profiles WHERE country_code = %s",
+                (country_code.upper(),),
+            ).fetchall()
+        return [str(row["ip"]) for row in rows]
+    except Exception as exc:
+        raise HTTPException(503, f"PostgreSQL country state unavailable: {exc}") from exc
+
+
+def _traffic_from_split(
+    start_stamp: datetime,
+    end_stamp: datetime,
+    bucket_seconds: int,
+    range_name: str,
+    range_label: str,
+    source: str,
+    filter_type: str | None,
+    filter_value: str | None,
+    exclude: bool,
+) -> dict:
+    if source == "file":
+        dataset_id = "file"
+    else:
+        dataset_id = settings.DATASET_LIVE_ID
+    allowed_ips = None
+    if filter_type == "country":
+        allowed_ips = _split_allowed_country_ips(str(filter_value), exclude)
+    try:
+        result = clickhouse_store.traffic(
+            start_stamp,
+            end_stamp,
+            bucket_seconds,
+            dataset_id=dataset_id,
+            filter_type=filter_type,
+            filter_value=filter_value,
+            exclude=exclude,
+            allowed_ips=allowed_ips,
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"ClickHouse traffic unavailable: {exc}") from exc
+    now = datetime.now(timezone.utc)
+    result.update({
+        "bucket": f"{bucket_seconds // 60}min" if bucket_seconds < 3600 else f"{bucket_seconds // 3600}h",
+        "range": range_name,
+        "range_label": range_label,
+        "start": start_stamp.isoformat(),
+        "end": end_stamp.isoformat(),
+        "filter": {"type": filter_type, "value": filter_value, "exclude": bool(exclude)} if filter_type else None,
+        "source": source,
+        "as_of": now.isoformat(),
+    })
+    return result
 
 
 @app.get("/api/analytics/traffic")
@@ -150,8 +198,14 @@ def traffic_analytics(
     filter_type: str | None = None,
     filter_value: str | None = None,
     exclude: bool = False,
+    source: str = Query("all", pattern="^(all|stream|file)$"),
+    mode: str = Query("live", pattern="^(live|file)$"),
 ):
     """Aggregate one traffic event set for the Overview time window."""
+    if not isinstance(mode, str):
+        mode = "live"
+    if not isinstance(source, str):
+        source = "all"
     ranges = {
         "30m": (30 * 60, 5 * 60, "last 30 minutes"),
         "1h": (60 * 60, 10 * 60, "last 1 hour"),
@@ -165,9 +219,11 @@ def traffic_analytics(
     selected = ranges.get(range_key, ranges["1h"])
     now = datetime.now(timezone.utc)
     end_stamp = _parse_traffic_time(end) if end else now
+    start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=selected[0])
     if end_stamp is None or end_stamp > now:
         end_stamp = now
-    start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=selected[0])
+    if start_stamp is None:
+        start_stamp = end_stamp - timedelta(seconds=selected[0])
     if start_stamp is None or end_stamp <= start_stamp:
         raise HTTPException(400, "Invalid traffic time range")
     bucket_seconds = selected[1]
@@ -178,94 +234,22 @@ def traffic_analytics(
         bucket_seconds = max(60, min(3600, window_seconds // 12))
     if filter_type not in {None, "ip", "path", "country"} or (filter_type and not filter_value):
         raise HTTPException(400, "Invalid traffic filter")
-    conn = connect()
-    try:
-        where = ["e.timestamp IS NOT NULL", "e.timestamp >= ?", "e.timestamp <= ?"]
-        params: list[str] = [start_stamp.isoformat(), end_stamp.isoformat()]
-        if filter_type == "ip":
-            where.append("e.src_ip != ?" if exclude else "e.src_ip = ?")
-            params.append(str(filter_value))
-        elif filter_type == "path":
-            where.append("e.path != ?" if exclude else "e.path = ?")
-            params.append(str(filter_value))
-        elif filter_type == "country":
-            where.append("COALESCE(p.country_code, '') != ?" if exclude else "p.country_code = ?")
-            params.append(str(filter_value).upper())
-        rows = conn.execute(
-            f"""
-            SELECT e.timestamp, e.src_ip, e.path, e.status, p.country_code, p.country
-            FROM events e LEFT JOIN ip_profiles p ON p.ip = e.src_ip
-            WHERE {' AND '.join(where)}
-            ORDER BY e.timestamp ASC
-            """,
-            params,
-        ).fetchall()
-        parsed = []
-        for row in rows:
-            try:
-                stamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-                if stamp.tzinfo is None:
-                    stamp = stamp.replace(tzinfo=timezone.utc)
-                parsed.append((stamp.astimezone(timezone.utc), row))
-            except (TypeError, ValueError):
-                continue
-        grid_start = datetime.fromtimestamp((start_stamp.timestamp() // bucket_seconds) * bucket_seconds, timezone.utc)
-        bucket_count = max(1, int((end_stamp.timestamp() - grid_start.timestamp()) // bucket_seconds) + 1)
-        bucket_starts = [grid_start + timedelta(seconds=i * bucket_seconds) for i in range(bucket_count)]
-        buckets = {stamp.isoformat().replace("+00:00", "Z"): {"requests": 0, "errors": 0} for stamp in bucket_starts}
-        paths, countries, ips = Counter(), Counter(), Counter()
-        status_codes = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
-        path_ips, country_ips = defaultdict(set), defaultdict(set)
-        for stamp, row in parsed:
-            index = int((stamp.timestamp() - grid_start.timestamp()) // bucket_seconds)
-            index = max(0, min(bucket_count - 1, index))
-            bucket = bucket_starts[index]
-            item = buckets[bucket.isoformat().replace("+00:00", "Z")]
-            item["requests"] += 1
-            status = int(row["status"] or 0)
-            if status >= 400:
-                item["errors"] += 1
-            family = f"{status // 100}xx"
-            if family in status_codes:
-                status_codes[family] += 1
-            if row["path"]:
-                path = str(row["path"])
-                paths[path] += 1
-                path_ips[path].add(str(row["src_ip"]))
-            country = row["country_code"] or "Unknown"
-            country_key = (str(country), str(row["country"] or country))
-            countries[country_key] += 1
-            country_ips[country_key].add(str(row["src_ip"]))
-            ips[str(row["src_ip"])] += 1
-        series = [{"timestamp": key, **buckets[key]} for key in buckets]
-        return {
-            "series": series,
-            "bucket": f"{bucket_seconds // 60}min" if bucket_seconds < 3600 else f"{bucket_seconds // 3600}h",
-            "range": range_name,
-            "range_label": range_label,
-            "start": start_stamp.isoformat(),
-            "end": end_stamp.isoformat(),
-            "status_codes": status_codes,
-            "top_paths": [{"path": key, "requests": value, "ips": sorted(path_ips[key])} for key, value in paths.most_common(8)],
-            "top_countries": [{"country_code": key[0], "country": key[1], "requests": value, "ips": sorted(country_ips[key])} for key, value in countries.most_common(8)],
-            "top_ips": [{"ip": key, "requests": value} for key, value in ips.most_common(8)],
-            "total_requests": len(parsed),
-            "error_requests": sum(item["errors"] for item in buckets.values()),
-            "unique_ips": len(ips),
-            "unique_countries": len(countries),
-            "filter": {"type": filter_type, "value": filter_value, "exclude": bool(exclude)} if filter_type else None,
-            "as_of": now.isoformat(),
-        }
-    finally:
-        conn.close()
+    return _traffic_from_split(
+        start_stamp,
+        end_stamp,
+        bucket_seconds,
+        range_name,
+        range_label,
+        source,
+        filter_type,
+        filter_value,
+        exclude,
+    )
+
 
 @app.get("/api/ip/{ip}/traffic")
-def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str | None = None, end: str | None = None):
-    """Return one IP's traffic view from persisted aggregates.
-
-    Only the recent forensic list reads raw events.  Timeline and status
-    totals come from minute buckets, and top paths come from ip_path_stats.
-    """
+def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str | None = None, end: str | None = None, mode: str = Query("live", pattern="^(live|file)$")):
+    """Return one IP's traffic view from ClickHouse."""
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:
@@ -274,91 +258,28 @@ def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str 
     seconds = ranges.get(range_key, ranges["1h"])
     now = datetime.now(timezone.utc)
     end_stamp = _parse_traffic_time(end) if end else now
+    start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=seconds)
     if end_stamp is None or end_stamp > now:
         end_stamp = now
-    start_stamp = _parse_traffic_time(start) if start else end_stamp - timedelta(seconds=seconds)
+    if start_stamp is None:
+        start_stamp = end_stamp - timedelta(seconds=seconds)
     if not start_stamp or not end_stamp or end_stamp <= start_stamp:
         raise HTTPException(400, "Invalid traffic time range")
     seconds = max(60, int((end_stamp - start_stamp).total_seconds()))
     bucket_seconds = max(60, min(3600, seconds // 12))
-    conn = connect()
     try:
-        _ensure_ip_aggregates(conn, address)
-        grid_start = datetime.fromtimestamp((start_stamp.timestamp() // bucket_seconds) * bucket_seconds, timezone.utc)
-        bucket_count = max(1, int((end_stamp.timestamp() - grid_start.timestamp()) // bucket_seconds) + 1)
-        bucket_starts = [grid_start + timedelta(seconds=i * bucket_seconds) for i in range(bucket_count)]
-        buckets = {stamp.isoformat().replace("+00:00", "Z"): {"requests": 0, "errors": 0} for stamp in bucket_starts}
-        status_codes = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
-        bucket_rows = conn.execute(
-            """
-            SELECT bucket_minute, requests, status_2xx, status_3xx,
-                   status_4xx, status_5xx
-            FROM ip_time_buckets
-            WHERE ip = ? AND bucket_minute >= ? AND bucket_minute <= ?
-            ORDER BY bucket_minute
-            """,
-            (
-                address,
-                grid_start.isoformat(),
-                bucket_starts[-1].isoformat(),
-            ),
-        ).fetchall()
-        for row in bucket_rows:
-            try:
-                stamp = datetime.fromisoformat(str(row["bucket_minute"]).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            key = stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-            if key not in buckets:
-                continue
-            item = buckets[key]
-            item["requests"] = int(row["requests"] or 0)
-            item["errors"] = sum(int(row[column] or 0) for column in ("status_4xx", "status_5xx"))
-            for family in status_codes:
-                status_codes[family] += int(row[f"status_{family}"] or 0)
+        result = clickhouse_store.traffic_for_ip(
+            start_stamp, end_stamp, bucket_seconds, address, settings.DATASET_LIVE_ID
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"ClickHouse traffic unavailable: {exc}") from exc
+    result.update({
+        "ip": address, "range": range_key, "range_label": f"last {range_key}",
+        "start": start_stamp.isoformat(), "end": end_stamp.isoformat(),
+        "as_of": now.isoformat(),
+    })
+    return result
 
-        path_rows = conn.execute(
-            """
-            SELECT path, requests, status_4xx + status_5xx AS errors,
-                   first_seen, last_seen
-            FROM ip_path_stats
-            WHERE ip = ?
-            ORDER BY requests DESC, path ASC
-            LIMIT 12
-            """,
-            (address,),
-        ).fetchall()
-        recent_rows = conn.execute(
-            """
-            SELECT timestamp, method, path, status
-            FROM events
-            WHERE src_ip = ? AND timestamp IS NOT NULL
-              AND timestamp >= ? AND timestamp <= ?
-            ORDER BY timestamp DESC
-            LIMIT 50
-            """,
-            (address, start_stamp.isoformat(), end_stamp.isoformat()),
-        ).fetchall()
-        recent = [
-            {
-                "timestamp": str(row["timestamp"]).replace("+00:00", "Z"),
-                "method": row["method"] or "—",
-                "path": row["path"] or "—",
-                "status": row["status"],
-            }
-            for row in reversed(recent_rows)
-        ]
-        total_requests = sum(item["requests"] for item in buckets.values())
-        return {
-            "ip": address, "range": range_key, "range_label": f"last {range_key}",
-            "start": start_stamp.isoformat(), "end": end_stamp.isoformat(), "as_of": now.isoformat(),
-            "total_requests": total_requests, "series": [{"timestamp": key, **buckets[key]} for key in buckets],
-            "status_codes": status_codes,
-            "top_paths": [dict(row) for row in path_rows],
-            "recent_requests": recent,
-        }
-    finally:
-        conn.close()
 
 def _parse_traffic_time(value: str | None) -> datetime | None:
     if not value:
@@ -372,81 +293,38 @@ def _parse_traffic_time(value: str | None) -> datetime | None:
         return None
 
 
-def _ensure_ip_aggregates(conn, address: str) -> None:
-    """Repair only legacy/directly-seeded IPs missing persisted aggregates."""
-    exists = conn.execute(
-        "SELECT 1 FROM ip_time_buckets WHERE ip = ? LIMIT 1", (address,)
-    ).fetchone()
-    if exists:
-        return
-    rows = conn.execute(
-        """
-        SELECT timestamp, src_ip, method, path, status, bytes_sent, user_agent
-        FROM events
-        WHERE src_ip = ? AND timestamp IS NOT NULL
-        """,
-        (address,),
-    ).fetchall()
-    if rows:
-        upsert_buckets(conn, [dict(row) for row in rows])
-        conn.commit()
-
 @app.get("/api/ip/{ip}/paths")
-def ip_path_activity(ip: str, limit: int = 12):
-    """Return lifetime path aggregates for one IP."""
-    try:
-        address = str(ipaddress.ip_address(ip))
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid IP address") from exc
-
-    limit = min(max(limit, 1), 50)
-    conn = connect()
-    try:
-        _ensure_ip_aggregates(conn, address)
-        total_row = conn.execute(
-            "SELECT COALESCE(SUM(requests), 0) AS requests "
-            "FROM ip_path_stats WHERE ip = ?",
-            (address,),
-        ).fetchone()
-        total = int(total_row["requests"] or 0) if total_row else 0
-        rows = conn.execute(
-            """SELECT path, requests,
-                      status_4xx + status_5xx AS errors,
-                      first_seen, last_seen
-                 FROM ip_path_stats
-                WHERE ip = ?
-                ORDER BY requests DESC, path ASC
-                LIMIT ?""",
-            (address, limit),
-        ).fetchall()
-        paths = []
-        for row in rows:
-            item = dict(row)
-            item["requests"] = int(item["requests"] or 0)
-            item["errors"] = int(item["errors"] or 0)
-            item["share"] = round(item["requests"] / total, 4) if total else 0
-            paths.append(item)
-        return {"ip": address, "total_requests": total, "paths": paths}
-    finally:
-        conn.close()
+def ip_path_activity(ip: str, limit: int = 12, mode: str = Query("live", pattern="^(live|file)$")):
+    raise HTTPException(410, "Path Activity endpoint is retired in split live mode; use IP Traffic")
 
 
 @app.get("/api/ip/{ip}")
-async def ip_details(ip: str, refresh: bool = False):
+async def ip_details(ip: str, refresh: bool = False, mode: str = Query("live", pattern="^(live|file)$")):
     try:
         address = ipaddress.ip_address(ip)
     except ValueError as exc:
         raise HTTPException(400, "Invalid IP address") from exc
-    data, error = await asyncio.to_thread(
-        _build_ip_details_sync, str(address), refresh
-    )
-    if error:
-        raise HTTPException(502, f"Enrichment provider unavailable: {error}")
-    return data
+    error = None
+    if refresh:
+        data, error = await ensure_profile_postgres(str(address), refresh=True)
+    row = await asyncio.to_thread(StateRepository().get, str(address))
+    if not row:
+        raise HTTPException(404, "IP not found")
+    cached_location = row.get("network_location") or {}
+    if not refresh and not cached_location.get("ip2region"):
+        _, refresh_error = await ensure_profile_postgres(str(address), refresh=True)
+        if not refresh_error:
+            row = await asyncio.to_thread(StateRepository().get, str(address))
+        else:
+            error = refresh_error
+    item = _pg_item(row)
+    if refresh and error:
+        item.setdefault("provider_errors", []).append(f"Refresh failed; showing cached profile: {error}")
+    return item
 
 
 @app.get("/api/ip/{ip}/attack")
-def ip_attack(ip: str, window: str = Query("24h")):
+def ip_attack(ip: str, window: str = Query("24h"), mode: str = Query("live", pattern="^(live|file)$")):
     """Return recent observed detections and their explicit techniques."""
     try:
         address = str(ipaddress.ip_address(ip))
@@ -454,29 +332,23 @@ def ip_attack(ip: str, window: str = Query("24h")):
         raise HTTPException(400, "Invalid IP address") from exc
     if window not in {"1h", "24h"}:
         raise HTTPException(400, "Unsupported attack window")
-    conn = connect()
-    try:
-        persisted = detection_snapshot(conn, address, window)
-        detections = persisted["detections"]
-        techniques = []
-        by_technique = {}
-        for detection in detections:
-            technique = detection.get("mitre_technique")
-            if technique:
-                item = by_technique.setdefault(technique, {"id": technique, "detection_ids": []})
-                if detection.get("id") not in item["detection_ids"]:
-                    item["detection_ids"].append(detection.get("id"))
-        techniques = list(by_technique.values())
-        return {
-            "ip": address,
-            "window": window,
-            "ruleset_hash": persisted["ruleset_hash"],
-            "evaluated_at": persisted["evaluated_at"],
-            "detections": detections,
-            "techniques": techniques,
-        }
-    finally:
-        conn.close()
+    row = StateRepository().get(address)
+    payload = dict((row or {}).get("observation_payload") or {})
+    suffix = "1h" if window == "1h" else "24h"
+    detections = payload.get(f"detections_{suffix}", []) or []
+    by_technique: dict[str, dict] = {}
+    for detection in detections:
+        technique = detection.get("mitre_technique")
+        if technique:
+            item = by_technique.setdefault(technique, {"id": technique, "detection_ids": []})
+            if detection.get("id") not in item["detection_ids"]:
+                item["detection_ids"].append(detection.get("id"))
+    return {
+        "ip": address, "window": window,
+        "ruleset_hash": payload.get(f"ruleset_hash_{suffix}"),
+        "evaluated_at": payload.get(f"evaluated_at_{suffix}"),
+        "detections": detections, "techniques": list(by_technique.values()),
+    }
 
 
 @app.post("/api/ip/{ip}/disposition")
@@ -488,150 +360,27 @@ def update_ip_disposition(ip: str, payload: dict = Body(...)):
     state = str(payload.get("state") or "").lower()
     if state not in STATES:
         raise HTTPException(400, "Invalid disposition state")
-    conn = connect()
-    try:
-        row = conn.execute("SELECT * FROM ip_observations WHERE ip=?", (address,)).fetchone()
-        profile = conn.execute("SELECT * FROM ip_profiles WHERE ip=?", (address,)).fetchone()
-        label = None
-        if row:
-            item = dict(row)
-            if profile:
-                label = build_classification_snapshot(conn, address).classification.get("label")
-        result = set_disposition(conn, address, state, payload.get("assigned_to"), payload.get("note"), payload.get("actor") or "system", label)
-        return result
-    finally:
-        conn.close()
+    current = StateRepository().get(address)
+    label = current.get("label") if current else None
+    return DispositionRepository().set(
+        address, state, payload.get("assigned_to"), payload.get("note"),
+        payload.get("actor") or "system", label,
+    )
 
 
 @app.get("/api/regions/demand-signal")
 def region_demand_signal(limit: int = 50):
-    """Aggregate observed, likely-legitimate traffic by country.
-
-    This is an analyst signal, not a claim about individual identity or
-    market demand.  It counts good-classified IPs with real requests while
-    excluding privacy/hosting signals, bots, and sensitive probes, then joins
-    the country profile's sourced context.
-    """
+    """Aggregate observed, likely-legitimate traffic by country from PostgreSQL."""
     limit = min(max(limit, 1), 200)
-    conn = connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT p.*, o.first_seen, o.last_seen, o.requests, o.status_4xx,
-                   o.status_5xx, o.unique_paths, o.wp_login_requests,
-                   o.sensitive_probe_requests, o.bot_requests, o.behavior_score,
-                   o.behavior_score_recent, o.recent_requests, o.behavior_evidence_json,
-                   o.behavior_evidence_recent_json
-            FROM ip_profiles p
-            LEFT JOIN ip_observations o ON o.ip = p.ip
-            WHERE p.country_code IS NOT NULL
-            """
-        ).fetchall()
-        # Load the small AI snapshot once. The previous loop reread profile,
-        # observation and history tables repeatedly for every IP.
-        ai_by_ip = {}
-        for ai_row in conn.execute("SELECT * FROM ip_ai_scores").fetchall():
-            ai_item = dict(ai_row)
-            ai_item["ai_evidence"] = decode(ai_item.pop("ai_evidence_json", "[]"))
-            ai_by_ip[ai_item["ip"]] = ai_item
-        region_cache = {}
-        aggregates = {}
-        for raw in rows:
-            item = dict(raw)
-            item["identity_evidence"] = decode(item.pop("identity_evidence_json", "[]"))
-            item["provider_errors"] = decode(item.pop("provider_errors_json", "[]"))
-            item["provider_status"] = decode(item.pop("provider_status_json", "{}"))
-            item["field_sources"] = decode(item.pop("field_sources_json", "{}"))
-            item["reputation"] = decode(item.pop("reputation_json", "[]"))
-            item["evidence"] = decode(item.pop("evidence_json", "[]"))
-            item["sources"] = decode(item.pop("source_json", "[]"))
-            item["behavior_evidence"] = decode(item.pop("behavior_evidence_json", "[]"))
-            code = item["country_code"]
-            if code not in region_cache:
-                region_cache[code] = region_profile(conn, code) or {
-                    "country_code": code,
-                    "country_name": item.get("country") or code,
-                }
-            region = region_cache[code]
-            observation = classification_observation(item)
-            observation["behavior_evidence"] = item.get("behavior_evidence", [])
-            classification = classify_ip(
-                item,
-                observation,
-                region,
-                ai_by_ip.get(item["ip"]),
-            )
-            entry = aggregates.setdefault(code, {
-                "country_code": code,
-                "country_name": region.get("country_name") or item.get("country") or code,
-                "observed_ip_count": 0,
-                "observed_requests": 0,
-                "good_ip_count": 0,
-                "classified_good_ip_count": 0,
-                "good_requests": 0,
-                "watch_ip_count": 0,
-                "bad_ip_count": 0,
-                "unknown_ip_count": 0,
-                "privacy_signal_ip_count": 0,
-                "profile_updated_at": region.get("updated_at"),
-                "economic_indicators": region.get("economic_indicators", {}),
-                "market_components": region.get("market_components", {}),
-                "market_score": region.get("market_score"),
-                "market_level": region.get("market_level", "unknown"),
-                "product_opportunities": region.get("product_opportunities", []),
-                "cultural_context": region.get("cultural_context", []),
-                "conflict_indicators": region.get("conflict_indicators", []),
-                "sources": region.get("sources", []),
-            })
-            requests = int(item.get("requests") or 0)
-            label = classification["label"]
-            entry["observed_ip_count"] += 1
-            entry["observed_requests"] += requests
-            if label == "good":
-                entry["classified_good_ip_count"] += 1
-            else:
-                entry[f"{label}_ip_count"] += 1
-            privacy_signal = any(item.get(field) == 1 for field in ("is_tor", "is_vpn", "is_proxy", "is_hosting"))
-            if privacy_signal:
-                entry["privacy_signal_ip_count"] += 1
-            eligible = (
-                label == "good" and requests > 0 and not privacy_signal
-                and int(item.get("sensitive_probe_requests") or 0) == 0
-                and int(item.get("bot_requests") or 0) == 0
-            )
-            if eligible:
-                entry["good_requests"] += requests
-                entry["good_ip_count"] += 1
-
-        results = []
-        for entry in aggregates.values():
-            total = entry["observed_requests"]
-            good_ips = entry["good_ip_count"]
-            entry["good_traffic_share"] = round(entry["good_requests"] / total, 4) if total else 0
-            entry["signal_level"] = (
-                "high" if entry["good_requests"] >= 500 else
-                "medium" if entry["good_requests"] >= 50 else
-                "low" if entry["good_requests"] > 0 else "none"
-            )
-            entry["product_demand"] = (entry.get("market_components") or {}).get("product_demand")
-            entry["analyst_note"] = "Observed good traffic signal; validate with conversion and customer data before market decisions." if good_ips else "No qualifying good traffic observed in the current window."
-            results.append(entry)
-        results.sort(key=lambda x: (x["good_requests"], x["observed_requests"]), reverse=True)
-        return results[:limit]
-    finally:
-        conn.close()
+    return RegionRepository().demand_signal(limit)
 
 
 @app.get("/api/regions/{country_code}")
 def region_details(country_code: str):
-    conn = connect()
-    try:
-        data = region_profile(conn, country_code.upper())
-        if not data:
-            raise HTTPException(404, "Region profile not found")
-        return data
-    finally:
-        conn.close()
+    data = RegionRepository().get(country_code.upper())
+    if not data:
+        raise HTTPException(404, "Region profile not found")
+    return data
 
 
 @app.get("/api/ips/calibration.csv", response_class=PlainTextResponse)
@@ -647,321 +396,202 @@ def calibration_export():
 @app.get("/api/regions")
 def region_list(limit: int = 50):
     limit = min(max(limit, 1), 200)
-    conn = connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT country_code, country_name, updated_at
-            FROM region_profiles
-            ORDER BY country_name ASC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            profile = region_profile(conn, row["country_code"])
-            if profile:
-                items.append(profile)
-        return items
-    finally:
-        conn.close()
+    return RegionRepository().list(limit=limit)
 
-@app.post("/api/ips/refresh-unknown")
-async def refresh_unknown(limit: int = 500):
-    """Stream local-only enrichment results, highest-request IP first.
-
-    Response format is NDJSON: one JSON object per line. Every IP is committed
-    and yielded immediately after its local lookup finishes. No online provider
-    is called by enrichment.lookup().
-    """
-    limit = min(max(limit, 1), 5000)
-
-    # Select before streaming so the DB read cursor is not held for the whole run.
-    select_conn = connect()
-    rows = select_conn.execute("""
-        SELECT
-          o.ip AS ip,
-          COALESCE(o.requests, 0) AS requests,
-          p.core_enrichment_status,
-          p.country, p.country_code, p.latitude, p.longitude
-        FROM ip_observations o
-        LEFT JOIN ip_profiles p ON p.ip = o.ip
-        WHERE p.ip IS NULL
-           OR p.core_enrichment_status IS NULL
-           OR p.core_enrichment_status != 'complete'
-           OR p.privacy_enrichment_status IS NULL
-           OR p.privacy_enrichment_status != 'complete'
-           OR p.country IS NULL OR p.country_code IS NULL
-           OR p.latitude IS NULL OR p.longitude IS NULL
-        ORDER BY COALESCE(o.requests, 0) DESC, o.ip ASC
-        LIMIT ?
-    """, (limit,)).fetchall()
-    selected = [dict(row) for row in rows]
-    select_conn.close()
-
-    async def generate():
-        yield json.dumps({
-            "type": "start",
-            "selected": len(selected),
-            "mode": "local_only",
-            "order": "requests_desc",
-        }) + "\n"
-
-        conn = connect()
-        complete = partial = failed = processed = 0
-        # Lookups are local disk/mmap reads (see enrichment.py), so several IPs
-        # can genuinely be resolved at the same time instead of strictly one
-        # after another. CHUNK_SIZE also sets how many rows share one
-        # conn.commit(): committing every single IP was forcing a disk sync per
-        # row, which dominated total mapping time far more than the lookups
-        # themselves. Batching commits removes that overhead almost entirely
-        # while still surfacing progress every CHUNK_SIZE rows.
-        CHUNK_SIZE = 12
-        try:
-            for chunk_start in range(0, len(selected), CHUNK_SIZE):
-                chunk = selected[chunk_start:chunk_start + CHUNK_SIZE]
-                started = time.perf_counter()
-
-                # Fire off this chunk's lookups concurrently; order of the
-                # results list matches the order of `chunk` (asyncio.gather
-                # guarantee), so priority order (highest requests first) is
-                # preserved in the stream even though completion order inside
-                # the chunk may vary.
-                results = await asyncio.gather(*[
-                    ensure_profile(conn, row["ip"], refresh=True) for row in chunk
-                ])
-
-                for offset, (row, (data, error)) in enumerate(zip(chunk, results)):
-                    index = chunk_start + offset + 1
-                    ip = row["ip"]
-                    requests = row["requests"]
-                    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-
-                    if error:
-                        failed += 1
-                        payload = {
-                            "type": "ip",
-                            "index": index,
-                            "total": len(selected),
-                            "ip": ip,
-                            "requests": requests,
-                            "status": "failed",
-                            "error": error,
-                            "elapsed_ms": elapsed_ms,
-                        }
-                    else:
-                        processed += 1
-                        status = data.get("core_enrichment_status", "failed")
-                        if status == "complete":
-                            complete += 1
-                        elif status == "partial":
-                            partial += 1
-                        else:
-                            failed += 1
-
-                        payload = {
-                            "type": "ip",
-                            "index": index,
-                            "total": len(selected),
-                            "ip": ip,
-                            "requests": requests,
-                            "status": status,
-                            "country": data.get("country"),
-                            "country_code": data.get("country_code"),
-                            "region": data.get("region"),
-                            "city": data.get("city"),
-                            "latitude": data.get("latitude"),
-                            "longitude": data.get("longitude"),
-                            "asn": data.get("asn"),
-                            "organization": data.get("organization"),
-                            "sources": data.get("sources", []),
-                            "provider_errors": data.get("provider_errors", []),
-                            "elapsed_ms": elapsed_ms,
-                        }
-
-                    # One line becomes visible to curl/browser as soon as this IP finishes.
-                    yield json.dumps(payload, ensure_ascii=False) + "\n"
-
-                # One commit per chunk instead of one per IP.
-                conn.commit()
-
-            yield json.dumps({
-                "type": "done",
-                "selected": len(selected),
-                "processed": processed,
-                "complete": complete,
-                "partial": partial,
-                "failed": failed,
-            }) + "\n"
-        finally:
-            conn.close()
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 @app.get("/api/ips")
-def list_ips(limit: int = 100):
-    conn = connect()
+def list_ips(limit: int = 100, mode: str = Query("live", pattern="^(live|file)$")):
+    bounded = min(max(limit, 1), 5000)
+    result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
+    return [_pg_item(row) for row in result["rows"]]
+
+
+@app.get("/api/ips/page")
+def ip_page(
+    page: int = 1,
+    page_size: int = 50,
+    sort: str = "threat_signal_score",
+    direction: str = "desc",
+    q: str | None = None,
+    privacy: str | None = None,
+    classification: str | None = None,
+    disposition: str | None = None,
+    mode: str = Query("live", pattern="^(live|file)$"),
+):
+    page = max(1, int(page))
+    page_size = min(50, max(1, int(page_size)))
+    result = StateRepository().page(page, page_size, sort, direction, q, privacy, classification, disposition)
+    return {
+        "items": [_pg_item(row) for row in result["rows"]], "page": page, "page_size": page_size,
+        "total_items": result["total"], "total_pages": (result["total"] + page_size - 1) // page_size,
+        "change_cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/ips/summary")
+def ip_summary(mode: str = Query("live", pattern="^(live|file)$")):
+    summary = StateRepository().summary()
+    summary["priority_items"] = _pg_items(summary.pop("priority_ips"))
+    summary["ai"] = {"scored": 0, "flagged": 0, "coverage": 0}
+    summary["snapshot_at"] = datetime.now(timezone.utc).isoformat()
+    return summary
+
+
+def _pg_item(row: dict) -> dict:
+    """Build the dashboard contract from the PostgreSQL state read model."""
+    observation = dict(row.get("observation_payload") or {})
+    observation.setdefault("recent_behavior_score", observation.get("behavior_score", 0))
+    observation.setdefault("behavior_evidence", observation.get("recent_behavior_evidence", []))
+    profile = {key: value for key, value in row.items() if key not in {"observation_payload", "label", "classification_score", "classification_confidence", "disposition"}}
+    profile["ip"] = str(row.get("ip") or observation.get("ip") or profile.get("ip"))
+    for key in ("identity_evidence", "reputation", "provider_errors", "provider_status", "field_sources", "evidence", "sources"):
+        if profile.get(key) is None:
+            profile[key] = [] if key in {"identity_evidence", "reputation", "provider_errors", "evidence", "sources"} else {}
+    
+    # Region context is intentionally excluded from the realtime IP hot path.
+    classification = classify_ip(profile, observation, {}, None)
+    if row.get("label"):
+        classification["label"] = row["label"]
+        classification["score"] = int(row.get("classification_score") or classification["score"])
+        classification["confidence"] = int(row.get("classification_confidence") or classification.get("confidence", 0))
+    
+    item = {
+        **profile,
+        "ip": profile["ip"],
+        "observation": observation,
+        "classification": classification,
+        "threat_signal_score": int(classification.get("score", 0)),
+        "threat_signal_label": classification.get("label", "unknown"),
+        "disposition": {
+            "state": row.get("disposition") or "new",
+            "suggested_state": row.get("suggested_state"),
+            "assigned_to": row.get("assigned_to"),
+            "note": row.get("note"),
+            "updated_at": row.get("disposition_updated_at").isoformat() if hasattr(row.get("disposition_updated_at"), "isoformat") else row.get("disposition_updated_at"),
+            "history": row.get("disposition_history") or [],
+        },
+        "profile_risk_score": int(profile.get("risk_score") or 0),
+
+        "effective_risk_score": int(classification.get("score", 0)),
+        "effective_risk_level": classification.get("label", "unknown"),
+        "requests": int(observation.get("requests") or 0),
+        "status_4xx": int(observation.get("status_4xx") or 0),
+        "status_5xx": int(observation.get("status_5xx") or 0),
+        "unique_paths": int(observation.get("unique_paths") or 0),
+        "first_seen": observation.get("first_seen"),
+        "last_seen": observation.get("last_seen"),
+    }
+    received_at = observation.get("pipeline_received_at")
+    state_ready_at = observation.get("pipeline_state_ready_at")
+    profile_ready_at = row.get("updated_at")
+    ready_candidates = [value for value in (state_ready_at, profile_ready_at) if value]
+    ready_at = max(ready_candidates, key=lambda value: _as_utc(value)) if ready_candidates else None
+    serialized_at = datetime.now(timezone.utc)
+    item["pipeline"] = {
+        "received_at": _iso_value(received_at),
+        "state_ready_at": _iso_value(state_ready_at),
+        "profile_ready_at": _iso_value(profile_ready_at),
+        "ready_at": _iso_value(ready_at),
+        "api_serialized_at": serialized_at.isoformat(),
+        "backend_ready_ms": _elapsed_ms(received_at, ready_at),
+    }
+    return item
+
+
+def _as_utc(value) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_value(value) -> str | None:
+    if not value:
+        return None
     try:
-        return _build_ip_items(conn)[:min(max(limit, 1), 500)]
-    finally:
-        conn.close()
+        return _as_utc(value).isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
-def _ip_rows(conn, only_ips: set[str] | None = None):
-    first_where = ""
-    second_where = "WHERE o.ip IS NULL"
-    params: list[str] = []
-    if only_ips:
-        placeholders = ",".join("?" for _ in only_ips)
-        values = sorted(only_ips)
-        first_where = f"WHERE o.ip IN ({placeholders})"
-        second_where = f"WHERE o.ip IS NULL AND p.ip IN ({placeholders})"
-        params.extend(values)
-        params.extend(values)
-    return conn.execute(f"""
-        SELECT
-          COALESCE(o.ip, p.ip) AS ip,
-          p.country, p.country_code, p.city, p.region, p.latitude, p.longitude,
-          p.timezone, p.asn, p.organization, p.isp,
-          p.network_type, p.ip_prefix, COALESCE(p.organization_confidence, 0) AS organization_confidence,
-          p.abuse_score, p.abuse_reports,
-          p.is_hosting, p.is_vpn, p.is_proxy, p.is_tor,
-          p.enrichment_status, p.core_enrichment_status, p.privacy_enrichment_status, p.threat_enrichment_status, p.next_retry_at,
-          p.provider_status_json, p.field_sources_json,
-          p.network_location_json, COALESCE(p.location_confidence, 0) AS location_confidence,
-          COALESCE(p.location_disputed, 0) AS location_disputed, p.location_scope,
-          COALESCE(p.risk_score, 0) AS profile_risk_score,
-          COALESCE(o.behavior_score, 0) AS behavior_score,
-          COALESCE(o.behavior_score_recent, 0) AS behavior_score_recent,
-          COALESCE(o.requests, 0) AS requests,
-          COALESCE(o.recent_requests, 0) AS recent_requests,
-          COALESCE(o.recent_sensitive_probe_requests, 0) AS recent_sensitive_probe_requests,
-          o.recent_first_seen AS recent_first_seen,
-          o.recent_updated_at AS recent_updated_at,
-          COALESCE(o.status_4xx, 0) AS status_4xx,
-          COALESCE(o.status_5xx, 0) AS status_5xx,
-          COALESCE(o.unique_paths, 0) AS unique_paths,
-          COALESCE(o.wp_login_requests, 0) AS wp_login_requests,
-          COALESCE(o.sensitive_probe_requests, 0) AS sensitive_probe_requests,
-          o.first_seen, o.last_seen, p.fetched_at
-        FROM ip_observations o
-        LEFT JOIN ip_profiles p ON p.ip = o.ip
-        {first_where}
-        UNION
-        SELECT
-          p.ip, p.country, p.country_code, p.city, p.region, p.latitude, p.longitude,
-          p.timezone, p.asn, p.organization, p.isp,
-          p.network_type, p.ip_prefix, p.organization_confidence, p.abuse_score, p.abuse_reports,
-          p.is_hosting, p.is_vpn, p.is_proxy, p.is_tor,
-          p.enrichment_status, p.core_enrichment_status, p.privacy_enrichment_status, p.threat_enrichment_status, p.next_retry_at,
-          p.provider_status_json, p.field_sources_json,
-          p.network_location_json, COALESCE(p.location_confidence, 0), COALESCE(p.location_disputed, 0), p.location_scope,
-          p.risk_score, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, p.fetched_at
-        FROM ip_profiles p
-        LEFT JOIN ip_observations o ON o.ip = p.ip
-        {second_where}
-        """, params).fetchall()
+def _elapsed_ms(start, end) -> float | None:
+    if not start or not end:
+        return None
+    try:
+        return round(max(0.0, (_as_utc(end) - _as_utc(start)).total_seconds() * 1000), 2)
+    except (TypeError, ValueError):
+        return None
 
 
-def _build_ip_items(conn, only_ips: set[str] | None = None):
-    rows = _ip_rows(conn, only_ips)
-    items = []
-    for row in rows:
-        item = dict(row)
-        item["provider_status"] = decode(item.pop("provider_status_json"))
-        item["field_sources"] = decode(item.pop("field_sources_json"))
-        item["network_location"] = decode(item.pop("network_location_json"))
-        item["location_disputed"] = bool(item.get("location_disputed"))
-        item["effective_risk_score"], item["effective_risk_level"] = effective_risk(item["profile_risk_score"], item["behavior_score"])
-        # Keep Overview classification identical to IP Detail.  The detail
-        # endpoint classifies from the durable observation totals; passing the
-        # empty recent window here made the same IP appear as threat 0.
-        observation = {
-            "behavior_score": item["behavior_score"],
-            "requests": item["requests"],
-            "status_4xx": item["status_4xx"],
-            "status_5xx": item["status_5xx"],
-            "unique_paths": item["unique_paths"],
-            "wp_login_requests": item["wp_login_requests"],
-            "sensitive_probe_requests": item["sensitive_probe_requests"],
-        }
-        attach_region_and_classification(conn, item, observation)
-        items.append(item)
-    return sorted(items, key=lambda item: (item["threat_signal_score"], item["requests"]), reverse=True)
-
-
-def _change_cursor(conn) -> int:
-    return int(conn.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM ip_change_log").fetchone()["seq"])
+def _pg_items(ips: list[str] | set[str]) -> list[dict]:
+    repo = StateRepository()
+    return [_pg_item(row) for row in repo.get_many(ips)]
 
 
 @app.get("/api/ips/snapshot")
-def ip_snapshot(limit: int = 500):
-    conn = connect()
-    try:
-        return {
-            "items": _build_ip_items(conn)[:min(max(limit, 1), 500)],
-            "cursor": _change_cursor(conn),
-            "snapshot_at": datetime.now(timezone.utc).isoformat(),
-        }
-    finally:
-        conn.close()
+def ip_snapshot(limit: int = 500, mode: str = Query("live", pattern="^(live|file)$")):
+    bounded = min(max(limit, 1), 500)
+    result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
+    return {"items": [_pg_item(row) for row in result["rows"]], "cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/ips/updates")
-def ip_updates(after: int = 0, limit: int = 500):
+def ip_updates(after: int = 0, limit: int = 500, mode: str = Query("live", pattern="^(live|file)$")):
     limit = min(max(limit, 1), 500)
-    conn = connect()
-    try:
-        current = _change_cursor(conn)
-        oldest_row = conn.execute("SELECT MIN(seq) AS seq FROM ip_change_log").fetchone()
-        oldest = int(oldest_row["seq"] or 0)
-        if after and oldest and after < oldest - 1:
-            return {"items": [], "cursor": current, "has_more": False, "reset_required": True}
-        changed = conn.execute(
-            "SELECT seq, ip FROM ip_change_log WHERE seq > ? ORDER BY seq LIMIT ?",
-            (after, limit + 1),
-        ).fetchall()
-        has_more = len(changed) > limit
-        delivered = changed[:limit]
-        ips = {row["ip"] for row in delivered}
-        next_cursor = int(delivered[-1]["seq"]) if has_more and delivered else current
-        return {
-            "items": _build_ip_items(conn, ips),
-            "cursor": next_cursor,
-            "has_more": has_more,
-            "reset_required": False,
-        }
-    finally:
-        conn.close()
+    result = StateRepository().changes(after, limit)
+    if result.get("reset_required"):
+        return {"items": [], "cursor": result["current"], "has_more": False, "reset_required": True, "transitions": []}
+    rows = result["rows"]
+    items = _pg_items({str(row["ip"]) for row in rows})
+    return {
+        "items": items,
+        "transitions": [row for row in rows if row["reason"] == "classification"],
+        "cursor": int(rows[-1]["seq"]) if result.get("has_more") and rows else result["current"],
+        "has_more": bool(result.get("has_more")), "reset_required": False,
+    }
 
 
 @app.get("/api/collector/status")
 def collector_status():
     payload = collector.status()
-    conn = connect()
-    try:
-        row = conn.execute("SELECT * FROM ai_model_state WHERE model_key = 'isolation_forest_v1'").fetchone()
-        if row:
-            payload.update({
-                "ai_model_version": row["model_version"],
-                "ai_trained_at": row["trained_at"],
-                "ai_train_status": row["last_train_status"],
-                "ai_training_windows": row["training_windows"],
-                "ai_last_score_at": row["last_score_at"],
-                "ai_score_status": row["last_score_status"],
-                "ai_last_error": row["last_train_error"],
-            })
-        return payload
-    finally:
-        conn.close()
+    payload["ai_state_backend"] = "postgresql_live_only"
+    return payload
+
+
+@app.post("/api/ips/refresh-unknown")
+async def refresh_unknown(limit: int = 500, mode: str = Query("live", pattern="^(live|file)$")):
+    limit = min(max(limit, 1), 5000)
+    with postgres_store.transaction() as pg_conn:
+        rows = pg_conn.execute("""SELECT host(o.ip) AS ip
+            FROM ip_observations_state o LEFT JOIN ip_profiles p ON p.ip=o.ip
+            WHERE p.ip IS NULL OR p.enrichment_status IS DISTINCT FROM 'complete'
+               OR p.country IS NULL OR p.country_code IS NULL
+            ORDER BY COALESCE(NULLIF(o.payload->>'requests','')::bigint,0) DESC, o.ip ASC
+            LIMIT %s""", (limit,)).fetchall()
+    selected = [str(row["ip"]) for row in rows]
+
+    async def generate_split():
+        yield json.dumps({"type": "start", "selected": len(selected), "mode": "live", "order": "requests_desc"}) + "\n"
+        processed = complete = partial = failed = 0
+        for ip in selected:
+            data, error = await ensure_profile_postgres(ip, refresh=True)
+            processed += 1
+            if data and not error:
+                complete += 1
+                status = "complete"
+            elif data:
+                partial += 1
+                status = "partial"
+            else:
+                failed += 1
+                status = "failed"
+            yield json.dumps({"type": "item", "ip": ip, "status": status, "error": error}) + "\n"
+        yield json.dumps({"type": "done", "selected": len(selected), "processed": processed, "complete": complete, "partial": partial, "failed": failed}) + "\n"
+
+    return StreamingResponse(generate_split(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/stream")

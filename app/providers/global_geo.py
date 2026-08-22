@@ -106,7 +106,12 @@ def parse_geofeed(payload: str) -> list[dict]:
             network = str(ipaddress.ip_network(network, strict=False))
         except ValueError:
             continue
-        rows.append({"network": network, "country_code": country})
+        item = {"network": network, "country_code": country}
+        if len(row) > 2 and row[2].strip():
+            item["region"] = row[2].strip()
+        if len(row) > 3 and row[3].strip():
+            item["city"] = row[3].strip()
+        rows.append(item)
     return rows
 
 

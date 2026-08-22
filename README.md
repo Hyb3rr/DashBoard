@@ -21,9 +21,9 @@ traffic, run exploit tools or identify a person behind an IP address.
                          |
           +--------------+---------------+
           |                              |
-       SQLite                    background workers
- profiles, buckets,             WebSocket, AI, Intel,
- geo, indicators                classification, Telegram
+      PostgreSQL                 background workers
+ state, profiles,               WebSocket, Intel,
+ classification, alerts         classification, Telegram
           |                              |
           +--------------+---------------+
                          |
@@ -74,7 +74,8 @@ app/
 └── tools/                      Refresh, scheduler and calibration commands
 
 data/
-├── hub.db                      SQLite runtime database
+├── postgres/                   PostgreSQL runtime data
+├── clickhouse/                 ClickHouse runtime data
 ├── models/                     Last-known-good AI artifacts
 ├── geo/                        RIR/geofeed/BGP caches
 ├── intel/                      VPN/proxy/threat-feed caches
@@ -90,9 +91,9 @@ Core module responsibilities:
 
 | Module                             | Responsibility                                            |
 | ---------------------------------- | --------------------------------------------------------- |
-| core/db.py                         | SQLite schema, migrations, indexes and JSON serialization |
-| core/logs.py                       | Apache parsing, file import and observation rebuild       |
-| core/buckets.py                    | Minute traffic and per-IP path aggregate upserts          |
+| db/postgres.py                     | PostgreSQL connection and schema management              |
+| db/repositories.py                 | PostgreSQL state repositories                            |
+| db/clickhouse.py                   | ClickHouse traffic storage and analytics                 |
 | core/enrichment.py                 | Local-only profile and intelligence lookup                |
 | core/intelligence.py               | Auditable A–E threat scoring                              |
 | core/geo_resolver.py               | Global network-location resolution                        |
@@ -112,7 +113,7 @@ placed in core, providers or services instead of duplicated in route handlers.
 ### 1.3.1 Ingestion
 
 The WebSocket collector and Apache file importer use the same normalized event
-pipeline:
+pipeline, while retaining a distinct source namespace:
 
 ~~~text
 source input
@@ -126,7 +127,21 @@ source input
   -> publish realtime update
 ~~~
 
-The collector persists its checkpoint in log_sources. Reconnects resume from the last committed offset, and duplicate offsets are ignored.
+WebSocket events use sources such as `ws:azure-access`. The collector persists
+its checkpoint in PostgreSQL. Reconnects resume from the last committed offset,
+and duplicate offsets are ignored.
+
+The collector batches pending lines in memory and flushes them when either
+`LOG_WS_BATCH_SIZE` is reached or `LOG_WS_FLUSH_MS` elapses (whichever comes
+first). The dashboard realtime event is published only after the batch commits;
+this keeps small changes visible without writing every individual log line.
+The dashboard also synchronizes the durable change cursor every second; SSE is
+an acceleration signal, not the sole delivery mechanism. A missed or
+cross-process SSE event is therefore recovered on the next cursor sync without
+requiring a page reload.
+Every committed traffic batch appends a `traffic` change entry, even when the
+classification label stays the same, so request-count and last-seen updates
+advance the cursor too.
 
 ### 1.3.2 Local enrichment
 
@@ -169,7 +184,7 @@ due-source trigger
   -> conditional download
   -> validate payload
   -> atomic cache replacement
-  -> parse and upsert SQLite snapshot
+  -> parse and upsert PostgreSQL/ClickHouse state
   -> write intel_source_status
   -> release lock
 ~~~
@@ -308,7 +323,7 @@ The investigation page provides:
 - Identity, ASN, organization and first/last seen context.
 - Network location and location-confidence explanation.
 - VPN, proxy, Tor and hosting signals.
-- A–F threat-score explanation and evidence.
+- A–E threat-score explanation and evidence.
 - IP traffic timeline with start/end controls.
 - Status codes, top paths and recent raw requests.
 - Provider status and external investigation pivots.
@@ -344,6 +359,9 @@ POST /api/ip/{ip}/disposition
 
 The IP traffic endpoint returns zero-filled buckets through the requested end
 time. Recent raw requests are bounded to avoid loading full history.
+
+`GET /api/analytics/traffic` reads live traffic from ClickHouse and accepts the
+existing time-window and filter parameters.
 
 ### 1.6.3 Dashboard and realtime state
 
@@ -390,7 +408,7 @@ cp .env.example .env
 | VPN/datacenter | AZ0_VPN_MANIFEST_URL, X4B_VPN_LIST_URL, X4B_DATACENTER_LIST_URL |
 | FireHOL | FIREHOL_LISTS, FIREHOL_CACHE_DIR |
 | Global geo | GEO_RIR_REFRESH_ENABLED, GEOFEED_SOURCES, RIR_*_URL, GEO_PYASN_DB_PATH |
-| Tor | TOR_EXIT_LIST_PATH, TOR_EXIT_LIST_URL |
+| Tor | TOR_EXIT_LIST_PATH, TOR_EXIT_LIST_URL, TOR_EXIT_LIST_IP1_URL, TOR_EXIT_LIST_REFRESH_HOURS |
 | Telegram | TELEGRAM_ALERTS_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID |
 
 Keep secrets in .env or a deployment secret manager. Never commit API keys,
@@ -405,8 +423,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ~~~
 
-Open http://127.0.0.1:8000/. SQLite is created automatically at data/hub.db.
-Migrations are serialized and connections use WAL mode with a busy timeout.
+Open http://127.0.0.1:8000/. PostgreSQL and ClickHouse must be available.
 
 ### 1.8.1 Refresh tools
 
@@ -446,3 +463,48 @@ detection windows, classification consistency and Telegram outbox behavior.
 
 The system supports analyst review and investigation; it is not intended to make
 unreviewed claims about people, countries or organizations.
+
+## Split storage (native local test)
+
+The repository now includes the split-storage foundation:
+
+- ClickHouse: raw HTTP events and traffic aggregation.
+- PostgreSQL: dataset/state schema for profiles, observations, classification,
+  changes and alerts.
+- Split storage is the only runtime backend.
+
+Native smoke-test setup (no Docker):
+
+```bash
+initdb -D data/postgres --auth=trust
+pg_ctl -D data/postgres -l data/postgres.log -o "-p 55432" start
+createdb -h 127.0.0.1 -p 55432 ipintel
+psql -h 127.0.0.1 -p 55432 -d ipintel -f infra/postgres/001_initial.sql
+clickhouse server -- --path="$PWD/data/clickhouse" --http_port=8123 --tcp_port=9001
+```
+
+For local development, start both native services and the API with one command:
+
+```bash
+./scripts/dev_run.sh
+```
+
+The script starts PostgreSQL on port `55432`, starts ClickHouse on port `8123` if
+not already running, then launches Uvicorn. `Ctrl-C` stops the API and only the
+ClickHouse process started by the script.
+
+Set these runtime values before enabling split mode:
+
+```env
+DATA_BACKEND=split
+POSTGRES_DSN=postgresql://<user>@127.0.0.1:55432/ipintel
+CLICKHOUSE_HOST=127.0.0.1
+CLICKHOUSE_PORT=8123
+CLICKHOUSE_DATABASE=ipintel
+```
+
+`/health` reports both storage connections. In split mode, newly ingested live
+raw events are dual-written to ClickHouse before the local offset advances, and
+`/api/analytics/traffic` reads its aggregate from ClickHouse. The remaining
+profile/classification endpoints are still being moved to PostgreSQL; this is
+intentional until repository parity tests pass.

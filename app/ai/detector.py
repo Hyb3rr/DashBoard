@@ -14,7 +14,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 from ..config.settings import AI_MODEL_PATH, PROJECT_DIR
-from ..core.db import decode, encode
+from ..core.json_utils import decode, encode
 from ..core.change_feed import append_ip_changes
 from .features import FEATURE_COLUMNS, build_window_features
 
