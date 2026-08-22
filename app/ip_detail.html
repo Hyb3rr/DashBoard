@@ -277,7 +277,7 @@ html[data-theme="light"]{
 <script>
 const initialTheme=localStorage.getItem('sentinel-theme')||'dark';
 document.documentElement.dataset.theme=initialTheme;
-const API_BASE=(location.protocol==='file:'||!['127.0.0.1:8000','localhost:8000'].includes(location.host))?'http://127.0.0.1:8000':'';
+const API_BASE='';
 const mode='live';
 const apiUrl=path=>{if(path.startsWith('/api/')&&!/[?&]mode=/.test(path))path+=`${path.includes('?')?'&':'?'}mode=${mode}`;return API_BASE+path};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

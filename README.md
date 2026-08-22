@@ -108,12 +108,32 @@ Core module responsibilities:
 app/main.py is the current HTTP composition point. New domain logic should be
 placed in core, providers or services instead of duplicated in route handlers.
 
+HTTP routes are grouped by domain in `app/routers/`. The first extracted
+routers cover health, traffic, IP state/detail, regions, realtime and pages;
+`app/main.py` keeps application setup, lifespan and router composition.
+
+PostgreSQL IP read-model routes now live in `app/routers/ip_state.py`.
+
+Dashboard presentation assets live in `app/static/dashboard.css` and
+`app/static/dashboard.js`; `dashboard.html` remains the page shell. This is
+asset extraction only: layout, filters, charts and realtime behavior stay the
+same.
+
+`/health` includes process-local observability counters, gauges and batch
+latencies. Ingest and ClickHouse metrics update per committed batch; queue and
+reconnect gauges update on status checks. No database write or lock occurs per
+event for metrics.
+
 ## 1.3 3. Runtime pipeline
 
 ### 1.3.1 Ingestion
 
-The WebSocket collector and Apache file importer use the same normalized event
-pipeline, while retaining a distinct source namespace:
+The WebSocket collector is the live event source and uses one normalized event
+pipeline. The dashboard is served by FastAPI and has no upload, file-source or
+offline mode:
+
+All traffic, IP, snapshot, update and refresh APIs are live-only. They do not
+accept file-mode parameters or select a file dataset.
 
 ~~~text
 source input
@@ -193,6 +213,15 @@ Sources include AZ0 VPN, X4B VPN/datacenter, Cloudflare, Device & Browser
 Info, selected FireHOL lists, RIR files and configured geofeeds. A failed
 optional source does not stop the API or other sources. FireHOL is threat
 evidence and does not directly become behavior points.
+
+All live privacy and threat provider refreshes persist through PostgreSQL
+(`privacy_networks`, `privacy_network_history` and `threat_indicators`). Provider
+adapters must not open SQLite or use SQLite-specific SQL. Feed caches remain
+local files; they are input snapshots, not application state.
+
+AI model metadata and per-IP anomaly scores also persist in PostgreSQL
+(`ai_model_state` and `ip_ai_scores`). The model artifact remains an atomic local
+file snapshot; training and scoring state do not use SQLite.
 
 Manual refresh:
 
@@ -446,7 +475,7 @@ python -m compileall -q app
 git diff --check
 ~~~
 
-Tests cover migrations, file/WebSocket replay consistency, offset idempotency,
+Tests cover migrations, live replay consistency, offset idempotency,
 traffic zero-fill, aggregate path updates, local-only enrichment, global geo,
 detection windows, classification consistency and Telegram outbox behavior.
 
@@ -469,7 +498,7 @@ unreviewed claims about people, countries or organizations.
 The repository now includes the split-storage foundation:
 
 - ClickHouse: raw HTTP events and traffic aggregation.
-- PostgreSQL: dataset/state schema for profiles, observations, classification,
+- PostgreSQL: live state schema for profiles, observations, classification,
   changes and alerts.
 - Split storage is the only runtime backend.
 
@@ -504,7 +533,6 @@ CLICKHOUSE_DATABASE=ipintel
 ```
 
 `/health` reports both storage connections. In split mode, newly ingested live
-raw events are dual-written to ClickHouse before the local offset advances, and
-`/api/analytics/traffic` reads its aggregate from ClickHouse. The remaining
-profile/classification endpoints are still being moved to PostgreSQL; this is
-intentional until repository parity tests pass.
+raw events are written to ClickHouse before the local offset advances, while
+mutable profile, classification and checkpoint state stays in PostgreSQL.
+`/api/analytics/traffic` reads its aggregate from ClickHouse.

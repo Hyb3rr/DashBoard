@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import joblib
 import pandas as pd
+from psycopg.types.json import Jsonb
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
@@ -117,16 +118,36 @@ def load_model_bundle() -> dict[str, Any] | None:
 
 
 def _state(conn):
-    row = conn.execute("SELECT * FROM ai_model_state WHERE model_key = ?", (MODEL_KEY,)).fetchone()
+    row = conn.execute("SELECT * FROM ai_model_state WHERE model_key = %s", (MODEL_KEY,)).fetchone()
     if row:
         return row
     now = _iso(_utc_now())
     conn.execute(
-        "INSERT INTO ai_model_state (model_key, updated_at) VALUES (?, ?)",
+        "INSERT INTO ai_model_state (model_key, updated_at) VALUES (%s, %s)",
         (MODEL_KEY, now),
     )
     conn.commit()
-    return conn.execute("SELECT * FROM ai_model_state WHERE model_key = ?", (MODEL_KEY,)).fetchone()
+    return conn.execute("SELECT * FROM ai_model_state WHERE model_key = %s", (MODEL_KEY,)).fetchone()
+
+
+def _feature_frame(conn, start: datetime, end: datetime, ips: list[str] | None = None) -> pd.DataFrame:
+    sql = """SELECT host(f.ip) AS ip, f.bucket_minute, f.requests,
+                     COALESCE(p.unique_paths_approx, 0) AS unique_paths_approx,
+                     f.status_404, f.status_403, f.status_5xx, f.post_requests,
+                     f.sensitive_hits, f.wp_login_hits, f.bytes_sum
+              FROM ip_minute_features f
+              LEFT JOIN (
+                SELECT dataset_id, ip, bucket_minute, COUNT(*) AS unique_paths_approx
+                FROM ip_minute_path_seen
+                GROUP BY dataset_id, ip, bucket_minute
+              ) p ON p.dataset_id=f.dataset_id AND p.ip=f.ip AND p.bucket_minute=f.bucket_minute
+              WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute < %s"""
+    params: list[Any] = ["live", start, end]
+    if ips is not None:
+        sql += " AND ip=ANY(%s::inet[])"
+        params.append(ips)
+    rows = conn.execute(sql, params).fetchall()
+    return build_window_features([dict(row) for row in rows])
 
 
 def train_model(conn, fit_executor=None) -> dict[str, Any]:
@@ -137,11 +158,11 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
     start = end - timedelta(hours=_env_int("LOG_WS_AI_TRAIN_LOOKBACK_HOURS", DEFAULT_TRAIN_LOOKBACK_HOURS))
     base = {"model_mode": MODEL_MODE, "status": "failed", "model_version": None}
     try:
-        frame = build_window_features(conn, start, end)
+        frame = _feature_frame(conn, start, end)
         if len(frame) < MIN_WINDOWS:
             conn.execute(
-                """UPDATE ai_model_state SET last_train_status=?, last_train_error=?, updated_at=?
-                   WHERE model_key=?""",
+                """UPDATE ai_model_state SET last_train_status=%s, last_train_error=%s, updated_at=%s
+                   WHERE model_key=%s""",
                 ("insufficient_data", f"{len(frame)} windows; need {MIN_WINDOWS}", _iso(now), MODEL_KEY),
             )
             conn.commit()
@@ -159,9 +180,9 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
             bundle = fit_executor.submit(_fit_model_frame, frame, metadata).result()
         _atomic_save(bundle, model_path())
         conn.execute(
-            """UPDATE ai_model_state SET model_version=?, trained_at=?, training_start=?, training_end=?,
-               training_windows=?, training_ips=?, training_decision_floor=?, last_train_status=?,
-               last_train_error=NULL, updated_at=? WHERE model_key=?""",
+            """UPDATE ai_model_state SET model_version=%s, trained_at=%s, training_start=%s, training_end=%s,
+               training_windows=%s, training_ips=%s, training_decision_floor=%s, last_train_status=%s,
+               last_train_error=NULL, updated_at=%s WHERE model_key=%s""",
             (
                 bundle["model_version"], bundle["trained_at"], bundle["training_start"], bundle["training_end"],
                 bundle["training_windows"], bundle["training_ips"], bundle["training_decision_floor"],
@@ -174,7 +195,7 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
         conn.rollback()
         try:
             conn.execute(
-                "UPDATE ai_model_state SET last_train_status=?, last_train_error=?, updated_at=? WHERE model_key=?",
+                "UPDATE ai_model_state SET last_train_status=%s, last_train_error=%s, updated_at=%s WHERE model_key=%s",
                 ("failed", f"{type(exc).__name__}: {exc}"[:240], _iso(now), MODEL_KEY),
             )
             conn.commit()
@@ -211,13 +232,13 @@ def expire_inactive_scores(conn, now: datetime | None = None) -> int:
     now = now or _utc_now()
     cutoff = now - timedelta(hours=_env_int("LOG_WS_AI_EXPIRE_HOURS", DEFAULT_EXPIRE_HOURS))
     rows = conn.execute(
-        "SELECT ip, ai_anomaly_score FROM ip_ai_scores WHERE last_window_at IS NOT NULL AND last_window_at < ? AND score_reason != 'inactivity_expired'",
+        "SELECT ip, ai_anomaly_score FROM ip_ai_scores WHERE last_window_at IS NOT NULL AND last_window_at < %s AND score_reason != 'inactivity_expired'",
         (_iso(cutoff),),
     ).fetchall()
     for row in rows:
         conn.execute(
-            """UPDATE ip_ai_scores SET previous_ai_anomaly_score=?, score_delta=?, ai_anomaly_score=0,
-               anomalous_windows=0, score_reason='inactivity_expired', scored_at=? WHERE ip=?""",
+            """UPDATE ip_ai_scores SET previous_ai_anomaly_score=%s, score_delta=%s, ai_anomaly_score=0,
+               anomalous_windows=0, score_reason='inactivity_expired', scored_at=%s WHERE ip=%s""",
             (row["ai_anomaly_score"], -int(row["ai_anomaly_score"] or 0), _iso(now), row["ip"]),
         )
         append_ip_changes(conn, (row["ip"],), "ai", _iso(now))
@@ -243,42 +264,34 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
 
     state = _state(conn)
     cursor = int(state["last_scored_event_id"] or 0)
-    max_event = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM events").fetchone()["id"]
+    max_event = 0
     recent_cutoff = _iso(now - timedelta(minutes=10))
     if force_full:
         ip_rows = conn.execute(
-            "SELECT DISTINCT ip FROM ip_time_buckets WHERE bucket_minute >= ? AND bucket_minute < ?",
-            (_iso(start), _iso(end)),
+            "SELECT DISTINCT host(ip) AS ip FROM ip_minute_features WHERE dataset_id=%s AND bucket_minute >= %s AND bucket_minute < %s",
+            ("live", _iso(start), _iso(end)),
         ).fetchall()
     else:
         ip_rows = conn.execute(
-            """SELECT DISTINCT ip FROM ip_time_buckets
-               WHERE bucket_minute >= ? AND bucket_minute < ?""",
-            (recent_cutoff, _iso(end)),
+            """SELECT DISTINCT host(ip) AS ip FROM ip_minute_features
+               WHERE dataset_id=%s AND bucket_minute >= %s AND bucket_minute < %s""",
+            ("live", recent_cutoff, _iso(end)),
         ).fetchall()
-    if not ip_rows:
-        if force_full:
-            ip_rows = conn.execute("SELECT DISTINCT src_ip AS ip FROM events WHERE timestamp >= ? AND timestamp < ?", (_iso(start), _iso(end))).fetchall()
-        else:
-            ip_rows = conn.execute(
-                "SELECT DISTINCT src_ip AS ip FROM events WHERE id > ? OR (timestamp >= ? AND timestamp < ?)",
-                (cursor, recent_cutoff, _iso(end)),
-            ).fetchall()
     ips = [row["ip"] for row in ip_rows]
     expired = expire_inactive_scores(conn, now)
     if not ips:
         _trim_change_log(conn)
         conn.execute(
-            "UPDATE ai_model_state SET last_scored_event_id=?, last_score_at=?, last_score_status=?, updated_at=? WHERE model_key=?",
+            "UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s WHERE model_key=%s",
             (max_event, _iso(now), "scored", _iso(now), MODEL_KEY),
         )
         conn.commit()
         return {**base, "status": "scored", "ips": 0, "windows": 0, "anomalous_windows": 0, "expired": expired, "changed_ips": expired, "cursor": max_event}
 
-    frame = build_window_features(conn, start, end, ips)
+    frame = _feature_frame(conn, start, end, ips)
     if frame.empty:
         _trim_change_log(conn)
-        conn.execute("UPDATE ai_model_state SET last_scored_event_id=?, last_score_at=?, last_score_status=?, updated_at=? WHERE model_key=?", (max_event, _iso(now), "scored", _iso(now), MODEL_KEY))
+        conn.execute("UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s WHERE model_key=%s", (max_event, _iso(now), "scored", _iso(now), MODEL_KEY))
         conn.commit()
         return {**base, "status": "scored", "ips": len(ips), "windows": 0, "anomalous_windows": 0, "expired": expired, "changed_ips": expired, "cursor": max_event}
 
@@ -294,7 +307,7 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
     changed = 0
     anomaly_count = int(frame["is_anomaly"].sum())
     for ip, group in frame.groupby("ip", sort=True):
-        previous = conn.execute("SELECT * FROM ip_ai_scores WHERE ip = ?", (ip,)).fetchone()
+        previous = conn.execute("SELECT * FROM ip_ai_scores WHERE ip = %s", (ip,)).fetchone()
         previous_score = int(previous["ai_anomaly_score"] or 0) if previous else 0
         previous_map = _previous_evidence(previous["ai_evidence_json"] if previous else "[]")
         anomalies = group[group["is_anomaly"]].sort_values(["decision", "window_start"], ascending=[True, True])
@@ -322,13 +335,21 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
         last_window = group["window_start"].max().isoformat()
         delta = score - previous_score
         old_tuple = tuple(previous[column] for column in ("ai_anomaly_score", "anomalous_windows", "windows_seen", "score_reason", "ai_evidence_json")) if previous else None
-        new_tuple = (score, int(len(anomalies)), int(len(group)), reason, encode(evidence))
+        new_tuple = (score, int(len(anomalies)), int(len(group)), reason, Jsonb(evidence))
         conn.execute(
-            """INSERT OR REPLACE INTO ip_ai_scores
+            """INSERT INTO ip_ai_scores
               (ip,windows_seen,anomalous_windows,ai_anomaly_score,ai_evidence_json,model_mode,scored_at,
                confidence,confidence_level,previous_ai_anomaly_score,score_delta,score_reason,last_window_at,model_version)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (ip, len(group), len(anomalies), score, encode(evidence), MODEL_MODE, scored_at,
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              ON CONFLICT (ip) DO UPDATE SET
+                windows_seen=EXCLUDED.windows_seen, anomalous_windows=EXCLUDED.anomalous_windows,
+                ai_anomaly_score=EXCLUDED.ai_anomaly_score, ai_evidence_json=EXCLUDED.ai_evidence_json,
+                model_mode=EXCLUDED.model_mode, scored_at=EXCLUDED.scored_at,
+                confidence=EXCLUDED.confidence, confidence_level=EXCLUDED.confidence_level,
+                previous_ai_anomaly_score=EXCLUDED.previous_ai_anomaly_score, score_delta=EXCLUDED.score_delta,
+                score_reason=EXCLUDED.score_reason, last_window_at=EXCLUDED.last_window_at,
+                model_version=EXCLUDED.model_version""",
+            (ip, len(group), len(anomalies), score, Jsonb(evidence), MODEL_MODE, scored_at,
              confidence, confidence_level, previous_score, delta, reason, last_window, bundle["model_version"]),
         )
         if old_tuple != new_tuple:
@@ -337,8 +358,8 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
 
     _trim_change_log(conn)
     conn.execute(
-        """UPDATE ai_model_state SET last_scored_event_id=?, last_score_at=?, last_score_status=?, updated_at=?
-           WHERE model_key=?""",
+        """UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s
+           WHERE model_key=%s""",
         (max_event, scored_at, "scored", scored_at, MODEL_KEY),
     )
     conn.commit()

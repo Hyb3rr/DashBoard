@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 import ipaddress
 from typing import Any, Iterable
+from ..core import metrics
 
 
 def configured() -> bool:
@@ -61,6 +62,7 @@ def insert_events(rows: Iterable[dict[str, Any]]) -> int:
     payload = list(rows)
     if not payload:
         return 0
+    finish = metrics.timed("clickhouse.insert_batch_ms")
     client = connect()
     try:
         columns = [
@@ -87,8 +89,14 @@ def insert_events(rows: Iterable[dict[str, Any]]) -> int:
                 row.get("raw_line", ""),
             ])
         client.insert("http_events", values, column_names=columns)
+        metrics.increment("collector.events_ingested", len(payload))
+        metrics.increment("clickhouse.insert_batches")
         return len(payload)
+    except Exception:
+        metrics.increment("clickhouse.insert_errors")
+        raise
     finally:
+        finish()
         client.close()
 
 

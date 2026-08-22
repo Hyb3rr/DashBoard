@@ -5,6 +5,7 @@ from threading import Lock
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Iterator
+from ..core import metrics
 
 
 _pool = None
@@ -69,12 +70,17 @@ def transaction() -> Iterator[Any]:
 
 
 def health() -> dict[str, Any]:
+    finish = metrics.timed("postgres.health_latency_ms")
     try:
         with transaction() as conn:
             conn.execute("SELECT 1")
+        metrics.increment("postgres.health_checks")
         return {"status": "ok"}
     except Exception as exc:
+        metrics.increment("postgres.health_errors")
         return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:240]}
+    finally:
+        finish()
 
 
 def ensure_schema() -> None:

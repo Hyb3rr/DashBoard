@@ -9,6 +9,7 @@ import os
 from uuid import uuid4
 
 from ..db import postgres as postgres_store
+from ..core import metrics
 from .telegram import enabled as telegram_enabled, format_bad_alert, send_message
 
 logger = logging.getLogger(__name__)
@@ -49,13 +50,16 @@ async def _deliver_outbox() -> None:
             str(row["ip"]), payload.get("classification") or {}, {}, {}
         )
         delivered = await send_message(message)
+        metrics.increment("alert_outbox.attempts")
         with postgres_store.transaction() as conn:
             if delivered:
+                metrics.increment("alert_outbox.delivered")
                 conn.execute(
                     "UPDATE alert_outbox SET status='delivered',delivered_at=%s,lease_owner=NULL,lease_until=NULL WHERE id=%s AND lease_owner=%s",
                     (_now(), row["id"], owner),
                 )
             else:
+                metrics.increment("alert_outbox.failed")
                 attempts = int(row.get("attempts") or 0) + 1
                 if attempts >= 8:
                     conn.execute(

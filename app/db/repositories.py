@@ -18,6 +18,7 @@ from ..core.intelligence import classify_ip
 from ..testing.clock import utcnow
 from ..testing.failpoints import NoopFailpoint
 from ..core.regions import market_score, normalise_conflict_indicators, normalise_economic_indicators
+from ..core import metrics
 
 
 def _json(value: Any) -> Any:
@@ -183,6 +184,23 @@ class FeatureRepository:
         with transaction() as conn:
             _upsert_feature_deltas(conn, buckets, paths, dataset_id)
         return sum(int(row["requests"]) for row in buckets.values())
+
+
+class AiRepository:
+    """PostgreSQL state boundary for model metadata and anomaly scores."""
+
+    def state(self, model_key: str) -> dict[str, Any] | None:
+        with transaction() as conn:
+            row = conn.execute("SELECT * FROM ai_model_state WHERE model_key=%s", (model_key,)).fetchone()
+        return dict(row) if row else None
+
+    def scores(self, ips: Iterable[str]) -> list[dict[str, Any]]:
+        values = list(ips)
+        if not values:
+            return []
+        with transaction() as conn:
+            rows = conn.execute("SELECT * FROM ip_ai_scores WHERE ip=ANY(%s::inet[])", (values,)).fetchall()
+        return [dict(row) for row in rows]
 
 
 def _feature_deltas(events: Iterable[dict[str, Any]]) -> tuple[dict, dict]:
@@ -364,6 +382,8 @@ class PgDetectionRepository:
         failpoint=None,
     ) -> dict[str, Any]:
         events = list(events)
+        finish_rules = metrics.timed("rules.evaluation_batch_ms")
+        metrics.increment("rules.evaluation_batches")
         buckets, paths = _feature_deltas(events)
         if not buckets:
             return {"processed": False, "affected": set()}
@@ -475,6 +495,7 @@ class PgDetectionRepository:
                 failpoint.hit("after_checkpoint")
             failpoint.hit("before_pg_commit")
         failpoint.hit("after_pg_commit")
+        finish_rules()
         return {"processed": True, "duplicate": False, "affected": affected}
 
 

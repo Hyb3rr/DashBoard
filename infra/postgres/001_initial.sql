@@ -1,13 +1,3 @@
-CREATE TABLE IF NOT EXISTS dataset_runs (
-  id TEXT PRIMARY KEY,
-  dataset_type TEXT NOT NULL CHECK (dataset_type IN ('live', 'file')),
-  filename TEXT,
-  active BOOLEAN NOT NULL DEFAULT FALSE,
-  start_time TIMESTAMPTZ,
-  end_time TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS ip_minute_features (
   dataset_id TEXT NOT NULL,
   ip INET NOT NULL,
@@ -59,6 +49,43 @@ CREATE INDEX IF NOT EXISTS idx_ip_minute_features_window
 
 CREATE INDEX IF NOT EXISTS idx_ip_minute_features_ip_window
   ON ip_minute_features(dataset_id, ip, bucket_minute);
+
+CREATE TABLE IF NOT EXISTS ai_model_state (
+  model_key TEXT PRIMARY KEY,
+  model_version TEXT,
+  trained_at TIMESTAMPTZ,
+  training_start TIMESTAMPTZ,
+  training_end TIMESTAMPTZ,
+  training_windows INTEGER NOT NULL DEFAULT 0,
+  training_ips INTEGER NOT NULL DEFAULT 0,
+  training_decision_floor DOUBLE PRECISION,
+  last_train_status TEXT,
+  last_train_error TEXT,
+  last_scored_event_id BIGINT NOT NULL DEFAULT 0,
+  last_score_at TIMESTAMPTZ,
+  last_score_status TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ip_ai_scores (
+  ip INET PRIMARY KEY,
+  windows_seen INTEGER NOT NULL DEFAULT 0,
+  anomalous_windows INTEGER NOT NULL DEFAULT 0,
+  ai_anomaly_score INTEGER NOT NULL DEFAULT 0,
+  ai_evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  model_mode TEXT,
+  scored_at TIMESTAMPTZ,
+  confidence INTEGER,
+  confidence_level TEXT,
+  previous_ai_anomaly_score INTEGER,
+  score_delta INTEGER,
+  score_reason TEXT,
+  last_window_at TIMESTAMPTZ,
+  model_version TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ip_ai_scores_last_window
+  ON ip_ai_scores(last_window_at);
 
 CREATE TABLE IF NOT EXISTS ip_minute_path_seen (
   dataset_id TEXT NOT NULL,

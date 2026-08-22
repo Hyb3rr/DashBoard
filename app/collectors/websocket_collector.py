@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from ..config import settings
 from ..db import clickhouse as clickhouse_store
 from ..db import postgres as postgres_store
+from ..core import metrics
 from ..db.repositories import CheckpointRepository
 from ..core.logs import parse_apache_combined
 from ..services.profiles import ensure_profile_postgres, refresh_due_profiles
@@ -171,6 +172,9 @@ class WebSocketCollector:
         await self._publish_status()
 
     def status(self) -> dict[str, Any]:
+        metrics.gauge("collector.pending_lines", self.pending_lines)
+        metrics.gauge("enrichment.queue_depth", self._enrichment_queue.qsize())
+        metrics.gauge("collector.reconnect_attempt", self.reconnect_attempt)
         return {
             "enabled": self.config.enabled,
             "source_id": self.config.source_id,
@@ -314,6 +318,7 @@ class WebSocketCollector:
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"[:240]
                 self.reconnect_attempt += 1
+                metrics.increment("collector.reconnects")
                 self.state = "retrying"
                 await self._publish_status()
                 await asyncio.sleep(backoff)
