@@ -6,10 +6,38 @@ import os
 import socket
 from typing import Any
 
+from ..config import settings
 from ..config.settings import REGION_SEED_PATH
 from ..core.enrichment import lookup
 from ..db.repositories import GeoRepository, ProfileRepository, RegionRepository
 from ..db.postgres import transaction
+
+
+_VOLATILE_PROFILE_FIELDS = {
+    "fetched_at", "updated_at", "geo_resolved_at", "geo_expires_at",
+    "next_retry_at", "privacy_recheck_due_at", "enrichment_attempts",
+    "risk_score", "risk_level", "evidence",
+}
+
+
+def _stable_profile_value(value):
+    if isinstance(value, dict):
+        return {key: _stable_profile_value(item) for key, item in sorted(value.items())
+                if key not in {"checked_at", "fetched_at", "updated_at"}}
+    if isinstance(value, list):
+        return [_stable_profile_value(item) for item in value]
+    return value
+
+
+def profile_state_changed(previous: dict | None, current: dict) -> bool:
+    """Compare semantic enrichment state, excluding timestamps/retry metadata."""
+    if not previous:
+        return True
+    keys = set(current) - _VOLATILE_PROFILE_FIELDS - {"ip", "is_private"}
+    return any(
+        _stable_profile_value(previous.get(key)) != _stable_profile_value(current.get(key))
+        for key in keys
+    )
 
 
 def classification_observation(row: dict) -> dict:
@@ -31,7 +59,7 @@ def classification_observation(row: dict) -> dict:
     }
 
 
-async def ensure_profile_postgres(ip: str, refresh: bool = False):
+async def ensure_profile_postgres(ip: str, refresh: bool = False, change_reason: str | None = None):
     """Live split-mode enrichment write path."""
     repository = ProfileRepository()
     row = repository.get(ip)
@@ -40,9 +68,15 @@ async def ensure_profile_postgres(ip: str, refresh: bool = False):
     try:
         attempt = int(row.get("enrichment_attempts") or 0) + 1 if row else 1
         data = await lookup(ip, attempt=attempt, refresh=refresh)
-        repository.upsert(data)
-        if data.get("network_location"):
-            GeoRepository().persist_resolution(ip, data["network_location"])
+        with transaction() as conn:
+            repository.upsert(data, conn=conn)
+            if data.get("network_location"):
+                GeoRepository().persist_resolution(ip, data["network_location"], conn=conn)
+            if change_reason and profile_state_changed(row, data):
+                conn.execute(
+                    "INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at) VALUES(%s,%s,%s,%s)",
+                    (settings.DATASET_LIVE_ID, ip, change_reason, datetime.now(timezone.utc)),
+                )
         return repository.get(ip) or data, None
     except Exception as exc:
         return None, f"{ip}: {type(exc).__name__}"
@@ -89,13 +123,17 @@ async def refresh_due_profiles(conn, limit: int = 100, now: datetime | None = No
             
         selected = [str(row["ip"]) for row in rows]
         processed = 0
+        processed_ips = []
         for start in range(0, len(selected), 12):
             results = await asyncio.gather(*[
-                ensure_profile_postgres(ip, refresh=True) for ip in selected[start:start + 12]
+                ensure_profile_postgres(ip, refresh=True, change_reason="privacy_updated") for ip in selected[start:start + 12]
             ])
-            processed += sum(1 for data, error in results if data and not error)
+            for ip, (data, error) in zip(selected[start:start + 12], results):
+                if data and not error:
+                    processed += 1
+                    processed_ips.append(ip)
             
-        return {"status": "completed", "selected": len(selected), "processed": processed}
+        return {"status": "completed", "selected": len(selected), "processed": processed, "processed_ips": processed_ips}
     finally:
         with transaction() as pg_conn:
             pg_conn.execute(

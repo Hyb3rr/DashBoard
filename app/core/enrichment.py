@@ -190,6 +190,33 @@ def _risk(data: dict) -> tuple[int, str, list[str]]:
     return score, level, evidence
 
 
+def abuse_reputation_state(threat_indicators=None, provider_status=None) -> dict:
+    """Derive reputation visibility without contributing to detection score."""
+    sources = {
+        str(item.get("source"))
+        for item in (threat_indicators or [])
+        if isinstance(item, dict) and item.get("source")
+    }
+    sources.update(
+        str(source) for source in (provider_status or {})
+        if str(source) in {"firehol:abuseipdb_1d", "firehol:abuseipdb_30d"}
+    )
+    hit_1d = "firehol:abuseipdb_1d" in sources
+    hit_30d = "firehol:abuseipdb_30d" in sources
+    state = "persistent" if hit_1d and hit_30d else "recent" if hit_1d else "historical" if hit_30d else "none"
+    return {
+        "state": state,
+        "recent_hit": hit_1d,
+        "history_30d_hit": hit_30d,
+        "sources": [source for source in ("firehol:abuseipdb_1d", "firehol:abuseipdb_30d") if source in sources],
+    }
+
+
+def intel_tags_for_abuse(abuse_reputation: dict | None) -> list[str]:
+    state = (abuse_reputation or {}).get("state", "none")
+    return [f"intel:abuse_{state}"] if state in {"recent", "historical", "persistent"} else []
+
+
 def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
     """Read normalized intelligence snapshot from PostgreSQL."""
     from ..db.pg_intelligence import local_intelligence
@@ -565,6 +592,9 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     if any(result.get(f) is True for f in ("is_vpn", "is_proxy", "is_hosting")):
         privacy_status = "partial" if privacy_status == "unknown" else privacy_status
     threat_status = "complete" if any(k == "threat_indicators" for k in result) else "unknown"
+    result["abuse_reputation"] = abuse_reputation_state(
+        result.get("threat_indicators"), provider_status
+    )
 
     fetched_at = _now()
     try:

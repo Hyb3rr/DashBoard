@@ -4,7 +4,7 @@ import ipaddress
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..services.dispositions import STATES
-from ..services.profiles import ensure_profile_postgres
+from ..collectors.websocket_collector import collector
 from ..db import postgres as postgres_store
 from ..db.repositories import DispositionRepository, StateRepository
 from .ip_state import _pg_item
@@ -23,22 +23,19 @@ async def ip_details(ip: str, refresh: bool = False):
         address = ipaddress.ip_address(ip)
     except ValueError as exc:
         raise HTTPException(400, "Invalid IP address") from exc
-    error = None
-    if refresh:
-        data, error = await ensure_profile_postgres(str(address), refresh=True)
-    row = await asyncio.to_thread(StateRepository().get, str(address))
+    address_text = str(address)
+    row = await asyncio.to_thread(StateRepository().get, address_text)
     if not row:
         raise HTTPException(404, "IP not found")
     cached_location = row.get("network_location") or {}
-    if not refresh and not cached_location.get("ip2region"):
-        _, refresh_error = await ensure_profile_postgres(str(address), refresh=True)
-        if not refresh_error:
-            row = await asyncio.to_thread(StateRepository().get, str(address))
-        else:
-            error = refresh_error
+    needs_enrichment = address.is_global and (
+        refresh
+        or row.get("enrichment_status") != "complete"
+        or not cached_location.get("ip2region")
+    )
+    if needs_enrichment:
+        collector.schedule_enrichment(address_text)
     item = _pg_item(row)
-    if refresh and error:
-        item.setdefault("provider_errors", []).append(f"Refresh failed; showing cached profile: {error}")
     return item
 
 

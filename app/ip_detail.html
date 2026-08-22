@@ -78,6 +78,7 @@ button.button{font:700 13px/1 "Avenir Next",Avenir,"Segoe UI",sans-serif;cursor:
   box-shadow:inset 3px 0 0 var(--green)
 }
 .classification-stat.good .accent{color:var(--green)}
+.abuse-state{font:700 14px monospace;text-transform:capitalize}.abuse-state.none{color:var(--secondary)}.abuse-state.historical{color:var(--cyan)}.abuse-state.recent{color:var(--yellow)}.abuse-state.persistent{color:var(--red)}
 .classification-stat.unknown{
   background:var(--deck);
   box-shadow:inset 3px 0 0 var(--tertiary)
@@ -442,7 +443,8 @@ async function load(){
       dispState=(d.disposition?.state||'new').toLowerCase(),
       displayStatus=formatStatusWithDisposition(label, dispState),
       score=Number(d.threat_signal_score??0),
-      src=d.field_sources||{};
+      src=d.field_sources||{},
+      abuse=d.abuse_reputation||{state:'none',recent_hit:false,history_30d_hit:false,sources:[]};
     const freshRules=freshness(o.evaluated_at||o.updated_at),freshRare=freshness((o.rare_path_evidence||[])[0]?.freshness),freshGeo=freshness(d.geo_resolved_at||d.fetched_at),freshIntel=freshness(d.fetched_at);
 
     document.title=`${ip} · Sentinel Hub`;
@@ -587,6 +589,14 @@ async function load(){
           </section>
 
           <section class="card">
+            <div class="card-head"><h2>Abuse reputation</h2><small>supporting threat intelligence</small></div>
+            <div class="body">
+              <div class="fact"><span class="label">Current state</span><strong class="abuse-state ${esc(abuse.state)}">${esc(abuse.state)}</strong></div>
+              <div class="evidence">${abuse.sources?.length?abuse.sources.map(source=>`<div class="evidence-item">Matched ${esc(source==='firehol:abuseipdb_1d'?'FireHOL AbuseIPDB 1d':'FireHOL AbuseIPDB 30d')}</div>`).join(''):'<div class="evidence-item">No AbuseIPDB feed match</div>'}<div class="evidence-item">This is supporting reputation evidence, not a standalone malicious verdict.</div></div>
+            </div>
+          </section>
+
+          <section class="card">
             <div class="card-head"><h2>Provider status</h2><small>enrichment visibility</small></div>
             <div class="body">
               <ul class="sources">${
@@ -665,7 +675,28 @@ async function load(){
       </div>`
   }
 }
-restoreIpTrafficWindow();load();
+let detailRealtimeSource=null,detailRealtimeTimer=null,detailRealtimeRunning=false;
+function scheduleDetailRealtimeRefresh(){
+  if(detailRealtimeTimer)return;
+  detailRealtimeTimer=setTimeout(async()=>{
+    detailRealtimeTimer=null;
+    if(detailRealtimeRunning)return;
+    detailRealtimeRunning=true;
+    try{await load()}finally{detailRealtimeRunning=false}
+  },350);
+}
+function startDetailRealtime(){
+  if(!window.EventSource||detailRealtimeSource)return;
+  try{detailRealtimeSource=new EventSource('/api/stream')}catch(_){return}
+  detailRealtimeSource.addEventListener('ip_changes',event=>{
+    try{
+      const payload=JSON.parse(event.data),ips=Array.isArray(payload.ips)?payload.ips:[];
+      if(ips.some(value=>String(value)===String(ip)))scheduleDetailRealtimeRefresh();
+    }catch(_){ }
+  });
+  detailRealtimeSource.onerror=()=>{};
+}
+restoreIpTrafficWindow();load();startDetailRealtime();
 </script>
 </body>
 </html>

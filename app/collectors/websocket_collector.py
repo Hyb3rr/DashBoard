@@ -141,7 +141,10 @@ class WebSocketCollector:
 
     async def start(self) -> None:
         if os.getenv("RARE_PATH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
-            self._rare_path_task = asyncio.create_task(periodic_shadow(self._stop), name="rare-path-shadow")
+            self._rare_path_task = asyncio.create_task(
+                periodic_shadow(self._stop, on_changed=self._publish_rare_changes),
+                name="rare-path-shadow",
+            )
         if self._task or not self.config.enabled or not self.config.valid:
             await self._publish_status()
             return
@@ -199,6 +202,18 @@ class WebSocketCollector:
             "ai_score_status": None,
             "ai_last_error": None,
         }
+
+    def schedule_enrichment(self, ip: str) -> bool:
+        """Queue one IP on the existing bounded, deduplicated worker queue."""
+        if ip in self._enrichment_pending:
+            return False
+        try:
+            self._enrichment_queue.put_nowait(ip)
+        except asyncio.QueueFull:
+            self._enrichment_deferred.add(ip)
+            return False
+        self._enrichment_pending.add(ip)
+        return True
 
     async def _publish_status(self) -> None:
         await asyncio.to_thread(self._persist_status)
@@ -406,18 +421,13 @@ class WebSocketCollector:
         self, cursor: int, affected: set[str], new_ips: list[str]
     ) -> None:
         for ip in new_ips:
-            if ip in self._enrichment_pending:
-                continue
-            try:
-                self._enrichment_queue.put_nowait(ip)
-                self._enrichment_pending.add(ip)
-            except asyncio.QueueFull:
-                self._enrichment_pending.discard(ip)
-                self._enrichment_deferred.add(ip)
-                continue
+            self.schedule_enrichment(ip)
         if affected and self.state == "live":
             await bus.publish(
-                "ip_changes", {"cursor": int(cursor), "count": len(affected), "published_at": utc_now()}
+                "ip_changes", {
+                    "cursor": int(cursor), "count": len(affected),
+                    "ips": sorted(affected), "published_at": utc_now(),
+                }
             )
 
     def _commit_batch(
@@ -473,7 +483,7 @@ class WebSocketCollector:
     @staticmethod
     def _enrich_one(ip: str) -> tuple[str, bool, str | None]:
         try:
-            data, error = asyncio.run(ensure_profile_postgres(ip))
+            data, error = asyncio.run(ensure_profile_postgres(ip, change_reason="enrichment"))
             return ip, bool(data and not error), error
         except Exception as exc:
             return ip, False, f"{type(exc).__name__}: {exc}"
@@ -513,15 +523,11 @@ class WebSocketCollector:
             successful = [ip for ip, ok, _error in results if ok]
             if successful:
                 with postgres_store.transaction() as pg_conn:
-                    now = datetime.now(timezone.utc)
-                    for ip in successful:
-                        pg_conn.execute(
-                            "INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at) VALUES(%s,%s,'enrichment',%s)",
-                            (settings.DATASET_LIVE_ID, ip, now),
-                        )
-                    trim_change_log(pg_conn)
                     cursor = int(pg_conn.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM ip_change_log").fetchone()["seq"] or 0)
-                await bus.publish("ip_changes", {"cursor": cursor, "count": len(successful), "published_at": utc_now()})
+                await bus.publish("ip_changes", {
+                    "cursor": cursor, "count": len(successful),
+                    "ips": sorted(successful), "published_at": utc_now(),
+                })
 
     async def privacy_loop(self) -> None:
         interval = _env_int("LOG_WS_PRIVACY_REFRESH_INTERVAL_SECONDS", 3600, 60)
@@ -531,14 +537,24 @@ class WebSocketCollector:
                 result = await refresh_due_profiles(
                     None, limit=_env_int("PRIVACY_REFRESH_BATCH", 100, 1)
                 )
-                if result.get("processed"):
+                changed_ips = result.get("processed_ips", [])
+                if changed_ips:
+                    with postgres_store.transaction() as conn:
+                        cursor = int(conn.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM ip_change_log").fetchone()["seq"] or 0)
                     await bus.publish(
-                        "ip_changes", {"cursor": 0, "count": result["processed"], "published_at": utc_now()}
+                        "ip_changes", {"cursor": cursor, "count": len(changed_ips), "ips": changed_ips, "published_at": utc_now()}
                     )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass
+
+    async def _publish_rare_changes(self, changed_ips: list[str]) -> None:
+        with postgres_store.transaction() as conn:
+            cursor = int(conn.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM ip_change_log").fetchone()["seq"] or 0)
+        await bus.publish(
+            "ip_changes", {"cursor": cursor, "count": len(changed_ips), "ips": changed_ips, "published_at": utc_now()}
+        )
 
 
 collector = WebSocketCollector()

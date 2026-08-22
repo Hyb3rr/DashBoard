@@ -6,6 +6,8 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.core.enrichment import (
+    abuse_reputation_state,
+    intel_tags_for_abuse,
     _maxmind,
     _merge,
     _network_flags,
@@ -31,6 +33,37 @@ def test_unknown_privacy_signals_are_null():
     flags = _network_flags("Example ISP", "Example ISP")
     assert flags["is_vpn"] is None
     assert flags["is_proxy"] is None
+
+
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [([], "none"), (["firehol:abuseipdb_1d"], "recent"), (["firehol:abuseipdb_30d"], "historical"), (["firehol:abuseipdb_1d", "firehol:abuseipdb_30d"], "persistent")],
+)
+def test_abuse_reputation_state(sources, expected):
+    state = abuse_reputation_state([{"source": source} for source in sources])
+    assert state["state"] == expected
+    assert state["sources"] == sources
+    assert intel_tags_for_abuse(state) == ([] if expected == "none" else [f"intel:abuse_{expected}"])
+
+
+def test_abuse_reputation_does_not_change_classification_score():
+    profile = {"is_proxy": False, "is_vpn": False, "is_hosting": False, "is_tor": False}
+    observation = {"behavior_score": 12, "requests": 3}
+    before = classify_ip(profile, observation, {}, None)["score"]
+    profile["abuse_reputation"] = abuse_reputation_state(
+        [{"source": "firehol:abuseipdb_1d"}, {"source": "firehol:abuseipdb_30d"}]
+    )
+    assert classify_ip(profile, observation, {}, None)["score"] == before
+
+
+def test_abuse_intel_filter_uses_persisted_provider_keys():
+    from app.db.repositories import StateRepository
+
+    where, args = StateRepository._where(None, None, None, None, "intel:abuse_persistent")
+
+    assert "firehol:abuseipdb_1d" in where
+    assert "firehol:abuseipdb_30d" in where
+    assert args == []
 
 
 @pytest.mark.integration

@@ -28,7 +28,7 @@ def rarity_score(row: dict, baseline_buckets: int = 168, now: datetime | None = 
     return max(0, min(100, population_points + temporal_points + newness_points))
 
 
-def run_shadow(now: datetime | None = None) -> int:
+def run_shadow(now: datetime | None = None) -> tuple[int, list[str]]:
     """Scan one rolling window and persist supporting evidence in PostgreSQL."""
     finish = metrics.timed("rare_path.batch_ms")
     now = now or datetime.now(timezone.utc)
@@ -49,11 +49,11 @@ def run_shadow(now: datetime | None = None) -> int:
             })
         for evidence in by_ip.values():
             evidence.sort(key=lambda item: (-item["rarity_score"], item["path"]))
-        ObservationRepository().upsert_rare_path_evidence(by_ip)
+        changed_ips = ObservationRepository().upsert_rare_path_evidence(by_ip, settings.DATASET_LIVE_ID)
         count = sum(len(items) for items in by_ip.values())
         metrics.gauge("rare_path.evidence_count", count)
         metrics.increment("rare_path.batches")
-        return count
+        return count, changed_ips
     except Exception:
         metrics.increment("rare_path.errors")
         raise
@@ -61,7 +61,7 @@ def run_shadow(now: datetime | None = None) -> int:
         finish()
 
 
-async def periodic_shadow(stop_event) -> None:
+async def periodic_shadow(stop_event, on_changed=None) -> None:
     """Run outside ingest flush path at a bounded periodic cadence."""
     import asyncio
 
@@ -71,6 +71,8 @@ async def periodic_shadow(stop_event) -> None:
         if stop_event.is_set():
             break
         try:
-            await asyncio.to_thread(run_shadow)
+            count, changed_ips = await asyncio.to_thread(run_shadow)
+            if changed_ips and on_changed:
+                await on_changed(changed_ips)
         except Exception:
             pass

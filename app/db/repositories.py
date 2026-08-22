@@ -7,6 +7,7 @@ contract while keeping SQL/backend knowledge out of route handlers.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
@@ -45,8 +46,9 @@ class ProfileRepository:
             row = conn.execute("SELECT * FROM ip_profiles WHERE ip=%s", (ip,)).fetchone()
         return dict(row) if row else None
 
-    def upsert(self, profile: dict[str, Any]) -> None:
-        with transaction() as conn:
+    def upsert(self, profile: dict[str, Any], conn=None) -> None:
+        scope = transaction() if conn is None else nullcontext(conn)
+        with scope as conn:
             conn.execute(
                 """INSERT INTO ip_profiles
                    (ip,country,country_code,city,region,latitude,longitude,timezone,asn,
@@ -67,8 +69,17 @@ class ProfileRepository:
                     organization_confidence=EXCLUDED.organization_confidence,
                     identity_evidence=EXCLUDED.identity_evidence, is_hosting=EXCLUDED.is_hosting,
                     is_vpn=EXCLUDED.is_vpn, is_proxy=EXCLUDED.is_proxy, is_tor=EXCLUDED.is_tor,
-                    provider_status=EXCLUDED.provider_status, field_sources=EXCLUDED.field_sources,
-                    enrichment_status=EXCLUDED.enrichment_status, fetched_at=EXCLUDED.fetched_at,
+                    proxy_type=EXCLUDED.proxy_type, abuse_score=EXCLUDED.abuse_score,
+                    abuse_reports=EXCLUDED.abuse_reports, reputation=EXCLUDED.reputation,
+                    enrichment_status=EXCLUDED.enrichment_status,
+                    core_enrichment_status=EXCLUDED.core_enrichment_status,
+                    privacy_enrichment_status=EXCLUDED.privacy_enrichment_status,
+                    threat_enrichment_status=EXCLUDED.threat_enrichment_status,
+                    provider_errors=EXCLUDED.provider_errors, provider_status=EXCLUDED.provider_status,
+                    field_sources=EXCLUDED.field_sources, next_retry_at=EXCLUDED.next_retry_at,
+                    enrichment_attempts=EXCLUDED.enrichment_attempts,
+                    privacy_recheck_due_at=EXCLUDED.privacy_recheck_due_at,
+                    sources=EXCLUDED.sources, fetched_at=EXCLUDED.fetched_at,
                     updated_at=EXCLUDED.updated_at""",
                 (
                     profile.get("ip"), profile.get("country"), profile.get("country_code"),
@@ -104,9 +115,10 @@ class ProfileRepository:
 
 
 class GeoRepository:
-    def persist_resolution(self, ip: str, data: dict[str, Any], ttl_days: int = 14) -> None:
+    def persist_resolution(self, ip: str, data: dict[str, Any], ttl_days: int = 14, conn=None) -> None:
         expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
-        with transaction() as conn:
+        scope = transaction() if conn is None else nullcontext(conn)
+        with scope as conn:
             conn.execute("""INSERT INTO geo_resolutions(ip,network,asn,organization,network_type,country,country_code,latitude,longitude,city,city_source,city_disputed,city_confidence,city_distance_km,confidence,disputed,location_scope,source_ids,evidence,ruleset_version,resolved_at,expires_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'geo-v3',now(),%s)
                 ON CONFLICT(ip) DO UPDATE SET network=EXCLUDED.network,asn=EXCLUDED.asn,organization=EXCLUDED.organization,network_type=EXCLUDED.network_type,country=EXCLUDED.country,country_code=EXCLUDED.country_code,latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,city=EXCLUDED.city,city_source=EXCLUDED.city_source,city_disputed=EXCLUDED.city_disputed,city_confidence=EXCLUDED.city_confidence,city_distance_km=EXCLUDED.city_distance_km,confidence=EXCLUDED.confidence,disputed=EXCLUDED.disputed,location_scope=EXCLUDED.location_scope,source_ids=EXCLUDED.source_ids,evidence=EXCLUDED.evidence,ruleset_version=EXCLUDED.ruleset_version,resolved_at=EXCLUDED.resolved_at,expires_at=EXCLUDED.expires_at""", (ip, data.get("network"), data.get("asn"), data.get("organization"), data.get("network_type"), data.get("country"), data.get("country_code"), data.get("latitude"), data.get("longitude"), data.get("city"), data.get("city_source"), bool(data.get("city_disputed")), data.get("city_confidence"), data.get("city_distance_km"), int(data.get("confidence", 0) or 0), bool(data.get("disputed")), data.get("scope"), _json(data.get("sources", [])), _json({"confidence_breakdown": data.get("confidence_breakdown", {}), "registration": data.get("registration")}), expires))
@@ -134,17 +146,25 @@ class ObservationRepository:
                 (ip, _json(observation), ruleset, datetime.now(timezone.utc)),
             )
 
-    def upsert_rare_path_evidence(self, values: dict[str, list[dict[str, Any]]]) -> None:
+    def upsert_rare_path_evidence(self, values: dict[str, list[dict[str, Any]]], dataset_id: str = "live") -> list[str]:
         if not values:
-            return
+            return []
+        changed = []
         with transaction() as conn:
             for ip, evidence in values.items():
-                conn.execute(
+                result = conn.execute(
                     """UPDATE ip_observations_state
                        SET payload=jsonb_set(payload,'{rare_path_evidence}',%s::jsonb,true), updated_at=now()
-                     WHERE ip=%s""",
-                    (_json(evidence), ip),
+                     WHERE ip=%s AND payload->'rare_path_evidence' IS DISTINCT FROM %s::jsonb""",
+                    (_json(evidence), ip, _json(evidence)),
                 )
+                if result.rowcount:
+                    conn.execute(
+                        "INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at) VALUES(%s,%s,'rare_path_evidence_updated',now())",
+                        (dataset_id, ip),
+                    )
+                    changed.append(ip)
+        return changed
 
 
 class ClassificationRepository:
@@ -523,7 +543,7 @@ class StateRepository:
     }
 
     @staticmethod
-    def _where(q: str | None, privacy: str | None, classification: str | None, disposition: str | None) -> tuple[str, list[Any]]:
+    def _where(q: str | None, privacy: str | None, classification: str | None, disposition: str | None, intel_tag: str | None = None) -> tuple[str, list[Any]]:
         clauses = ["TRUE"]
         args: list[Any] = []
         if q:
@@ -542,11 +562,22 @@ class StateRepository:
         if disposition:
             clauses.append("COALESCE(d.state,'new')=%s")
             args.append(disposition)
+        abuse_1d = "COALESCE(p.provider_status, '{}'::jsonb) ? 'firehol:abuseipdb_1d'"
+        abuse_30d = "COALESCE(p.provider_status, '{}'::jsonb) ? 'firehol:abuseipdb_30d'"
+        if intel_tag == "intel:abuse_recent":
+            clauses.append(f"({abuse_1d} AND NOT {abuse_30d})")
+        elif intel_tag == "intel:abuse_historical":
+            clauses.append(f"({abuse_30d} AND NOT {abuse_1d})")
+        elif intel_tag == "intel:abuse_persistent":
+            clauses.append(f"({abuse_1d} AND {abuse_30d})")
+        elif intel_tag == "intel:any_abuse":
+            clauses.append(f"({abuse_1d} OR {abuse_30d})")
         return " AND ".join(clauses), args
 
     def page(self, page: int, page_size: int, sort: str, direction: str, q: str | None = None,
-             privacy: str | None = None, classification: str | None = None, disposition: str | None = None) -> dict[str, Any]:
-        where, args = self._where(q, privacy, classification, disposition)
+             privacy: str | None = None, classification: str | None = None, disposition: str | None = None,
+             intel_tag: str | None = None) -> dict[str, Any]:
+        where, args = self._where(q, privacy, classification, disposition, intel_tag)
         order = self._sorts.get(sort, self._sorts["threat_signal_score"])
         order_direction = "ASC" if direction.lower() == "asc" else "DESC"
         with transaction() as conn:

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 
+from ..core.enrichment import abuse_reputation_state, intel_tags_for_abuse
 from ..core.intelligence import classify_ip
 from ..tools.calibration import csv_text
 from ..db.repositories import StateRepository
@@ -39,7 +40,9 @@ def ip_page(
 ):
     page = max(1, int(page))
     page_size = min(50, max(1, int(page_size)))
-    result = StateRepository().page(page, page_size, sort, direction, q, privacy, classification, disposition)
+    intel_tag = privacy if privacy and privacy.startswith("intel:") else None
+    privacy = None if intel_tag else privacy
+    result = StateRepository().page(page, page_size, sort, direction, q, privacy, classification, disposition, intel_tag)
     return {
         "items": [_pg_item(row) for row in result["rows"]], "page": page, "page_size": page_size,
         "total_items": result["total"], "total_pages": (result["total"] + page_size - 1) // page_size,
@@ -66,6 +69,10 @@ def _pg_item(row: dict) -> dict:
     for key in ("identity_evidence", "reputation", "provider_errors", "provider_status", "field_sources", "evidence", "sources"):
         if profile.get(key) is None:
             profile[key] = [] if key in {"identity_evidence", "reputation", "provider_errors", "evidence", "sources"} else {}
+    profile["abuse_reputation"] = abuse_reputation_state(
+        profile.get("threat_indicators"), profile.get("provider_status")
+    )
+    profile["intel_tags"] = intel_tags_for_abuse(profile["abuse_reputation"])
     
     # Region context is intentionally excluded from the realtime IP hot path.
     classification = classify_ip(profile, observation, {}, None)
