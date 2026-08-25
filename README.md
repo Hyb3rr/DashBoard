@@ -1,7 +1,7 @@
 ## Mục lục
 - [Tech Stack](#tech-stack)
 - [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
-- [Các kỹ thuật để tối ưu](#Các kỹ thuật để tối ưu)
+- [Các kỹ thuật để tối ưu](#các-kỹ-thuật-để-tối-ưu)
 - [1. Web Server](#1-web-server)
 - [2. Log Collector](#2-log-collector)
 - [3. Normalizer](#3-normalizer)
@@ -25,22 +25,25 @@ Demo:
 
 # Tech stack
 
-|Thành phần|Công nghệ|
-|---|---|
-|Backend|Python, FastAPI|
-|Event Storage|ClickHouse|
-|State Storage|PostgreSQL|
-|Log Transport|WebSocket|
-|Realtime UI|Server-Sent Events|
-|Frontend|HTML, CSS, JavaScript|
-|Detection|Rules, Rare Path|
-|Machine Learning|Isolation Forest|
-|Intelligence|Geo, ASN, FireHOL, Tor, Proxy/VPN datasets|
-|Market Intelligence|World Bank WDI, UN Comtrade|
+| Thành phần          | Công nghệ                                  |
+| ------------------- | ------------------------------------------ |
+| Backend             | Python, FastAPI                            |
+| Event Storage       | ClickHouse                                 |
+| State Storage       | PostgreSQL                                 |
+| Log Transport       | WebSocket                                  |
+| Realtime UI         | Server-Sent Events                         |
+| Frontend            | HTML, CSS, JavaScript                      |
+| Detection           | Rules, Rare Path                           |
+| Machine Learning    | Isolation Forest                           |
+| Intelligence        | Geo, ASN, FireHOL, Tor, Proxy/VPN datasets |
+| Market Intelligence | World Bank WDI, UN Comtrade                |
 
 
 # Kiến trúc hệ thống
-![[system_structure.png]]
+
+![[./attachments/system_structure.png]]
+
+
 # Các kỹ thuật để tối ưu
 ## Tách biệt luồng realtime
 - Luồng ingest được tách khỏi các workload nền có chi phí xử lý cao.
