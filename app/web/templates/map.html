@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Global Intelligence Map · Sentinel Hub</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/map.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+</head>
+<body>
+  <div class="shell map-shell">
+    <aside>
+      <div class="brand"><div class="brand-mark">S</div><div><strong>Sentinel Hub</strong><small>remote monitor</small></div></div>
+      <nav aria-label="Main navigation">
+        <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
+        <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
+        <a class="nav-item active" href="/map" aria-current="page"><span class="nav-icon">◌</span>Global map</a>
+        <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
+      </nav>
+    </aside>
+    <main>
+      <header class="topbar map-topbar">
+        <div><div class="eyebrow">Intelligence / Global map</div><h1>Opportunity × Threat</h1><p class="map-subtitle">Market context alongside resolved security evidence.</p></div>
+        <div class="actions"><button id="theme-toggle" class="secondary" type="button">Light mode</button></div>
+      </header>
+      <section class="map-toolbar" aria-label="Map controls">
+        <div class="segmented" id="view-mode" role="group" aria-label="Map layer">
+          <button class="active" type="button" data-mode="opportunity" aria-pressed="true">Opportunity</button>
+          <button type="button" data-mode="threat" aria-pressed="false">Threat</button>
+        </div>
+        <div class="range-control" id="map-range" role="group" aria-label="Security activity time range">
+          <span class="eyebrow">Window</span>
+          <button type="button" data-range="1h">1h</button><button class="active" type="button" data-range="24h">24h</button><button type="button" data-range="7d">7d</button>
+        </div>
+        <div class="map-status" id="map-status" role="status">Loading map data…</div>
+      </section>
+      <section class="map-layout">
+        <div class="map-card">
+          <div class="map-card-head"><div><span class="eyebrow">Live read model</span><h2>World map</h2></div><div class="map-card-actions"><button id="back-world" class="secondary map-back" type="button" hidden>← World</button><div class="map-legend"><span><i class="legend-dot opportunity"></i>Opportunity</span><span><i class="legend-dot low"></i>Low</span><span><i class="legend-dot medium"></i>Medium</span><span><i class="legend-dot critical"></i>Critical</span></div></div></div>
+          <div class="map-stage" id="map-stage">
+            <div class="map-context" aria-hidden="true"><span>RESOLVED GEO · READ ONLY</span><span>Click a marker to inspect</span></div>
+            <div id="map-basemap" class="map-basemap" aria-label="World map showing opportunity and threat intelligence"></div>
+            <div id="map-tooltip" class="map-tooltip" hidden></div>
+            <div id="map-empty" class="map-empty" hidden><strong>No map points in this view</strong><span>Resolved coordinates or the selected layer are unavailable.</span></div>
+          </div>
+          <div class="map-foot"><span id="map-updated">Awaiting snapshot</span><span><b id="mapped-count">0</b> plotted · <b id="total-count">0</b> countries</span></div>
+        </div>
+        <aside class="map-inspector" id="map-inspector" aria-live="polite">
+          <div class="inspector-kicker">Selected country</div>
+          <div class="inspector-empty" id="inspector-empty"><strong>Hover or select a point</strong><span>Opportunity columns and threat evidence remain separate by design.</span></div>
+          <div id="inspector-content" hidden>
+            <div class="inspector-title"><div><span class="country-code" id="selected-code">—</span><h2 id="selected-name">—</h2></div><a id="explore-country" class="secondary-link" href="#">Explore ↗</a></div>
+            <section class="inspect-block opportunity-block"><div class="inspect-label">Market opportunity</div><div class="inspect-value" id="selected-opportunity">—</div><div class="inspect-meta" id="selected-opportunity-meta">No persisted score</div></section>
+            <section class="inspect-block"><div class="inspect-label">Security activity · <span id="selected-range">24h</span></div><div class="evidence-grid"><div><strong id="selected-critical">0</strong><span>Critical IPs</span></div><div><strong id="selected-medium">0</strong><span>Medium IPs</span></div><div><strong id="selected-requests">0</strong><span>Requests</span></div><div><strong id="selected-unknown">0</strong><span>Unknown IPs</span></div></div><div class="inspect-meta" id="selected-last-seen">Last seen —</div></section>
+            <section class="inspect-block"><div class="inspect-label">City coverage</div><div class="evidence-grid"><div><strong id="selected-located-ips">0</strong><span>Located IPs</span></div><div><strong id="selected-total-ips">0</strong><span>Total IPs</span></div><div><strong id="selected-unlocated-ips">0</strong><span>Unlocated IPs</span></div><div><strong id="selected-unlocated-requests">0</strong><span>Unlocated requests</span></div></div></section>
+            <section class="inspect-block freshness-block"><div class="inspect-label">Freshness & coverage</div><div class="freshness-grid"><div><strong id="selected-opportunity-age" class="freshness-value">—</strong><span>Opportunity age</span></div><div><strong id="selected-threat-age" class="freshness-value">—</strong><span>Threat last seen</span></div><div><strong id="selected-geo-coverage" class="freshness-value">—</strong><span>Geo coverage</span></div><div><strong id="selected-generated" class="freshness-value">—</strong><span>Map snapshot</span></div></div><div class="inspect-meta">Age is measured against the current read-model snapshot.</div></section>
+            <section class="inspect-block decision-block" id="decision-lens"><div class="inspect-label">Decision lens</div><div class="decision-summary"><span id="decision-opportunity">Opportunity —</span><span id="decision-security">Security evidence —</span></div><div class="decision-matrix" aria-label="Opportunity and security evidence matrix"><div class="decision-axis decision-axis-y">Opportunity</div><div class="decision-axis decision-axis-x">Security evidence</div><div class="decision-cell" data-opportunity="high" data-security="none">High · none</div><div class="decision-cell" data-opportunity="high" data-security="flagged">High · flagged</div><div class="decision-cell" data-opportunity="other" data-security="none">Other · none</div><div class="decision-cell" data-opportunity="other" data-security="flagged">Other · flagged</div></div><div class="inspect-meta">Two independent signals for prioritization; no combined score is calculated.</div></section>
+            <div class="semantic-note"><span class="note-mark">i</span><span>Requests describe activity volume; they do not determine threat severity.</span></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="/static/map.js"></script>
+</body>
+</html>

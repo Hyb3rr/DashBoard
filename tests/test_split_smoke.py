@@ -1,8 +1,16 @@
 """Minimal native HTTP smoke test for the live split backend."""
 
 import os
+import inspect
 
 import pytest
+
+
+def test_fastapi_lifespan_does_not_run_schema_creation():
+    from app.main import lifespan
+
+    source = inspect.getsource(lifespan)
+    assert "ensure_schema" not in source
 
 
 @pytest.mark.integration

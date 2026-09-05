@@ -1,17 +1,35 @@
+# Local secrets and environment files
 .env
+.env.*
+!.env.example
+
+# Python caches and local tooling
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# macOS and editor metadata
 .DS_Store
-*.log
-data/*.db-shm
-data/*.db-wal
+.vscode/
+.idea/
+
+# Runtime data, databases, logs, caches, and generated AI artifacts
 data/*
+!data/ai/
+data/ai/*
+!data/ai/.gitignore
+*.log
 *.mmdb
-brutespray-checkpoint.json
-brutespray-checkpoint.jsonl
-brutespray-output/
-passwords.txt
-access/
-preprocessed_configs/
-Papergood
+
+# Local credentials/access and generated server configuration
+/access/
+/preprocessed_configs/
+
+# Generated reports, exports, archives, and documents
+*.zip
+*.docx
+attachments/generated/

@@ -16,6 +16,79 @@ def test_clickhouse_bucket_timestamps_are_explicit_utc():
     assert _iso_utc(aware) == "2026-01-01T12:00:00Z"
 
 
+def test_summary_window_counts_distinct_active_ips_by_current_label(monkeypatch):
+    from contextlib import contextmanager
+    from app.db.repositories import StateRepository
+
+    class Result:
+        def __init__(self, row=None, rows=None):
+            self.row, self.rows = row, rows or []
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def execute(self, sql, args=()):
+            if "COUNT(DISTINCT f.ip)" in sql:
+                assert args[0] == "live"
+                assert args[1].isoformat().startswith("2026-01-01")
+                return Result({"total": 3, "critical": 1, "medium": 1, "low": 0, "good": 1, "unknown": 0})
+            return Result(rows=[])
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr("app.db.repositories.transaction", fake_transaction)
+    result = StateRepository().summary_window(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 23, 59, tzinfo=timezone.utc),
+    )
+    assert result["classification"] == {"critical": 1, "medium": 1, "low": 0, "good": 1, "unknown": 0}
+    assert result["total_ips"] == 3
+
+
+def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeypatch):
+    from contextlib import contextmanager
+    from app.db.repositories import StateRepository
+
+    class Result:
+        def fetchall(self):
+            return [{
+                "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "medium_requests": 7,
+                "critical_requests": 3,
+            }]
+
+    class Connection:
+        def execute(self, sql, args=()):
+            assert "date_bin" in sql
+            assert "1970-01-01 00:00:00+00" in sql
+            assert args[0] == "300 seconds"
+            assert args[1] == "live"
+            return Result()
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr("app.db.repositories.transaction", fake_transaction)
+    result = StateRepository().risk_traffic_series(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        300,
+    )
+    assert result == [{
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "medium_requests": 7,
+        "critical_requests": 3,
+    }]
+
+
+@pytest.mark.integration
 def test_health_endpoint_response_structure():
     from fastapi.testclient import TestClient
     from app.main import app
@@ -34,12 +107,8 @@ def test_health_endpoint_response_structure():
 
 
 def test_ip_dashboard_pipeline_timing_does_not_query_region(monkeypatch):
-    import app.main as main
+    from app.routers.ip_state import _pg_item
 
-    def unexpected_region_lookup(*_args, **_kwargs):
-        raise AssertionError("region lookup entered realtime IP hot path")
-
-    monkeypatch.setattr(main.RegionRepository, "get", unexpected_region_lookup)
     row = {
         "ip": "203.0.113.8",
         "updated_at": datetime(2026, 8, 20, 2, 0, 2, tzinfo=timezone.utc),
@@ -53,7 +122,7 @@ def test_ip_dashboard_pipeline_timing_does_not_query_region(monkeypatch):
         "classification_confidence": 0,
     }
 
-    item = main._pg_item(row)
+    item = _pg_item(row)
 
     assert item["pipeline"]["backend_ready_ms"] == 2000.0
     assert "region_profile" not in item

@@ -5,10 +5,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from ..config.settings import DATA_DIR
-from ..config.settings import DATA_BACKEND
 from ..db import postgres
 from ..providers import pg_intel
 from psycopg.types.json import Jsonb
@@ -18,6 +15,7 @@ DEFAULT_X4B_URLS = {
     "x4b_vpn": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt",
     "x4b_datacenter": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt",
 }
+INTEL_REFRESH_LOCK = "ip-intelligence:run-due-sources"
 
 
 def _positive_int(name: str, default: int, maximum: int = 32) -> int:
@@ -27,8 +25,10 @@ def _positive_int(name: str, default: int, maximum: int = 32) -> int:
         return default
 
 def _due(row, now, hours):
-    if not row or not row["last_run_at"]: return True
-    if row["last_status"] in {"failed", "unavailable"}: return True
+    if not row or not row["last_run_at"]:
+        return True
+    if row["last_status"] in {"failed", "unavailable"}:
+        return True
     try:
         last = row["last_run_at"]
         if isinstance(last, str):
@@ -50,7 +50,19 @@ def _run_provider_pg(factory, source_name, now):
         return result
     except Exception as exc:
         conn.rollback()
-        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "records_upserted": 0}
+        result = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "records_upserted": 0}
+        try:
+            status_conn = postgres.connect()
+            try:
+                _status_pg(status_conn, source_name, now, result)
+                status_conn.commit()
+            except Exception:
+                status_conn.rollback()
+            finally:
+                status_conn.close()
+        except Exception:
+            pass
+        return result
     finally:
         conn.close()
 
@@ -70,6 +82,13 @@ def run_due_sources(now: datetime | None = None) -> dict:
     """PostgreSQL-only intelligence updater."""
     now = now or datetime.now(timezone.utc)
     status_conn = postgres.connect()
+    lock_row = status_conn.execute(
+        "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS acquired",
+        (INTEL_REFRESH_LOCK,),
+    ).fetchone()
+    if not lock_row or not lock_row["acquired"]:
+        status_conn.close()
+        return {"status": "locked", "backend": "postgres"}
     try:
         rows = {r["source_name"]: r for r in status_conn.execute("SELECT * FROM intel_source_status")}
         jobs = [
@@ -114,6 +133,10 @@ def run_due_sources(now: datetime | None = None) -> dict:
                 report[name] = result
         return {"status": "completed", "backend": "postgres", "sources": report}
     finally:
+        status_conn.execute(
+            "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+            (INTEL_REFRESH_LOCK,),
+        )
         status_conn.close()
 
 

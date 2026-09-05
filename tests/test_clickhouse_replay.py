@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from app.db import clickhouse, postgres
+from app.db import clickhouse
 
 
 @pytest.mark.integration
@@ -14,7 +14,6 @@ from app.db import clickhouse, postgres
 def test_clickhouse_replay_is_one_logical_request():
     if not os.getenv("POSTGRES_DSN") or not os.getenv("CLICKHOUSE_HOST"):
         pytest.skip("native PostgreSQL and ClickHouse are required")
-    postgres.ensure_schema()
     dataset = f"pytest-ch-replay-{uuid.uuid4().hex}"
     event_id = uuid.uuid4().hex.ljust(64, "0")[:64]
     event_time = datetime(2026, 8, 18, 11, 59, tzinfo=timezone.utc)

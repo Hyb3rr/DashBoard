@@ -18,7 +18,6 @@ def test_privacy_provider_freshness_and_proxy_type(monkeypatch):
     monkeypatch.setattr(enrichment, "_anonymous_ip", lambda ip: ({"is_vpn": False, "is_proxy": True, "proxy_type": "residential", "is_tor": False, "is_hosting": False}, [], "active"))
     monkeypatch.setattr(enrichment, "_tor_exit_list", lambda ip: ({"is_tor": False}, [], "active"))
     monkeypatch.setattr(enrichment, "_cidr_flag", lambda ip, env_name, label: ({}, [], "not_configured"))
-    monkeypatch.setattr(enrichment, "connect", lambda: (_ for _ in ()).throw(RuntimeError("sqlite isolated")))
     monkeypatch.setenv("STALE_HOURS", "72")
 
     result = asyncio.run(enrichment.lookup("8.8.8.8", refresh=True))

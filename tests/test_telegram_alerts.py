@@ -8,11 +8,11 @@ import asyncio
 
 import pytest
 
-from app.services.telegram import format_bad_alert
+from app.services.telegram import format_critical_alert
 
 
 def test_bad_alert_contains_score_reasons():
-    message = format_bad_alert(
+    message = format_critical_alert(
         "198.51.100.9",
         {
             "score": 80,

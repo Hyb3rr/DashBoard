@@ -4,12 +4,10 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import os
 import socket
-from typing import Any
 
 from ..config import settings
-from ..config.settings import REGION_SEED_PATH
 from ..core.enrichment import lookup
-from ..db.repositories import GeoRepository, ProfileRepository, RegionRepository
+from ..db.repositories import GeoRepository, ProfileRepository
 from ..db.postgres import transaction
 
 

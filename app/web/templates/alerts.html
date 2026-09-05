@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Alerts · Sentinel Hub</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="brand-mark">S</div><div><strong>Sentinel Hub</strong><small>remote monitor</small></div></div>
+      <nav aria-label="Main navigation">
+        <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
+        <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
+        <a class="nav-item active" href="/alerts" aria-current="page"><span class="nav-icon">!</span>Alerts</a>
+        <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
+      </nav>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><div class="eyebrow">Operations / Alert inbox</div><h1>Alerts</h1></div>
+        <div class="actions"><button id="theme-toggle" class="secondary" type="button">Light mode</button></div>
+      </header>
+      <section class="alerts-page" aria-label="Security alerts">
+        <div class="alerts-intro">
+          <div><h2>Meaningful security changes</h2><p>Deterministic alerts for severity entering or rising through Low, Medium, and Critical. AI explanations remain separate and non-authoritative.</p></div>
+          <div class="alerts-live-state" id="alerts-state" role="status">Loading alerts…</div>
+        </div>
+        <section class="analytics-card alert-control" aria-label="Automatic AI explanation setting">
+          <div><strong>Automatically explain Critical alerts</strong><span class="secondary-text">Creates one asynchronous AI explanation for each new Critical transition.</span></div>
+          <button id="auto-explain-toggle" class="secondary" type="button" aria-pressed="false" disabled>Loading…</button>
+        </section>
+        <div class="alerts-filters" role="toolbar" aria-label="Alert filters">
+          <label>Severity<select id="alert-severity"><option value="">All severities</option><option value="critical">Critical</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+          <label>Status<select id="alert-status"><option value="">All statuses</option><option value="new">New</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select></label>
+        </div>
+        <div id="alerts-list" class="alerts-list" aria-live="polite"><div class="state"><strong>Loading alerts…</strong>Reading durable alert state from PostgreSQL.</div></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/time.js"></script>
+  <script src="/static/alerts.js"></script>
+</body>
+</html>

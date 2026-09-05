@@ -1,4 +1,4 @@
-"""Safe, YAML-backed behavior rule registry."""
+"""Validated JSON-backed behavior rule registry."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ import re
 import time
 from typing import Any
 
-import yaml
+from ..evidence import UnifiedEvidence
+
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,16 @@ class Detection:
             "rule_type": self.rule_type,
         }
 
+    def to_evidence(self, observed_at: str) -> UnifiedEvidence:
+        return UnifiedEvidence(
+            source="rule", type="rule", severity=self.severity,
+            observed={"rule_id": self.id, "rule_name": self.name},
+            baseline={"rule_version": self.rule_version, "rule_type": self.rule_type},
+            score_contribution=self.points, observed_at=observed_at,
+            description=self.evidence,
+            supporting_context={"mitre_technique": self.mitre_technique},
+        )
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -70,7 +81,7 @@ class Rule:
     false_positive_notes: tuple[str, ...]
 
 
-DEFAULT_RULES_DIR = Path(__file__).resolve().parents[3] / "rules"
+DEFAULT_RULES_DIR = Path(__file__).resolve().parents[3] / "rules" / "behavior"
 _registry: tuple[Rule, ...] = ()
 _ruleset_hash = ""
 _rules_path: Path = DEFAULT_RULES_DIR
@@ -159,12 +170,11 @@ def _validate_condition(node: Any, filename: str, depth: int) -> None:
             raise ValueError(f"{filename}: numeric operator requires numeric value")
 
 
-def load_rules(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:
-    directory = path or DEFAULT_RULES_DIR
+def _load_rules_files(directory: Path, pattern: str, parser) -> tuple[tuple[Rule, ...], str]:
     rules: list[Rule] = []
     serialized: list[dict] = []
-    for filename in sorted(directory.glob("*.yaml")):
-        raw = yaml.safe_load(filename.read_text(encoding="utf-8"))
+    for filename in sorted(directory.glob(pattern)):
+        raw = parser(filename.read_text(encoding="utf-8"))
         rule = _validate_rule(raw, str(filename))
         if rule is None:
             continue
@@ -176,6 +186,18 @@ def load_rules(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:
         raise ValueError(f"{directory}: no enabled rule files found")
     digest = hashlib.sha256(json.dumps(serialized, sort_keys=True).encode()).hexdigest()
     return tuple(rules), digest
+
+
+def load_rules(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:
+    """Load the canonical JSON behavior ruleset."""
+    directory = path or DEFAULT_RULES_DIR
+    return _load_rules_files(directory, "*.json", json.loads)
+
+
+def load_rules_json(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:
+    """Explicit JSON loader retained for migration/parity callers."""
+    directory = path or DEFAULT_RULES_DIR
+    return _load_rules_files(directory, "*.json", json.loads)
 
 
 def reload_rules(path: Path | None = None) -> str:
@@ -192,7 +214,7 @@ def reload_rules(path: Path | None = None) -> str:
 
 
 def _signature(directory: Path) -> tuple[tuple[str, int, int], ...]:
-    return tuple(sorted((str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in directory.glob("*.yaml")))
+    return tuple(sorted((str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in directory.glob("*.json")))
 
 
 def ensure_rules_current() -> None:
@@ -245,14 +267,22 @@ def _field(ctx: BehaviorContext, name: str) -> Any:
 def _compare(actual: Any, operator: str, expected: Any) -> bool:
     if actual is None and operator in {"gt", "gte", "lt", "lte"}:
         actual = 0
-    if operator == "eq": return actual == expected
-    if operator == "ne": return actual != expected
-    if operator == "gt": return actual > expected
-    if operator == "gte": return actual >= expected
-    if operator == "lt": return actual < expected
-    if operator == "lte": return actual <= expected
-    if operator == "in": return actual in expected
-    if operator == "contains": return expected in actual
+    if operator == "eq":
+        return actual == expected
+    if operator == "ne":
+        return actual != expected
+    if operator == "gt":
+        return actual > expected
+    if operator == "gte":
+        return actual >= expected
+    if operator == "lt":
+        return actual < expected
+    if operator == "lte":
+        return actual <= expected
+    if operator == "in":
+        return actual in expected
+    if operator == "contains":
+        return expected in actual
     raise ValueError(f"unsupported condition operator: {operator}")
 
 

@@ -15,11 +15,13 @@ def _region_nudge(region_profile: dict) -> tuple[int, str | None]:
         item_type = str(item.get("type", "")).lower()
         severity_level = str(item.get("severity") or "").lower()
         if item_type in {"interstate_war", "civil_war"} or severity_level in {"high", "critical"} or "active interstate war" in value or "active civil war" in value:
-            severity = max(severity, 5)
-            evidence = "Region conflict severity high (+5)"
+            candidate, candidate_evidence = 5, "Region conflict severity high (+5)"
         elif severity_level == "medium" or "elevated geopolitical conflict" in value or item_type == "elevated_tension":
-            severity = max(severity, 3)
-            evidence = "Region conflict severity medium (+3)"
+            candidate, candidate_evidence = 3, "Region conflict severity medium (+3)"
+        else:
+            continue
+        if candidate > severity:
+            severity, evidence = candidate, candidate_evidence
     return min(severity, 5), evidence
 
 
@@ -141,15 +143,18 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     if requests < 3 and group_a == 0 and group_b == 0 and group_e == 0:
         label = "unknown"
     elif hard_behavior or base_score >= 60:
-        label = "bad"
+        label = "critical"
     elif score >= 30 or group_e > 0:
-        label = "watch"
+        label = "medium"
+    elif score >= 10:
+        label = "low"
     else:
         label = "good"
 
     summaries = {
-        "bad": "High likelihood of hostile behavior or unwanted network activity",
-        "watch": "Needs review before being treated as benign",
+        "critical": "High likelihood of hostile behavior or unwanted network activity",
+        "medium": "Needs review before being treated as benign",
+        "low": "Weak signal; monitor for additional evidence",
         "good": "No strong hostile indicators in current evidence",
         "unknown": "Insufficient traffic or identity evidence to classify",
     }

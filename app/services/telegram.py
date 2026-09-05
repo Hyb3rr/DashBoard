@@ -28,7 +28,7 @@ def cooldown_seconds() -> int:
         return 3600
 
 
-def format_bad_alert(ip: str, classification: dict[str, Any], profile: dict[str, Any], observation: dict[str, Any]) -> str:
+def format_critical_alert(ip: str, classification: dict[str, Any], profile: dict[str, Any], observation: dict[str, Any]) -> str:
     breakdown = classification.get("score_breakdown") or {}
     explanations = classification.get("score_explanations") or {}
     evidence = classification.get("evidence") or []
@@ -48,7 +48,7 @@ def format_bad_alert(ip: str, classification: dict[str, Any], profile: dict[str,
         if explanations.get(key)
     )
     return (
-        f"<b>🚨 IP classified BAD</b>\n"
+        f"<b>🚨 IP classified CRITICAL</b>\n"
         f"<b>IP:</b> <code>{html.escape(ip)}</code>\n"
         f"<b>Score:</b> {int(classification.get('score', 0) or 0)}/100"
         f" · confidence {int(classification.get('confidence', 0) or 0)}%\n"
@@ -62,6 +62,16 @@ def format_bad_alert(ip: str, classification: dict[str, Any], profile: dict[str,
         f"<b>Groups:</b> {html.escape(score_text)}\n\n"
         f"<b>Why:</b>\n{reasons or '• no calculation detail'}\n\n"
         f"<b>Evidence:</b>\n{evidence_text}"
+    )
+
+
+def format_early_alert(payload: dict[str, Any]) -> str:
+    return (
+        "PRELIMINARY SECURITY ALERT\n"
+        f"IP: {payload.get('ip') or 'unknown'}\n"
+        f"Rule: {payload.get('rule_id') or 'unknown'}\n"
+        f"Request: {payload.get('request') or 'unknown'}\n"
+        "State: preliminary"
     )
 
 

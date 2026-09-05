@@ -11,10 +11,11 @@ def append_ip_changes(conn, ips, reason: str, changed_at: str | None = None) -> 
     unique_ips = tuple(dict.fromkeys(ip for ip in ips if ip))
     if not unique_ips:
         return 0
-    conn.executemany(
-        "INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (%s, %s, %s)",
-        ((ip, reason, timestamp) for ip in unique_ips),
-    )
+    with conn.cursor() as cursor:
+        cursor.executemany(
+            "INSERT INTO ip_change_log (ip, reason, changed_at) VALUES (%s, %s, %s)",
+            ((ip, reason, timestamp) for ip in unique_ips),
+        )
     return len(unique_ips)
 
 

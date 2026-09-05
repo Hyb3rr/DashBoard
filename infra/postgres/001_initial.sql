@@ -344,6 +344,14 @@ CREATE TABLE IF NOT EXISTS threat_indicators (
   PRIMARY KEY (network, source, category)
 );
 
+-- Enrichment resolves one IP against its candidate CIDRs. The primary keys
+-- above are optimized for feed upserts, not network lookups; without these
+-- partial indexes the live resolver scans multi-million-row snapshots.
+CREATE INDEX IF NOT EXISTS idx_privacy_networks_active_network
+  ON privacy_networks (network) WHERE active;
+CREATE INDEX IF NOT EXISTS idx_threat_indicators_active_network
+  ON threat_indicators (network) WHERE active;
+
 CREATE TABLE IF NOT EXISTS ip_observations (
   ip INET PRIMARY KEY,
   payload JSONB NOT NULL DEFAULT '{}'::jsonb,

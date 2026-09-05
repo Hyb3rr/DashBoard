@@ -1,4 +1,4 @@
-"""M2B.7 replay/rollback tests.
+"""M2B.7 replay/rollback tests and Phase 4 acceptance coverage.
 
 The native PostgreSQL case is skipped unless POSTGRES_DSN is supplied. This
 keeps the default unit suite portable while allowing CI/staging to run the
@@ -11,9 +11,9 @@ import os
 import pytest
 
 from app.db import postgres
-from app.db.repositories import PgDetectionRepository
-from app.testing.clock import freeze
-from app.testing.failpoints import CrashFailpoint
+from app.db.repositories import CheckpointRepository, PgDetectionRepository
+from app.core.clock import freeze
+from app.core.failpoints import CrashFailpoint
 
 
 IN_TRANSACTION_FAILPOINTS = (
@@ -21,6 +21,10 @@ IN_TRANSACTION_FAILPOINTS = (
     "after_classification", "after_alert_outbox", "before_checkpoint",
     "after_checkpoint", "before_pg_commit",
 )
+
+
+def _lease(source: str, owner: str) -> None:
+    assert CheckpointRepository().acquire(source, "access", owner, "live")
 
 
 @pytest.mark.integration
@@ -39,7 +43,6 @@ def test_pg_crash_rollback_and_post_commit_replay():
         "method": "GET", "path": "/probe", "status": 404,
         "bytes_sent": 10, "referer": None, "user_agent": "fixture",
     }
-    postgres.ensure_schema()
     with postgres.transaction() as conn:
         for table in ("alert_outbox", "ip_change_log", "ip_classification_state",
                       "ip_observations_state", "ip_minute_path_seen", "ip_minute_features"):
@@ -48,12 +51,14 @@ def test_pg_crash_rollback_and_post_commit_replay():
         conn.execute("DELETE FROM log_sources WHERE source_id=%s", (source,))
 
     repo = PgDetectionRepository()
+    owner = "test:pg-crash"
+    _lease(source, owner)
     try:
         with freeze(now):
             with pytest.raises(RuntimeError, match="before_pg_commit"):
                 repo.process_events([event], batches[0], dataset, source, 0, 100,
                                     "access", "live", now=now,
-                                    failpoint=CrashFailpoint("before_pg_commit"))
+                                    owner=owner, failpoint=CrashFailpoint("before_pg_commit"))
             with postgres.transaction() as conn:
                 assert conn.execute("SELECT COUNT(*) AS n FROM processed_batches WHERE batch_id=%s",
                                     (batches[0],)).fetchone()["n"] == 0
@@ -61,16 +66,16 @@ def test_pg_crash_rollback_and_post_commit_replay():
                                     (ip,)).fetchone()["n"] == 0
 
             assert repo.process_events([event], batches[0], dataset, source, 0, 100,
-                                       "access", "live", now=now)["processed"]
+                                       "access", "live", now=now, owner=owner)["processed"]
             assert repo.process_events([event], batches[0], dataset, source, 0, 100,
-                                       "access", "live", now=now)["duplicate"]
+                                       "access", "live", now=now, owner=owner)["duplicate"]
 
             with pytest.raises(RuntimeError, match="after_pg_commit"):
                 repo.process_events([event], batches[1], dataset, source, 100, 200,
                                     "access", "live", now=now,
-                                    failpoint=CrashFailpoint("after_pg_commit"))
+                                    owner=owner, failpoint=CrashFailpoint("after_pg_commit"))
             assert repo.process_events([event], batches[1], dataset, source, 100, 200,
-                                       "access", "live", now=now)["duplicate"]
+                                       "access", "live", now=now, owner=owner)["duplicate"]
 
             with postgres.transaction() as conn:
                 assert conn.execute("SELECT requests FROM ip_minute_features WHERE ip=%s",
@@ -97,7 +102,6 @@ def test_traffic_always_advances_realtime_cursor_when_label_is_unchanged():
     batches = ("pytest-realtime-one", "pytest-realtime-two")
     event = {"src_ip": ip, "timestamp": "2026-08-18T11:59:01+00:00", "method": "GET",
              "path": "/probe", "status": 200, "bytes_sent": 10, "referer": None, "user_agent": "fixture"}
-    postgres.ensure_schema()
     try:
         with postgres.transaction() as conn:
             for table in ("ip_change_log", "ip_classification_state", "ip_observations_state",
@@ -106,11 +110,13 @@ def test_traffic_always_advances_realtime_cursor_when_label_is_unchanged():
             conn.execute("DELETE FROM processed_batches WHERE batch_id = ANY(%s)", (list(batches),))
             conn.execute("DELETE FROM log_sources WHERE source_id=%s", (source,))
         repo = PgDetectionRepository()
+        owner = "test:realtime-cursor"
+        _lease(source, owner)
         with freeze(datetime(2026, 8, 18, 12, tzinfo=timezone.utc)):
-            assert repo.process_events([event], batches[0], "live", source, 0, 100, "access", "live")["processed"]
+            assert repo.process_events([event], batches[0], "live", source, 0, 100, "access", "live", owner=owner)["processed"]
             with postgres.transaction() as conn:
                 first_cursor = conn.execute("SELECT COALESCE(MAX(seq), 0) AS n FROM ip_change_log").fetchone()["n"]
-            assert repo.process_events([event], batches[1], "live", source, 100, 200, "access", "live")["processed"]
+            assert repo.process_events([event], batches[1], "live", source, 100, 200, "access", "live", owner=owner)["processed"]
             with postgres.transaction() as conn:
                 rows = conn.execute("SELECT reason FROM ip_change_log WHERE ip=%s ORDER BY seq", (ip,)).fetchall()
                 second_cursor = conn.execute("SELECT COALESCE(MAX(seq), 0) AS n FROM ip_change_log").fetchone()["n"]
@@ -139,7 +145,6 @@ def test_pg_internal_failpoints_rollback_then_replay(failpoint_name):
     now = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
     event = {"src_ip": ip, "timestamp": "2026-08-18T11:59:01+00:00", "method": "GET",
              "path": "/probe", "status": 404, "bytes_sent": 10, "referer": None, "user_agent": "fixture"}
-    postgres.ensure_schema()
     with postgres.transaction() as conn:
         for table in ("alert_outbox", "ip_change_log", "ip_classification_state",
                       "ip_observations_state", "ip_minute_path_seen", "ip_minute_features"):
@@ -148,14 +153,16 @@ def test_pg_internal_failpoints_rollback_then_replay(failpoint_name):
         conn.execute("DELETE FROM log_sources WHERE source_id=%s", (source,))
     try:
         repo = PgDetectionRepository()
+        owner = f"test:{failpoint_name}"
+        _lease(source, owner)
         with freeze(now):
             with pytest.raises(RuntimeError, match=failpoint_name):
                 repo.process_events([event], batch, dataset, source, 0, 100, "access", "live",
-                                    now=now, failpoint=CrashFailpoint(failpoint_name))
+                                    now=now, owner=owner, failpoint=CrashFailpoint(failpoint_name))
             with postgres.transaction() as conn:
                 assert conn.execute("SELECT COUNT(*) AS n FROM processed_batches WHERE batch_id=%s", (batch,)).fetchone()["n"] == 0
                 assert conn.execute("SELECT COUNT(*) AS n FROM ip_minute_features WHERE ip=%s", (ip,)).fetchone()["n"] == 0
-            assert repo.process_events([event], batch, dataset, source, 0, 100, "access", "live", now=now)["processed"]
+            assert repo.process_events([event], batch, dataset, source, 0, 100, "access", "live", now=now, owner=owner)["processed"]
             with postgres.transaction() as conn:
                 assert conn.execute("SELECT requests FROM ip_minute_features WHERE ip=%s", (ip,)).fetchone()["requests"] == 1
     finally:

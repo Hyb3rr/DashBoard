@@ -14,6 +14,17 @@ import re
 
 from .json_utils import encode  # kept for callers that use encode/decode from here
 
+__all__ = [
+    "encode",
+    "PARSER_VERSION",
+    "parse_apache_combined",
+    "parse_apache_combined_diagnostic",
+    "import_apache_lines",
+    "effective_risk",
+]
+
+PARSER_VERSION = "apache-combined-v1"
+
 APACHE_COMBINED = re.compile(
     r'^(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] '
     r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]+" '
@@ -41,24 +52,36 @@ def _parse_ts(value: str) -> str | None:
 
 
 def parse_apache_combined(line: str) -> dict | None:
+    event, _code, _message = parse_apache_combined_diagnostic(line)
+    return event
+
+
+def parse_apache_combined_diagnostic(line: str) -> tuple[dict | None, str | None, str | None]:
     match = APACHE_COMBINED.match(line.strip())
     if not match:
-        return None
+        return None, "INVALID_APACHE_COMBINED_FORMAT", "line does not match Apache Combined format"
     data = match.groupdict()
     try:
         ip = str(ipaddress.ip_address(data["ip"]))
     except ValueError:
-        return None
+        return None, "INVALID_IP", "source IP is not a valid address"
+    timestamp = _parse_ts(data["ts"])
+    if timestamp is None:
+        return None, "INVALID_TIMESTAMP", "timestamp is not a valid Apache timestamp"
+    try:
+        bytes_sent = None if data["bytes"] == "-" else int(data["bytes"])
+    except ValueError:
+        return None, "INVALID_BYTE_COUNT", "byte count is not numeric"
     return {
         "src_ip": ip,
-        "timestamp": _parse_ts(data["ts"]),
+        "timestamp": timestamp,
         "method": data["method"],
         "path": data["path"],
         "status": int(data["status"]),
-        "bytes_sent": None if data["bytes"] == "-" else int(data["bytes"]),
+        "bytes_sent": bytes_sent,
         "referer": None if data["referer"] == "-" else data["referer"],
         "user_agent": None if data["ua"] == "-" else data["ua"],
-    }
+    }, None, None
 
 
 def import_apache_lines(lines: Iterable[str], source: str) -> dict:

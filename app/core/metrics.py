@@ -46,3 +46,11 @@ def snapshot() -> dict:
             "timings": {key: {**value, "avg_ms": value["total_ms"] / value["count"] if value["count"] else 0.0}
                          for key, value in _timings.items()},
         }
+
+
+def reset() -> None:
+    """Clear process-local metrics between isolated tests."""
+    with _lock:
+        _counters.clear()
+        _gauges.clear()
+        _timings.clear()

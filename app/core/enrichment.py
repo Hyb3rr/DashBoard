@@ -1,15 +1,12 @@
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 import ipaddress
 import os
 from pathlib import Path
+from typing import Any
 
-from ..config import settings
 from ..config.settings import TOR_EXIT_LIST
-def connect():
-    """Stub kept for test isolation monkeypatching."""
-    return None
+from .evidence import UnifiedEvidence
 
 
 def resolve_network_location(*args, **kwargs):
@@ -22,10 +19,6 @@ def resolve_network_location(*args, **kwargs):
     if len(args) == 1:
         return resolve_pg(str(args[0]), kwargs.get("vendor"), force_refresh=force_refresh)
     return resolve_pg(kwargs.get("ip", ""), kwargs.get("vendor"), force_refresh=force_refresh)
-
-
-from .net_utils import candidate_networks
-
 
 
 try:
@@ -45,6 +38,37 @@ def _now() -> str:
 
 def _present(value) -> bool:
     return value is not None and value != ""
+
+
+def build_enrichment_evidence(data: dict[str, Any], observed_at: str | None = None) -> list[dict[str, Any]]:
+    """Adapt local enrichment signals without changing legacy profile fields."""
+    timestamp = observed_at or data.get("fetched_at") or _now()
+    result: list[dict[str, Any]] = []
+    privacy = {key: data.get(key) for key in ("is_tor", "is_vpn", "is_proxy", "is_hosting") if data.get(key) is not None}
+    if privacy:
+        result.append(UnifiedEvidence(
+            source="privacy", type="privacy", severity="supporting", observed=privacy,
+            baseline={"source": "local provider state"}, score_contribution=0,
+            observed_at=timestamp, description="Privacy and hosting signals from local intelligence.",
+            supporting_context={"sources": data.get("sources", [])},
+        ).to_dict())
+    reputation = data.get("abuse_reputation") or data.get("reputation")
+    if reputation:
+        result.append(UnifiedEvidence(
+            source="reputation", type="reputation", severity="supporting", observed={"state": reputation},
+            baseline={"source": "local reputation state"}, score_contribution=0,
+            observed_at=timestamp, description="Reputation context from persisted intelligence.",
+            supporting_context={"provider_status": data.get("provider_status", {})},
+        ).to_dict())
+    geo = {key: data.get(key) for key in ("country", "country_code", "asn", "organization", "network_type") if _present(data.get(key))}
+    if geo:
+        result.append(UnifiedEvidence(
+            source="geo_network", type="geo_network", severity="supporting", observed=geo,
+            baseline={"location_scope": data.get("location_scope", "network")}, score_contribution=0,
+            observed_at=timestamp, description="Geo and network identity context from local intelligence.",
+            supporting_context={"confidence": data.get("organization_confidence", 0), "field_sources": data.get("field_sources", {})},
+        ).to_dict())
+    return result
 
 
 def _reader(kind: str, path: str, factory):
@@ -221,78 +245,6 @@ def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
     """Read normalized intelligence snapshot from PostgreSQL."""
     from ..db.pg_intelligence import local_intelligence
     return local_intelligence(ip)
-
-    try:
-        conn = connect()
-        address = ipaddress.ip_address(ip)
-        candidates = candidate_networks(address)
-        placeholders = ",".join("?" for _ in candidates)
-        matches = conn.execute(
-            f"SELECT * FROM privacy_networks WHERE active=1 AND network IN ({placeholders})",
-            candidates,
-        ).fetchall()
-        for row in matches:
-            try:
-                if address not in ipaddress.ip_network(row["network"], strict=False):
-                    continue
-            except ValueError:
-                continue
-            kind, source = row["kind"], row["source"]
-            field = "is_vpn" if kind == "vpn" else "is_proxy" if kind == "proxy" else "is_hosting"
-            result[field] = True
-            prior = fields.get(field)
-            fields[field] = ", ".join(dict.fromkeys(filter(None, [prior, source])))
-            providers[source] = {"status":"active", "checked_at":row["checked_at"], "kind":kind}
-            if kind == "proxy" and row["proxy_type"] and not result.get("proxy_type"):
-                result["proxy_type"] = row["proxy_type"]; fields["proxy_type"] = source
-        threat = []
-        threat_rows = conn.execute(
-            f"SELECT * FROM threat_indicators WHERE active=1 AND network IN ({placeholders})",
-            candidates,
-        ).fetchall()
-        for row in threat_rows:
-            try:
-                if address not in ipaddress.ip_network(row["network"], strict=False): continue
-            except ValueError:
-                continue
-            threat.append(row)
-        for row in threat:
-            providers[row["source"]] = {"status":"active", "checked_at":row["checked_at"], "category":row["category"]}
-            # FireHOL proxy lists are also valid local privacy evidence. Keep
-            # them separate from generic threat categories, but expose the
-            # proxy flag to the privacy scorer when the snapshot is present.
-            if row["source"] in {"firehol:firehol_proxies", "firehol:firehol_anonymous"}:
-                result["is_proxy"] = True
-                fields["is_proxy"] = row["source"]
-        if threat: result["threat_indicators"] = [dict(row) for row in threat]
-        resolution = conn.execute("SELECT * FROM geo_resolutions WHERE ip=?", (ip,)).fetchone()
-        if resolution:
-            evidence = json.loads(resolution["evidence_json"] or "{}")
-            result["network_location"] = {
-                "country": resolution["country"],
-                "country_code": resolution["country_code"],
-                "city": resolution["city"],
-                "latitude": resolution["latitude"],
-                "longitude": resolution["longitude"],
-                "confidence": resolution["confidence"],
-                "disputed": bool(resolution["disputed"]),
-                "scope": resolution["location_scope"],
-                "sources": json.loads(resolution["source_ids_json"] or "[]"),
-                "confidence_breakdown": evidence.get("confidence_breakdown", {}),
-                # `country`/`country_code` above are the *operational* location.
-                # `registration` is separate RIR/WHOIS ownership context and is
-                # expected to differ for global cloud/CDN networks - see
-                # allocation_pattern for whether that's the normal case.
-                "registration": evidence.get("registration"),
-                "allocation_pattern": evidence.get("allocation_pattern", "unknown"),
-                "volatile_location": evidence.get("volatile_location", False),
-            }
-            result.update({key: resolution[key] for key in ("asn", "organization", "network_type", "latitude", "longitude", "city") if resolution[key]})
-            providers["geo_resolution"] = {"status": "active", "checked_at": resolution["resolved_at"]}
-        conn.close()
-    except Exception as exc:
-        errors.append(f"Local intelligence: {type(exc).__name__}: {exc}")
-    return result, providers, fields, errors
 
 
 def _maxmind(ip: str) -> tuple[dict, list[str], str]:

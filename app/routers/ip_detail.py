@@ -5,8 +5,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..services.dispositions import STATES
 from ..collectors.websocket_collector import collector
-from ..db import postgres as postgres_store
-from ..db.repositories import DispositionRepository, StateRepository
+from ..db.repositories import AiRepository, DispositionRepository, StateRepository
 from .ip_state import _pg_item
 
 router = APIRouter()
@@ -27,15 +26,14 @@ async def ip_details(ip: str, refresh: bool = False):
     row = await asyncio.to_thread(StateRepository().get, address_text)
     if not row:
         raise HTTPException(404, "IP not found")
-    cached_location = row.get("network_location") or {}
     needs_enrichment = address.is_global and (
-        refresh
-        or row.get("enrichment_status") != "complete"
-        or not cached_location.get("ip2region")
+        refresh or row.get("enrichment_status") != "complete"
     )
     if needs_enrichment:
         collector.schedule_enrichment(address_text)
-    item = _pg_item(row)
+    scores = AiRepository().scores([address_text])
+    ai_profile = scores[0] if scores else None
+    item = _pg_item(row, ai_profile) if ai_profile else _pg_item(row)
     return item
 
 

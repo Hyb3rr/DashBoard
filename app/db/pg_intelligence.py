@@ -64,6 +64,17 @@ def _resolve_city(candidates, country_code):
             "city_distance_km": round(distance, 1) if distance is not None else None}
 
 
+def _country_group(operational: list[dict]) -> tuple[str, list[dict]]:
+    groups = {}
+    for item in operational:
+        groups.setdefault(str(item.get("country_code") or "").upper(), []).append(item)
+    code, items = min(
+        groups.items(),
+        key=lambda pair: (-sum(int(x.get("source_confidence") or 0) for x in pair[1]), pair[0]),
+    )
+    return code, sorted(items, key=lambda item: str(item.get("source") or ""))
+
+
 def resolve_network_location(ip: str, vendor: dict | None = None, force_refresh: bool = False) -> dict[str, Any]:
     address = ipaddress.ip_address(ip)
     candidates = _candidates(str(address))
@@ -90,9 +101,7 @@ def resolve_network_location(ip: str, vendor: dict | None = None, force_refresh:
     if preferred:
         code, items = str(preferred.get("country_code")).upper(), [preferred]
     else:
-        groups = {}
-        for item in operational: groups.setdefault(str(item.get("country_code") or "").upper(), []).append(item)
-        code, items = max(groups.items(), key=lambda pair: sum(int(x.get("source_confidence") or 0) for x in pair[1]))
+        code, items = _country_group(operational)
     confidence = int(items[0].get("source_confidence") or 0)
     city = _resolve_city(operational, code)
     return {

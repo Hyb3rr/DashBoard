@@ -1,0 +1,35 @@
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <log>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse-server.log</log>
+        <errorlog>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>3</count>
+    </logger>
+    <path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/</path>
+    <tmp_path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/tmp/</tmp_path>
+    <user_files_path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/user_files/</user_files_path>
+    <format_schema_path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/format_schemas/</format_schema_path>
+    <listen_host>127.0.0.1</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9001</tcp_port>
+    <profiles>
+        <default />
+    </profiles>
+    <quotas>
+        <default />
+    </quotas>
+    <users>
+        <default>
+            <profile>default</profile>
+            <quota>default</quota>
+            <no_password />
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+    <backups>
+        <allowed_path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/backups/</allowed_path>
+    </backups>
+</clickhouse>

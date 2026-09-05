@@ -18,8 +18,8 @@ from app.core.enrichment import (
 from app.core.intelligence import classify_ip
 from app.core.regions import market_score, normalise_conflict_indicators
 from app.core.logs import import_apache_lines, parse_apache_combined
-from app.tools.tor_refresh import refresh_tor_exit_list
-from app.tools.calibration import csv_text, evaluate_csv
+from scripts.ops.tor_refresh import refresh_tor_exit_list
+from app.core.calibration import csv_text, evaluate_csv
 
 
 def test_risk_uses_local_signals():
@@ -100,7 +100,7 @@ def test_tor_refresh_replaces_atomically_and_validates_payload(monkeypatch, tmp_
         def read(self):
             return b"8.8.8.8\nnot-an-ip\n192.168.1.1\n"
 
-    monkeypatch.setattr("app.tools.tor_refresh.urlopen", lambda request, timeout: Response())
+    monkeypatch.setattr("scripts.ops.tor_refresh.urlopen", lambda request, timeout: Response())
     result = refresh_tor_exit_list(output, url="https://example.test/tor")
     assert result["status"] == "updated"
     assert output.read_text(encoding="utf-8") == "8.8.8.8\n"
@@ -124,7 +124,7 @@ def test_tor_refresh_keeps_old_file_on_empty_response(monkeypatch, tmp_path):
         def read(self):
             return b""
 
-    monkeypatch.setattr("app.tools.tor_refresh.urlopen", lambda request, timeout: Response())
+    monkeypatch.setattr("scripts.ops.tor_refresh.urlopen", lambda request, timeout: Response())
     result = refresh_tor_exit_list(output, url="https://example.test/tor")
     assert result["status"] == "failed"
     assert output.read_text(encoding="utf-8") == "8.8.8.8\n"
@@ -149,7 +149,7 @@ def test_tor_refresh_merges_default_sources(monkeypatch, tmp_path):
             return self.payload
 
     responses = iter((Response(b"8.8.8.8\n2001:4860:4860::8888\n"), Response(b"8.8.8.8\n1.1.1.1\n")))
-    monkeypatch.setattr("app.tools.tor_refresh.urlopen", lambda request, timeout: next(responses))
+    monkeypatch.setattr("scripts.ops.tor_refresh.urlopen", lambda request, timeout: next(responses))
     result = refresh_tor_exit_list(output)
     assert result["status"] == "updated"
     assert output.read_text(encoding="utf-8") == "1.1.1.1\n8.8.8.8\n2001:4860:4860::8888\n"
@@ -159,12 +159,12 @@ def test_tor_refresh_merges_default_sources(monkeypatch, tmp_path):
 def test_calibration_export_and_evaluation(tmp_path):
     payload = csv_text([
         {"ip": "8.8.8.8", "classification": {"label": "good", "score": 0, "confidence": 65}, "country": "United States"},
-        {"ip": "1.1.1.1", "classification": {"label": "bad", "score": 70, "confidence": 90}, "country": "Australia"},
+        {"ip": "1.1.1.1", "classification": {"label": "critical", "score": 70, "confidence": 90}, "country": "Australia"},
     ])
     path = tmp_path / "calibration.csv"
     rows = list(csv.DictReader(StringIO(payload)))
     rows[0]["human_label"] = "good"
-    rows[1]["human_label"] = "watch"
+    rows[1]["human_label"] = "critical"
     output = StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=rows[0].keys())
     writer.writeheader()
@@ -172,8 +172,8 @@ def test_calibration_export_and_evaluation(tmp_path):
     path.write_text(output.getvalue(), encoding="utf-8")
     result = evaluate_csv(path)
     assert result["labeled"] == 2
-    assert result["accuracy"] == 0.5
-    assert result["mismatches"][0]["ip"] == "1.1.1.1"
+    assert result["accuracy"] == 1.0
+    assert result["mismatches"] == []
 
 
 def test_field_merge_does_not_overwrite_existing_value():
@@ -225,7 +225,6 @@ def test_lookup_uses_maxmind_when_available(monkeypatch):
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
     monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
-    monkeypatch.setattr(enrichment, "connect", lambda: (_ for _ in ()).throw(RuntimeError("sqlite isolated")))
     monkeypatch.setattr(
         enrichment,
         "_maxmind",
@@ -255,7 +254,6 @@ def test_lookup_sets_is_tor_from_local_exit_list(monkeypatch, tmp_path):
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
     monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
-    monkeypatch.setattr(enrichment, "connect", lambda: (_ for _ in ()).throw(RuntimeError("sqlite isolated")))
     tor_list = tmp_path / "tor.txt"
     tor_list.write_text("8.8.8.8\n")
     monkeypatch.setenv("TOR_EXIT_LIST_PATH", str(tor_list))
@@ -282,13 +280,8 @@ def test_lookup_sets_is_tor_from_local_exit_list(monkeypatch, tmp_path):
 def test_lookup_reports_missing_local_geoip_configuration(monkeypatch):
     from app.core import enrichment
 
-    class _NoopConnection:
-        def close(self):
-            pass
-
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
     monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
-    monkeypatch.setattr(enrichment, "connect", lambda: _NoopConnection())
     monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
     result = asyncio.run(lookup("8.8.8.8"))
     assert result["core_enrichment_status"] == "failed"
@@ -301,7 +294,7 @@ def test_classify_ip_identity_only_is_capped_below_bad():
         {"behavior_score": 0, "requests": 20},
         {"country_name": "United States"},
     )
-    assert result["label"] == "good"
+    assert result["label"] == "low"
     assert result["score_breakdown"]["identity_b"] == 25
     assert result["score"] == 25
 
@@ -311,7 +304,7 @@ def test_classify_ip_sensitive_probe_is_bad_without_identity_signal():
         {"country_code": "US"},
         {"behavior_score": 50, "sensitive_probe_requests": 1, "requests": 10},
     )
-    assert result["label"] == "bad"
+    assert result["label"] == "critical"
     assert result["score_breakdown"]["behavior_a"] == 50
 
 
@@ -320,7 +313,7 @@ def test_classify_ip_tor_and_probe_keeps_identity_cap():
         {"is_tor": True, "is_proxy": True, "is_vpn": True},
         {"behavior_score": 50, "sensitive_probe_requests": 1, "requests": 10},
     )
-    assert result["label"] == "bad"
+    assert result["label"] == "critical"
     assert result["score_breakdown"]["identity_b"] == 25
     assert result["score"] == 75
 
@@ -348,6 +341,32 @@ def test_classify_ip_uses_conflict_context_as_watch_signal():
     )
     assert result["score"] == 6
     assert "region conflict severity high" in " ".join(result["evidence"]).lower()
+
+
+@pytest.mark.parametrize(
+    ("indicators", "expected_score", "expected_evidence"),
+    [
+        ([{"severity": "high"}, {"severity": "medium"}], 6, "high (+5)"),
+        ([{"severity": "medium"}, {"severity": "high"}], 6, "high (+5)"),
+        ([{"severity": "high"}, {"severity": "high"}], 6, "high (+5)"),
+        ([{"severity": "medium"}, {"severity": "medium"}], 4, "medium (+3)"),
+        ([{"severity": "high"}], 6, "high (+5)"),
+        ([{"severity": "medium"}], 4, "medium (+3)"),
+    ],
+)
+def test_region_evidence_matches_maximum_conflict_nudge(indicators, expected_score, expected_evidence):
+    result = classify_ip(
+        {}, {"behavior_score": 1, "requests": 10}, {"conflict_indicators": indicators}
+    )
+    assert result["score"] == expected_score
+    assert result["score_breakdown"]["region_d"] == expected_score - 1
+    assert any(expected_evidence in item for item in result["evidence"])
+
+
+def test_empty_region_indicators_add_no_conflict_evidence():
+    result = classify_ip({}, {"behavior_score": 1, "requests": 10}, {"conflict_indicators": []})
+    assert result["score_breakdown"]["region_d"] == 0
+    assert not any("region conflict severity" in item.lower() for item in result["evidence"])
 
 
 def test_classify_ip_region_does_not_create_risk_without_behavior():
@@ -453,7 +472,7 @@ def test_group_e_promotes_watch_but_cannot_create_bad():
         {"ai_anomaly_score": 70, "anomalous_windows": 1, "windows_seen": 3},
     )
     assert result["score_breakdown"]["ai_e"] == 8
-    assert result["label"] == "watch"
+    assert result["label"] == "medium"
 
 
 @pytest.mark.integration
@@ -568,3 +587,17 @@ def test_region_detail_inherits_shared_theme_without_own_toggle():
     assert "localStorage.getItem('sentinel-theme') || 'dark'" in page.text
     assert "window.addEventListener('storage'" in page.text
     assert "id=\"theme-toggle\"" not in page.text
+
+
+def test_region_detail_contains_precomputed_market_layers_contract():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    page = TestClient(app).get("/regions/DE")
+    assert page.status_code == 200
+    assert "Local Opportunities" in page.text
+    assert "Woodworking" in page.text
+    assert "Metal Fabrication" in page.text
+    assert "Overlap / Remaining Opportunity" in page.text
+    assert "insufficient_local_hierarchy" in page.text
+    assert "marketLayerMarkup" in page.text

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelhub.local/schemas/behavior-rule.schema.json",
+  "title": "Behavior detection rule",
+  "type": "object",
+  "required": ["id", "name", "severity", "points", "rule_type", "window", "condition", "version", "enabled", "false_positive_notes"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9-]{2,63}$"},
+    "name": {"type": "string", "minLength": 1},
+    "severity": {"enum": ["low", "medium", "high", "critical"]},
+    "points": {"type": "integer", "minimum": 0, "maximum": 100},
+    "rule_type": {"enum": ["technique", "anomaly"]},
+    "mitre_technique": {"type": ["string", "null"], "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"},
+    "window": {"enum": ["1h", "24h"]},
+    "description": {"type": "string"},
+    "false_positive_notes": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "version": {"type": "integer", "minimum": 1},
+    "enabled": {"type": "boolean"},
+    "condition": {"type": "object"}
+  },
+  "additionalProperties": true
+}

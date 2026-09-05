@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sentinel Hub</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/map.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <script src="/static/hub-cache.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <div class="brand-mark">
+          S
+        </div>
+        <div>
+          <strong>Sentinel Hub</strong><small>remote monitor</small>
+        </div>
+      </div>
+      <nav aria-label="Main navigation">
+        <a class="nav-item" data-view="overview" href="#overview"><span class="nav-icon">⌁</span>Overview</a> <a class="nav-item" data-view="threats" href="#threats"><span class="nav-icon">◎</span>IP Intelligence</a> <a class="nav-item" href="/alerts"><span class="nav-icon">!</span>Alerts</a> <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
+      </nav>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div>
+          <div class="eyebrow" id="page-kicker">
+            Intelligence / Overview
+          </div>
+          <h1 id="page-title">Threat Signal</h1>
+        </div>
+        <div class="actions">
+          <button id="theme-toggle" class="secondary" type="button">Light mode</button>
+        </div>
+      </header>
+      <section id="overview" class="view-panel" data-view-panel="overview">
+        <section class="dashboard-map-card" aria-label="Global intelligence map">
+          <div class="dashboard-map-head">
+            <div><div class="eyebrow">Live geographic read model</div><h2>Global intelligence map</h2></div>
+            <div class="dashboard-map-actions"><div class="segmented" id="view-mode" role="group" aria-label="Map layer"><button class="active" type="button" data-mode="opportunity" aria-pressed="true">Opportunity</button><button type="button" data-mode="threat" aria-pressed="false">Threat</button></div><div class="range-control" id="map-range" role="group" aria-label="Map time range"><span class="eyebrow">Window</span><button type="button" data-range="1h">1h</button><button class="active" type="button" data-range="24h">24h</button><button type="button" data-range="7d">7d</button></div></div>
+          </div>
+          <div class="map-stage dashboard-map-stage" id="map-stage"><div class="map-context" aria-hidden="true"><span>RESOLVED GEO · READ ONLY</span><span>Click a marker to inspect</span></div><div id="map-basemap" class="map-basemap" aria-label="World map showing opportunity and threat intelligence"></div><div id="map-tooltip" class="map-tooltip" hidden></div><div id="map-empty" class="map-empty" hidden><strong>No map points in this view</strong><span>Resolved coordinates or the selected layer are unavailable.</span></div></div>
+          <div class="dashboard-map-foot"><span id="map-status" role="status">Loading map data…</span><span id="map-updated">Awaiting snapshot</span><span><b id="mapped-count">0</b> plotted · <b id="total-count">0</b> countries</span><button id="back-world" class="secondary map-back" type="button" hidden>← World</button></div>
+        </section>
+        <section class="overview-top" aria-label="Dashboard overview">
+          <div class="classification-donut-card" aria-label="Classification breakdown">
+            <div class="classification-donut" id="classification-donut">
+              <div class="state">
+                Loading chart…
+              </div>
+            </div>
+          </div>
+          <div class="top-data-stack" aria-label="Top traffic data">
+            <section class="analytics-card top-data-card">
+              <div class="analytics-head">
+                <h2>Top IPs</h2>
+              </div>
+              <div class="traffic-table" id="top-ips">
+                <div class="state">
+                  Loading…
+                </div>
+              </div>
+            </section>
+            <section class="analytics-card top-data-card">
+              <div class="analytics-head">
+                <h2>Top paths</h2>
+              </div>
+              <div class="traffic-table" id="top-paths">
+                <div class="state">
+                  Loading…
+                </div>
+              </div>
+            </section>
+          </div>
+          <div class="site-state overview-health" id="health-widget" role="button" tabindex="0" title="Click to view infrastructure health diagnostics">
+            <div class="health-head">
+              <div class="eyebrow">System Health</div>
+              <div class="online"><span class="dot" id="collector-dot"></span><span id="collector-state">Checking…</span></div>
+            </div>
+            <div class="health-grid">
+              <div class="health-chip" id="chip-pg"><span class="dot-sm"></span>PG</div>
+              <div class="health-chip" id="chip-ch"><span class="dot-sm"></span>CH</div>
+              <div class="health-chip" id="chip-rules"><span class="dot-sm"></span>Rules</div>
+              <div class="health-chip" id="chip-stream"><span class="dot-sm"></span>Stream</div>
+            </div>
+          </div>
+        </section>
+        <section class="traffic-panel" aria-label="Traffic timeline">
+          <div class="traffic-head">
+            <div>
+              <h2>Traffic timeline</h2>
+              <div class="traffic-summary" id="traffic-bucket">
+                request buckets
+              </div>
+            </div>
+            <div class="traffic-range" id="traffic-range" role="group" aria-label="Traffic time range">
+              <button data-range="30m">30m</button><button data-range="1h">1h</button><button data-range="6h">6h</button><button data-range="12h">12h</button><button class="active" data-range="1d">1d</button><button data-range="3d">3d</button><button data-range="7d">7d</button><button data-range="30d">30d</button>
+            </div>
+          </div>
+          <div class="traffic-window" aria-label="Traffic time window">
+            <label>Started at<input id="traffic-start" type="datetime-local"></label><label>Ended at<input id="traffic-end" type="datetime-local"></label><button class="secondary" type="button" id="traffic-apply">Apply window</button><button class="secondary" type="button" id="traffic-clear">Clear</button><span class="traffic-window-note" id="traffic-window-note">Live window</span>
+          </div>
+          <div id="traffic-filter-state" hidden=""></div>
+          <div class="traffic-summary" id="traffic-summary">
+            Loading request history…
+          </div>
+          <div class="traffic-risk-legend" aria-label="Traffic risk legend">
+            <span><i class="total"></i>Total requests</span><span><i class="medium"></i>Medium requests</span><span><i class="critical"></i>Critical requests</span>
+          </div>
+          <div class="traffic-chart" id="traffic-chart">
+            <div class="state">
+              Loading timeline…
+            </div>
+          </div>
+        </section>
+      </section>
+      <section id="threats" class="view-panel" data-view-panel="threats" hidden="">
+        <section class="workbench" id="network-identities">
+          <div class="workbench-head">
+            <h2>Network identities <span class="count" id="visible-count">0 visible</span> <span class="count" id="ip-realtime-latency">realtime —</span></h2>
+            <div class="filters">
+              <input id="search" type="search" aria-label="Search network identities" placeholder="Search IP, country, ASN, organization"> <select id="privacy" aria-label="Filter privacy">
+                <option value="">
+                  All networks
+                </option>
+                <option value="privacy">
+                  Privacy signal
+                </option>
+                <option value="tor">
+                  Tor exit
+                </option>
+                <option value="hosting">
+                  Hosting
+                </option>
+              </select> <select id="classification" aria-label="Filter classification">
+                <option value="">
+                  All classes
+                </option>
+                <option value="critical">
+                  Critical
+                </option>
+                <option value="medium">
+                  Medium
+                </option>
+                <option value="low">
+                  Low
+                </option>
+                <option value="good">
+                  Good
+                </option>
+                <option value="unknown">
+                  Unclassified
+                </option>
+              </select> <select id="disposition" aria-label="Filter disposition">
+                <option value="">
+                  All dispositions
+                </option>
+                <option value="new">
+                  New
+                </option>
+                <option value="monitor">
+                  Monitor
+                </option>
+                <option value="investigate">
+                  Investigate
+                </option>
+                <option value="escalate">
+                  Escalate
+                </option>
+                <option value="resolved">
+                  Resolved
+                </option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Identity</th>
+                  <th class="sortable active" data-sort="last_seen">Last seen</th>
+                  <th>Operational location</th>
+                  <th class="sortable" data-sort="requests">Requests</th>
+                  <th class="sortable hide-mobile" data-sort="status_4xx">4xx</th>
+                  <th class="sortable hide-mobile" data-sort="unique_paths">Paths</th>
+                  <th>Signals</th>
+                  <th>AI anomaly</th>
+                  <th class="sortable" data-sort="threat_signal_score">Threat signal</th>
+                  <th>Triage</th>
+                </tr>
+              </thead>
+              <tbody id="rows">
+                <tr>
+                  <td colspan="10">
+                    <div class="state">
+                      <strong>Loading observations…</strong>Reading aggregated intelligence from the Hub.
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pagination" id="ip-pagination">
+            <button class="secondary" id="ip-prev" type="button">Previous</button><span id="ip-page-label">Page 1</span><button class="secondary" id="ip-next" type="button">Next</button>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <div class="drawer" id="drawer" aria-hidden="true">
+    <div class="scrim" data-close=""></div>
+    <aside class="panel" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">
+            Investigation profile
+          </div>
+          <h2 id="detail-title">IP address</h2>
+        </div><button class="icon-button" data-close="" aria-label="Close investigation">×</button>
+      </div>
+      <div id="detail-body">
+        <div class="state">
+          <strong>Loading profile…</strong>Correlating network and behavior signals.
+        </div>
+      </div>
+    </aside>
+  </div>
+  <div class="health-dialog" id="health-dialog" aria-hidden="true">
+    <div class="health-dialog-card" role="dialog" aria-modal="true" aria-labelledby="health-dialog-title">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">
+            Infrastructure Diagnostics
+          </div>
+          <h2 id="health-dialog-title">System Health Status</h2>
+        </div><button class="icon-button" id="close-health-btn" type="button" aria-label="Close dialog">×</button>
+      </div>
+      <div class="dialog-body" id="health-dialog-body">
+        <div class="state">
+          <strong>Checking infrastructure…</strong>Loading component diagnostics.
+        </div>
+      </div>
+      <div class="dialog-foot">
+        <span id="health-last-checked">Last checked: —</span> <button class="secondary" id="recheck-health-btn" type="button">Check now</button>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/time.js"></script>
+  <script src="/static/dashboard.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="/static/map.js"></script>
+</body>
+</html>

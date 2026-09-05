@@ -9,10 +9,11 @@ from ..config import settings
 from ..core import metrics
 from ..db import clickhouse
 from ..db.repositories import ObservationRepository
+from ..core.evidence import UnifiedEvidence
 
 
 def rarity_score(row: dict, baseline_buckets: int = 168, now: datetime | None = None) -> int:
-    """Score evidence only; never maps to BAD/WATCH classification."""
+    """Score evidence only; never maps to a classification tier."""
     now = now or datetime.now(timezone.utc)
     population = int(row.get("total_ips") or 0)
     path_ips = int(row.get("path_ips") or 0)
@@ -28,6 +29,28 @@ def rarity_score(row: dict, baseline_buckets: int = 168, now: datetime | None = 
     return max(0, min(100, population_points + temporal_points + newness_points))
 
 
+def build_rare_path_evidence(row: dict, now: datetime) -> dict:
+    score = rarity_score(row, now=now)
+    payload = UnifiedEvidence(
+        source="rare_path_detector", type="rare_path", severity="supporting",
+        observed={"path": row["path"], "requests": int(row["path_requests"])},
+        baseline={"days": 7, "distinct_ips": int(row["path_ips"]), "total_ips": int(row["total_ips"]), "temporal_buckets": int(row["temporal_buckets"])},
+        score_contribution=0, observed_at=str(row["last_seen"]),
+        description="Supporting evidence only; rarity alone does not establish malicious intent.",
+        supporting_context={"first_seen": row["first_seen"], "last_seen": row["last_seen"], "rarity_score": score},
+        freshness=now.isoformat(), mode="shadow",
+    ).to_dict()
+    # Keep current IP Detail contract while callers migrate to UnifiedEvidence.
+    payload.update({
+        "path": row["path"],
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "rarity_score": score,
+        "explanation": payload["description"],
+    })
+    return payload
+
+
 def run_shadow(now: datetime | None = None) -> tuple[int, list[str]]:
     """Scan one rolling window and persist supporting evidence in PostgreSQL."""
     finish = metrics.timed("rare_path.batch_ms")
@@ -37,16 +60,7 @@ def run_shadow(now: datetime | None = None) -> tuple[int, list[str]]:
         rows = clickhouse.rare_path_baseline(start, now, settings.DATASET_LIVE_ID)
         by_ip: dict[str, list[dict]] = {}
         for row in rows:
-            by_ip.setdefault(row["ip"], []).append({
-                "source": "rare_path_shadow",
-                "path": row["path"],
-                "observed": int(row["path_requests"]),
-                "baseline": {"days": 7, "distinct_ips": int(row["path_ips"]), "total_ips": int(row["total_ips"]), "temporal_buckets": int(row["temporal_buckets"])},
-                "first_seen": row["first_seen"], "last_seen": row["last_seen"],
-                "rarity_score": rarity_score(row, now=now),
-                "explanation": "Supporting evidence only; rarity alone does not establish malicious intent.",
-                "freshness": now.isoformat(),
-            })
+            by_ip.setdefault(row["ip"], []).append(build_rare_path_evidence(row, now))
         for evidence in by_ip.values():
             evidence.sort(key=lambda item: (-item["rarity_score"], item["path"]))
         changed_ips = ObservationRepository().upsert_rare_path_evidence(by_ip, settings.DATASET_LIVE_ID)
@@ -61,7 +75,7 @@ def run_shadow(now: datetime | None = None) -> tuple[int, list[str]]:
         finish()
 
 
-async def periodic_shadow(stop_event, on_changed=None) -> None:
+async def periodic_shadow(stop_event, on_changed=None, should_run=None) -> None:
     """Run outside ingest flush path at a bounded periodic cadence."""
     import asyncio
 
@@ -70,6 +84,8 @@ async def periodic_shadow(stop_event, on_changed=None) -> None:
         await asyncio.sleep(interval)
         if stop_event.is_set():
             break
+        if should_run is not None and not should_run():
+            continue
         try:
             count, changed_ips = await asyncio.to_thread(run_shadow)
             if changed_ips and on_changed:

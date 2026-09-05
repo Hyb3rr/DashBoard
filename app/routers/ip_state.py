@@ -1,12 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from ..core.enrichment import abuse_reputation_state, intel_tags_for_abuse
 from ..core.intelligence import classify_ip
-from ..tools.calibration import csv_text
-from ..db.repositories import StateRepository
+from ..core.calibration import csv_text
+from ..db.repositories import AiRepository, StateRepository
 
 router = APIRouter()
 
@@ -24,7 +24,7 @@ def calibration_export():
 def list_ips(limit: int = 100):
     bounded = min(max(limit, 1), 5000)
     result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
-    return [_pg_item(row) for row in result["rows"]]
+    return _pg_rows(result["rows"])
 
 
 @router.get("/api/ips/page")
@@ -44,22 +44,37 @@ def ip_page(
     privacy = None if intel_tag else privacy
     result = StateRepository().page(page, page_size, sort, direction, q, privacy, classification, disposition, intel_tag)
     return {
-        "items": [_pg_item(row) for row in result["rows"]], "page": page, "page_size": page_size,
+        "items": _pg_rows(result["rows"]), "page": page, "page_size": page_size,
         "total_items": result["total"], "total_pages": (result["total"] + page_size - 1) // page_size,
         "change_cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @router.get("/api/ips/summary")
-def ip_summary():
-    summary = StateRepository().summary()
+def ip_summary(start: str | None = None, end: str | None = None):
+    now = datetime.now(timezone.utc)
+    end_stamp = _parse_summary_time(end) if end else now
+    start_stamp = _parse_summary_time(start) if start else end_stamp - timedelta(days=1)
+    if end_stamp is None or start_stamp is None or end_stamp > now or end_stamp <= start_stamp:
+        raise HTTPException(400, "Invalid summary time range")
+    summary = StateRepository().summary_window(start_stamp, end_stamp)
     summary["priority_items"] = _pg_items(summary.pop("priority_ips"))
-    summary["ai"] = {"scored": 0, "flagged": 0, "coverage": 0}
+    summary["ai"] = AiRepository().summary()
     summary["snapshot_at"] = datetime.now(timezone.utc).isoformat()
     return summary
 
 
-def _pg_item(row: dict) -> dict:
+def _parse_summary_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
     """Build the dashboard contract from the PostgreSQL state read model."""
     observation = dict(row.get("observation_payload") or {})
     observation.setdefault("recent_behavior_score", observation.get("behavior_score", 0))
@@ -75,11 +90,15 @@ def _pg_item(row: dict) -> dict:
     profile["intel_tags"] = intel_tags_for_abuse(profile["abuse_reputation"])
     
     # Region context is intentionally excluded from the realtime IP hot path.
+    # AI is explanatory/read-only here. Rules and persisted classification state
+    # remain the source of classification decisions.
     classification = classify_ip(profile, observation, {}, None)
-    if row.get("label"):
+    if row.get("label") is not None:
         classification["label"] = row["label"]
-        classification["score"] = int(row.get("classification_score") or classification["score"])
-        classification["confidence"] = int(row.get("classification_confidence") or classification.get("confidence", 0))
+    if row.get("classification_score") is not None:
+        classification["score"] = int(row["classification_score"])
+    if row.get("classification_confidence") is not None:
+        classification["confidence"] = int(row["classification_confidence"])
     
     item = {
         **profile,
@@ -106,6 +125,8 @@ def _pg_item(row: dict) -> dict:
         "unique_paths": int(observation.get("unique_paths") or 0),
         "first_seen": observation.get("first_seen"),
         "last_seen": observation.get("last_seen"),
+        "ai_profile": ai_profile or {},
+        "ai_status": "ready" if ai_profile else "pending",
     }
     received_at = observation.get("pipeline_received_at")
     state_ready_at = observation.get("pipeline_state_ready_at")
@@ -154,14 +175,22 @@ def _elapsed_ms(start, end) -> float | None:
 
 def _pg_items(ips: list[str] | set[str]) -> list[dict]:
     repo = StateRepository()
-    return [_pg_item(row) for row in repo.get_many(ips)]
+    rows = repo.get_many(ips)
+    scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
+    return [_pg_item(row, scores.get(str(row["ip"]))) for row in rows]
+
+
+def _pg_rows(rows: list[dict]) -> list[dict]:
+    ips = [str(row["ip"]) for row in rows]
+    scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
+    return [_pg_item(row, scores.get(str(row["ip"]))) for row in rows]
 
 
 @router.get("/api/ips/snapshot")
 def ip_snapshot(limit: int = 500):
     bounded = min(max(limit, 1), 500)
     result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
-    return {"items": [_pg_item(row) for row in result["rows"]], "cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat()}
+    return {"items": _pg_rows(result["rows"]), "cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat()}
 
 
 @router.get("/api/ips/updates")

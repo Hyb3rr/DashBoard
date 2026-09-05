@@ -1,0 +1,10 @@
+<!-- This file was generated automatically.
+     Do not edit it: it is likely to be discarded and generated again before it's read next time.
+     Files used to generate this file:
+       /Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/infra/clickhouse/config.xml      -->
+
+<clickhouse>
+    <backups>
+        <allowed_path>/Users/ngaphan/Desktop/01-Subject/Practice/4._Real_Web/ip-intelligence/data/clickhouse/backups/</allowed_path>
+    </backups>
+</clickhouse>

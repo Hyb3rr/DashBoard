@@ -19,9 +19,8 @@ from urllib.request import Request, urlopen
 from psycopg.types.json import Jsonb
 
 from .common import conditional_fetch, parse_networks
-from .firehol import list_url, DEFAULT_LISTS, NETSET_LISTS, FIREHOL_SOURCES
+from .firehol import list_url, DEFAULT_LISTS, FIREHOL_SOURCES
 from .global_geo import parse_rir_delegated, parse_geofeed
-from . import vpn_az0
 
 
 def _now():
@@ -115,7 +114,8 @@ def refresh_rir(conn, rir, url, cache=None):
     rows = parse_rir_delegated(result["payload"].decode("utf-8", "replace"), rir)
     if not rows:
         return {"status": "failed", "error": "empty or invalid RIR payload", "records_upserted": 0}
-    now = _now(); source = f"rir:{rir.lower()}"
+    now = _now()
+    source = f"rir:{rir.lower()}"
     conn.execute("UPDATE geo_prefixes SET active=false WHERE source=%s", (source,))
     _many(conn, """INSERT INTO geo_prefixes
       (network,rir,registration_country,source,first_seen,last_seen,active,metadata)
@@ -166,9 +166,11 @@ def _addresses(value, resolve=True):
 def _values(item, key):
     value = item
     for part in key if isinstance(key, list) else [key]:
-        if not isinstance(value, dict): return []
+        if not isinstance(value, dict):
+            return []
         value = value.get(part)
-    if isinstance(value, str): return [value]
+    if isinstance(value, str):
+        return [value]
     return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
 
 
@@ -177,26 +179,39 @@ def refresh_az0(conn, url=None, timeout=30):
     with urlopen(Request(url, headers={"User-Agent": "ip-intelligence/1.0"}), timeout=timeout) as response:
         manifest = json.loads(response.read().decode("utf-8"))
     providers = manifest.get("providers", manifest) if isinstance(manifest, dict) else manifest
-    if not isinstance(providers, dict): providers = {str(i): v for i, v in enumerate(providers or [])}
-    total = 0; statuses = {}
+    if not isinstance(providers, dict):
+        providers = {str(i): v for i, v in enumerate(providers or [])}
+    total = 0
+    statuses = {}
     for name, item in providers.items():
-        if not isinstance(item, dict): continue
-        found = []; errors = []
+        if not isinstance(item, dict):
+            continue
+        found = []
+        errors = []
         for mirror in _values(item, "urls") or _values(item, "url"):
             try:
                 with urlopen(Request(mirror, headers={"User-Agent": "ip-intelligence/1.0"}), timeout=timeout) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 found += [x for ip in _values(data, item.get("ip_key", "")) for x in _addresses(ip, False)]
                 found += [x for host in _values(data, item.get("hostname_key", "")) for x in _addresses(host, True)]
-                if found: break
+                if found:
+                    break
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 errors.append(f"{mirror}: {type(exc).__name__}: {exc}")
         found = list(dict.fromkeys(found))
-        if found:
+        promoted = bool(found and not errors)
+        if promoted:
             _privacy(conn, "az0_vpn_ip", "vpn", found, provider=name, provider_filter=name, metadata={"errors": errors})
-        total += len(found)
+            total += len(found)
         statuses[name] = {"status": "ok" if found and not errors else "partial" if found else "failed", "records": len(found), "errors": errors}
-    return {"status": "updated" if total else "failed", "url": url, "records_upserted": total, "providers": statuses}
+    provider_statuses = {item["status"] for item in statuses.values()}
+    if "partial" in provider_statuses:
+        overall = "partial"
+    elif total and provider_statuses <= {"ok"}:
+        overall = "updated"
+    else:
+        overall = "failed"
+    return {"status": overall, "url": url, "records_upserted": total, "providers": statuses}
 
 
 def refresh_device_browser(conn, url=None, api_key=None, cache=None):
@@ -220,21 +235,30 @@ def refresh_device_browser(conn, url=None, api_key=None, cache=None):
             payload = response.read()
     payload = _csv_payload(payload, url)
     cache = cache or Path(os.getenv("DEVICEBROWSERINFO_CACHE", "data/device_browser_info.csv"))
-    now = _now(); records = {}
+    now = _now()
+    records = {}
     for row in csv.DictReader(io.StringIO(payload.decode("utf-8-sig", "replace"))):
         network = (row.get("ip") or row.get("network") or row.get("ipAddress") or "").strip()
-        if not network: continue
-        try: network = str(ipaddress.ip_network(network, strict=False))
+        if not network:
+            continue
+        try:
+            network = str(ipaddress.ip_network(network, strict=False))
         except ValueError:
-            try: network = str(ipaddress.ip_network(f"{ipaddress.ip_address(network)}/{ipaddress.ip_address(network).max_prefixlen}", strict=False))
-            except ValueError: continue
+            try:
+                network = str(ipaddress.ip_network(f"{ipaddress.ip_address(network)}/{ipaddress.ip_address(network).max_prefixlen}", strict=False))
+            except ValueError:
+                continue
         proxy_type = (row.get("proxyType") or row.get("proxy_type") or "").strip().lower() or None
-        if (row.get("isDataCenter") or row.get("is_data_center") or "").strip().lower() == "true" or proxy_type == "data_center": proxy_type = "datacenter"
-        try: score = float(row.get("score") or 0)
-        except (TypeError, ValueError): score = 0.0
+        if (row.get("isDataCenter") or row.get("is_data_center") or "").strip().lower() == "true" or proxy_type == "data_center":
+            proxy_type = "datacenter"
+        try:
+            score = float(row.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
         metadata = {k: row.get(k) for k in ("asn", "organization", "country_code", "countryCode", "city", "latitude", "longitude", "isProxy", "isDataCenter") if row.get(k)}
         records[network] = (network, "proxy", None, proxy_type, score, "device_browser", now, now, now, Jsonb(metadata))
-    if not records: return {"status": "failed", "error": "CSV contains no valid IP records", "records_upserted": 0}
+    if not records:
+        return {"status": "failed", "error": "CSV contains no valid IP records", "records_upserted": 0}
     atomic_write(cache, payload)
     _privacy(conn, "device_browser", "proxy", list(records), provider="DeviceBrowser", metadata={"source": "device_browser"})
     conn.execute("DELETE FROM privacy_networks WHERE source='device_browser' AND kind='proxy' AND active=false")

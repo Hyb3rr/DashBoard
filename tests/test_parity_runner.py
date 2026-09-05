@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 import pytest
 
 from app.db.parity import normalize_detections
-from app.testing.clock import freeze, utcnow
-from app.testing.failpoints import CrashFailpoint, NoopFailpoint
-from app.testing.parity_runner import compare, format_report
+from app.core.clock import freeze, utcnow
+from app.core.failpoints import CrashFailpoint, NoopFailpoint
+from tests.fixtures.parity_runner import compare, format_report
 
 
 @pytest.mark.parity

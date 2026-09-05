@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -15,8 +14,9 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 from ..config.settings import AI_MODEL_PATH, PROJECT_DIR
-from ..core.json_utils import decode, encode
+from ..core.json_utils import decode
 from ..core.change_feed import append_ip_changes
+from ..core.evidence import UnifiedEvidence
 from .features import FEATURE_COLUMNS, build_window_features
 
 MODEL_KEY = "isolation_forest_v1"
@@ -144,7 +144,7 @@ def _feature_frame(conn, start: datetime, end: datetime, ips: list[str] | None =
               WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute < %s"""
     params: list[Any] = ["live", start, end]
     if ips is not None:
-        sql += " AND ip=ANY(%s::inet[])"
+        sql += " AND f.ip=ANY(%s::inet[])"
         params.append(ips)
     rows = conn.execute(sql, params).fetchall()
     return build_window_features([dict(row) for row in rows])
@@ -262,8 +262,7 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
     if bundle is None:
         return {**base, "status": "model_unavailable", "ips": 0, "windows": 0, "anomalous_windows": 0}
 
-    state = _state(conn)
-    cursor = int(state["last_scored_event_id"] or 0)
+    _state(conn)
     max_event = 0
     recent_cutoff = _iso(now - timedelta(minutes=10))
     if force_full:
@@ -316,7 +315,19 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
             window_start = row["window_start"].isoformat()
             old = previous_map.get(window_start, {})
             window_score = int(row["window_score"])
-            evidence.append({
+            contract = UnifiedEvidence(
+                source="isolation_forest",
+                type="isolation_forest",
+                severity="supporting",
+                observed={"window_start": window_start, "features": {column: _feature_value(row[column]) for column in FEATURE_COLUMNS}},
+                baseline={"model_version": bundle["model_version"], "decision_floor": floor},
+                score_contribution=0,
+                observed_at=window_start,
+                description="Isolation Forest flagged an anomalous traffic window.",
+                supporting_context={"decision_score": float(row["decision"]), "window_score": window_score},
+                mode=MODEL_MODE,
+            ).to_dict()
+            contract.update({
                 "window_start": window_start,
                 "decision_score": float(row["decision"]),
                 "window_score": window_score,
@@ -325,6 +336,7 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
                 "model_version": bundle["model_version"],
                 "features": {column: _feature_value(row[column]) for column in FEATURE_COLUMNS},
             })
+            evidence.append(contract)
         confidence, confidence_level = _confidence(len(group))
         score = int(anomalies["window_score"].max()) if not anomalies.empty else 0
         reason = "model_refresh" if force_full else "new_traffic"

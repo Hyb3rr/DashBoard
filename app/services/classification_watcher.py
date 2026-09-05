@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from ..db import postgres as postgres_store
 from ..core import metrics
-from .telegram import enabled as telegram_enabled, format_bad_alert, send_message
+from .telegram import enabled as telegram_enabled, format_critical_alert, send_message
 
 logger = logging.getLogger(__name__)
 WATCH_INTERVAL_SECONDS = 5
@@ -46,7 +46,7 @@ async def _deliver_outbox() -> None:
                 claimed.append(dict(row))
     for row in claimed:
         payload = row.get("payload") or {}
-        message = payload.get("message") or format_bad_alert(
+        message = payload.get("message") or format_critical_alert(
             str(row["ip"]), payload.get("classification") or {}, {}, {}
         )
         delivered = await send_message(message)

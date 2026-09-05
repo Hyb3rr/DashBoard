@@ -1,8 +1,6 @@
 """Atomic ip2region xdb updater with format validation."""
 from __future__ import annotations
 
-import ipaddress
-import os
 import tempfile
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -29,5 +27,6 @@ def refresh():
             updated.append(name)
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}: {exc}")
-            if 'temporary' in locals() and temporary.exists(): temporary.unlink()
+            if 'temporary' in locals() and temporary.exists():
+                temporary.unlink()
     return {"status": "ok" if not errors else "partial" if updated else "failed", "updated": updated, "errors": errors}

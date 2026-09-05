@@ -10,9 +10,9 @@ from uuid import uuid4
 import pytest
 
 from app.db import clickhouse, postgres
-from app.db.repositories import PgDetectionRepository
+from app.db.repositories import CheckpointRepository, PgDetectionRepository
 from app.services import classification_watcher
-from app.testing.failpoints import CrashFailpoint
+from app.core.failpoints import CrashFailpoint
 
 
 NOW = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
@@ -62,6 +62,10 @@ def _cleanup_ch(dataset: str) -> None:
         client.close()
 
 
+def _lease(source: str, owner: str) -> None:
+    assert CheckpointRepository().acquire(source, "access", owner, "live")
+
+
 @pytest.mark.integration
 @pytest.mark.failure
 @pytest.mark.outage
@@ -99,7 +103,9 @@ def test_postgres_down_replays_after_clickhouse_success(monkeypatch):
     event = _event(ip, f"m2c-pg-event-{uuid4().hex}")
     rows = [{**event, "dataset_id": dataset, "source_id": source}]
     original_pool_factory = postgres._connection_pool
+    owner = f"test:{source}"
     try:
+        _lease(source, owner)
         clickhouse.insert_events(rows)
         monkeypatch.setattr(
             postgres, "_connection_pool",
@@ -107,12 +113,12 @@ def test_postgres_down_replays_after_clickhouse_success(monkeypatch):
         )
         with pytest.raises(ConnectionError, match="PG down"):
             PgDetectionRepository().process_events(
-                rows, batch, dataset, source, 0, 100, "access", "live", now=NOW
+                rows, batch, dataset, source, 0, 100, "access", "live", now=NOW, owner=owner
             )
         monkeypatch.setattr(postgres, "_connection_pool", original_pool_factory)
         clickhouse.insert_events(rows)
         result = PgDetectionRepository().process_events(
-            rows, batch, dataset, source, 0, 100, "access", "live", now=NOW
+            rows, batch, dataset, source, 0, 100, "access", "live", now=NOW, owner=owner
         )
         assert result["processed"] is True
         with postgres.transaction() as conn:
@@ -141,7 +147,6 @@ def test_telegram_down_leaves_pg_alert_pending(monkeypatch):
     _require_native()
     ip = "198.51.100.212"
     key = f"m2c-telegram-{uuid4().hex}"
-    postgres.ensure_schema()
     try:
         due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         with postgres.transaction() as conn:
@@ -182,14 +187,16 @@ def test_collector_crash_after_commit_restarts_without_double_count():
     dataset = f"m2c-restart-{uuid4().hex}"
     event = _event(ip, f"m2c-restart-event-{uuid4().hex}")
     rows = [{**event, "dataset_id": dataset, "source_id": source}]
+    owner = f"test:{source}"
     try:
+        _lease(source, owner)
         clickhouse.insert_events(rows)
         repo = PgDetectionRepository()
-        repo.process_events(rows, batch, dataset, source, 0, 100, "access", "live", now=NOW)
+        repo.process_events(rows, batch, dataset, source, 0, 100, "access", "live", now=NOW, owner=owner)
         with pytest.raises(RuntimeError, match="before_ack"):
             CrashFailpoint("before_ack").hit("before_ack")
         clickhouse.insert_events(rows)
-        result = repo.process_events(rows, batch, dataset, source, 0, 100, "access", "live", now=NOW)
+        result = repo.process_events(rows, batch, dataset, source, 0, 100, "access", "live", now=NOW, owner=owner)
         assert result["duplicate"] is True
         with postgres.transaction() as conn:
             assert conn.execute(

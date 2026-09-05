@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import socket
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -17,10 +18,16 @@ from ..db import clickhouse as clickhouse_store
 from ..db import postgres as postgres_store
 from ..core import metrics
 from ..db.repositories import CheckpointRepository
-from ..core.logs import parse_apache_combined
+from ..db.repositories import CheckpointCommitRejected
+from ..core.logs import PARSER_VERSION, parse_apache_combined_diagnostic
+from ..core.fast_detection import ShortWindowDetector
 from ..services.profiles import ensure_profile_postgres, refresh_due_profiles
 from ..services.rare_path_detector import periodic_shadow
-from ..testing.failpoints import NoopFailpoint
+from ..services.early_alerts import early_alerts
+from ..services.workload_governor import WorkloadGovernor
+from ..services.ai_runtime import ai_runtime
+from ..services.raw_log_archive import RawLogArchive
+from ..core.failpoints import NoopFailpoint
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +64,7 @@ class CollectorConfig:
             or "azure-access",
             batch_size=_env_int("LOG_WS_BATCH_SIZE", 200, 1),
             flush_ms=_env_int("LOG_WS_FLUSH_MS", 1000, 50),
-            ai_interval_seconds=_env_int("LOG_WS_AI_INTERVAL_SECONDS", 300, 1),
+            ai_interval_seconds=_env_int("AI_RUNTIME_INTERVAL_SECONDS", 300, 1),
         )
 
     @property
@@ -127,6 +134,7 @@ class WebSocketCollector:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._flush_task: asyncio.Task | None = None
+        self._storage_task: asyncio.Task | None = None
         self._enrichment_task: asyncio.Task | None = None
         self._privacy_task: asyncio.Task | None = None
         self._rare_path_task: asyncio.Task | None = None
@@ -134,27 +142,45 @@ class WebSocketCollector:
         self._enrichment_pending: set[str] = set()
         self._enrichment_deferred: set[str] = set()
         self._pending: list[tuple[str, str]] = []
+        self._storage_queue: asyncio.Queue[tuple[list[str], int, int, str]] = asyncio.Queue(maxsize=1000)
+        self._window_detector = ShortWindowDetector()
+        self._governor = WorkloadGovernor()
+        self._storage_oldest_started: float | None = None
         self._stream_offset = 0
         self._flush_lock = asyncio.Lock()
         self._owner = f"{socket.gethostname()}:{os.getpid()}"
         self.failpoint = NoopFailpoint()
+        self._raw_archive = RawLogArchive(self.config.source_id)
 
     async def start(self) -> None:
         if os.getenv("RARE_PATH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
             self._rare_path_task = asyncio.create_task(
-                periodic_shadow(self._stop, on_changed=self._publish_rare_changes),
+                periodic_shadow(self._stop, on_changed=self._publish_rare_changes,
+                                should_run=self._governor.allow_rare_path),
                 name="rare-path-shadow",
             )
-        if self._task or not self.config.enabled or not self.config.valid:
+        if self._task:
             await self._publish_status()
             return
         self._stop.clear()
-        self._task = asyncio.create_task(self.run(), name="websocket-collector")
-        self._flush_task = asyncio.create_task(self._flush_loop(), name="websocket-flush")
+        await self._raw_archive.start()
+
+        # Enrichment is also requested by the IP detail API. It must remain
+        # available when websocket ingestion is disabled (the default for a
+        # local/demo deployment), otherwise those requests accumulate forever
+        # in the queue with no worker to process them.
         self._enrichment_task = asyncio.create_task(
             self.enrichment_loop(), name="websocket-enrichment"
         )
         self._privacy_task = asyncio.create_task(self.privacy_loop(), name="websocket-privacy-refresh")
+        await early_alerts.start()
+        if self.config.enabled and self.config.valid:
+            self._task = asyncio.create_task(self.run(), name="websocket-collector")
+            self._flush_task = asyncio.create_task(self._flush_loop(), name="websocket-flush")
+            self._storage_task = asyncio.create_task(self._storage_loop(), name="websocket-storage")
+        else:
+            self.state = "disabled" if not self.config.enabled else "config_error"
+        await self._publish_status()
 
     async def stop(self) -> None:
         self._stop.set()
@@ -163,6 +189,7 @@ class WebSocketCollector:
             for task in (
                 self._task,
                 self._flush_task,
+                self._storage_task,
                 self._enrichment_task,
                 self._privacy_task,
                 self._rare_path_task,
@@ -171,18 +198,31 @@ class WebSocketCollector:
         ]
         if self._pending:
             await self._flush_pending()
+        if self._storage_task:
+            await self._storage_queue.join()
+        await self._raw_archive.stop()
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._task = self._flush_task = self._enrichment_task = self._privacy_task = self._rare_path_task = None
+        self._task = self._flush_task = self._storage_task = self._enrichment_task = self._privacy_task = self._rare_path_task = None
+        await early_alerts.stop()
         self.state = "stopped"
         await self._publish_status()
 
     def status(self) -> dict[str, Any]:
         metrics.gauge("collector.pending_lines", self.pending_lines)
         metrics.gauge("enrichment.queue_depth", self._enrichment_queue.qsize())
+        oldest_age_ms = 0.0
+        if self._storage_oldest_started is not None:
+            oldest_age_ms = (time.monotonic() - self._storage_oldest_started) * 1000
+        state = self._governor.update(
+            self._storage_queue.qsize(), oldest_age_ms, early_alerts.status()["queue_depth"]
+        )
+        metrics.gauge("storage.queue_depth", self._storage_queue.qsize())
+        metrics.gauge("storage.oldest_age_ms", oldest_age_ms)
         metrics.gauge("collector.reconnect_attempt", self.reconnect_attempt)
+        raw_archive = self._raw_archive.status()
         return {
             "enabled": self.config.enabled,
             "source_id": self.config.source_id,
@@ -192,19 +232,21 @@ class WebSocketCollector:
             "pending_lines": self.pending_lines,
             "reconnect_attempt": self.reconnect_attempt,
             "last_error": self.last_error,
-            "last_ai_run": None,
-            "ai_scoring": {},
-            "ai_model_version": None,
-            "ai_trained_at": None,
-            "ai_train_status": None,
-            "ai_training_windows": 0,
-            "ai_last_score_at": None,
-            "ai_score_status": None,
-            "ai_last_error": None,
+            "workload": {
+                "mode": state.mode,
+                "storage_queue_depth": state.storage_queue_depth,
+                "storage_oldest_age_ms": state.storage_oldest_age_ms,
+                "early_alert_queue_depth": state.early_alert_queue_depth,
+            },
+            "raw_archive": raw_archive,
+            "ai_runtime": ai_runtime.status(),
         }
 
     def schedule_enrichment(self, ip: str) -> bool:
         """Queue one IP on the existing bounded, deduplicated worker queue."""
+        if not self._governor.allow_enrichment():
+            self._enrichment_deferred.add(ip)
+            return False
         if ip in self._enrichment_pending:
             return False
         try:
@@ -254,15 +296,61 @@ class WebSocketCollector:
             end_offset = current_offset + sum(
                 len(line.encode("utf-8")) + 1 for line in pending
             )
-            new_offset, cursor, affected, new_ips = await asyncio.to_thread(
-                self._commit_batch, pending, end_offset, current_offset, received_at
-            )
             self._pending = []
             self.pending_lines = 0
+            self._stream_offset = end_offset
+            await self._enqueue_storage(pending, end_offset, current_offset, received_at)
+            return end_offset
+
+    async def _enqueue_storage(
+        self, batch: list[str], end_offset: int, current_offset: int, received_at: str,
+    ) -> None:
+        if not self._storage_task:
+            new_offset, cursor, affected, new_ips = await asyncio.to_thread(
+                self._commit_batch, batch, end_offset, current_offset, received_at
+            )
             self._stream_offset = new_offset
             self.last_offset = new_offset
             await self._after_commit(cursor, affected, new_ips)
-            return new_offset
+            return
+        if self._storage_oldest_started is None:
+            self._storage_oldest_started = time.monotonic()
+        await self._storage_queue.put((batch, end_offset, current_offset, received_at))
+
+    async def _storage_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                batch, end_offset, current_offset, received_at = await asyncio.wait_for(
+                    self._storage_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+            try:
+                while not self._stop.is_set():
+                    try:
+                        new_offset, cursor, affected, new_ips = await asyncio.to_thread(
+                            self._commit_batch, batch, end_offset, current_offset, received_at
+                        )
+                        self._stream_offset = new_offset
+                        self.last_offset = new_offset
+                        await self._after_commit(cursor, affected, new_ips)
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except CheckpointCommitRejected as exc:
+                        self.last_error = str(exc)
+                        self.state = "standby"
+                        metrics.increment("collector.checkpoint_commit_rejected")
+                        self._stop.set()
+                        return
+                    except Exception as exc:
+                        self.last_error = f"{type(exc).__name__}: {exc}"[:240]
+                        metrics.increment("collector.storage_failures")
+                        await asyncio.sleep(1)
+            finally:
+                self._storage_queue.task_done()
+                if self._storage_queue.empty():
+                    self._storage_oldest_started = None
 
     def _connection_url(self, offset: int) -> str:
         separator = "&" if "?" in self.config.url else "?"
@@ -353,6 +441,9 @@ class WebSocketCollector:
         try:
             message = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
+            if isinstance(raw, str):
+                await self._raw_archive.append_batch([raw])
+                metrics.increment("collector.malformed_frames")
             return None
         if not isinstance(message, dict):
             return None
@@ -365,9 +456,20 @@ class WebSocketCollector:
                     current_offset = max(current_offset, self._stream_offset)
                     self._stream_offset = current_offset
                     received_at = utc_now()
-                    self._pending.extend(
-                        (str(item), received_at) for item in items if isinstance(item, str)
-                    )
+                    valid_items = [item for item in items if isinstance(item, str)]
+                    await self._raw_archive.append_batch(valid_items, received_at=datetime.fromisoformat(received_at))
+                    self._pending.extend((item, received_at) for item in valid_items)
+                    for line in valid_items:
+                        started = metrics.timed("early_detection.processing_ms")
+                        detections = self._window_detector.observe(line)
+                        started()
+                        for detection in detections:
+                            if detection.shadow_only:
+                                metrics.increment("pentest_detection.matches")
+                                metrics.increment(f"pentest_detection.{detection.marker}")
+                                continue
+                            metrics.increment("early_detection.matches")
+                            early_alerts.enqueue(detection, detection.ip)
                     self.pending_lines = len(self._pending)
                     while len(self._pending) >= self.config.batch_size:
                         batch_entries = self._pending[: self.config.batch_size]
@@ -377,15 +479,10 @@ class WebSocketCollector:
                         end_offset = current_offset + sum(
                             len(line.encode("utf-8")) + 1 for line in batch
                         )
-                        result = await asyncio.to_thread(
-                            self._commit_batch, batch, end_offset, current_offset,
-                            batch_received_at,
-                        )
-                        current_offset, cursor, affected, new_ips = result
-                        self._stream_offset = current_offset
-                        self.last_offset = current_offset
-                        await self._after_commit(cursor, affected, new_ips)
-                        flushed_offset = current_offset
+                        self._stream_offset = end_offset
+                        await self._enqueue_storage(batch, end_offset, current_offset, batch_received_at)
+                        current_offset = end_offset
+                        flushed_offset = None
                     self.pending_lines = len(self._pending)
             return flushed_offset
         if kind == "backlog_done":
@@ -407,15 +504,13 @@ class WebSocketCollector:
             received_at = min(
                 (stamp for _line, stamp in pending_entries), default=utc_now()
             )
-            new_offset, cursor, affected, new_ips = await asyncio.to_thread(
-                self._commit_batch, pending, end_offset, current_offset, received_at
-            )
             self._pending = []
             self.pending_lines = 0
-            self._stream_offset = new_offset
-            self.last_offset = new_offset
-            await self._after_commit(cursor, affected, new_ips)
-            return new_offset
+            self._stream_offset = end_offset
+            await self._enqueue_storage(pending, end_offset, current_offset, received_at)
+        if self._storage_task:
+            await self._storage_queue.join()
+        return self.last_offset
 
     async def _after_commit(
         self, cursor: int, affected: set[str], new_ips: list[str]
@@ -439,10 +534,20 @@ class WebSocketCollector:
         position = start_offset
         now = utc_now()
         events: list[dict[str, Any]] = []
+        parse_failures: list[dict[str, Any]] = []
         for line, length in zip(lines, lengths):
-            event = parse_apache_combined(line)
+            event, error_code, error_message = parse_apache_combined_diagnostic(line)
             position += length
             if not event:
+                parse_failures.append({
+                    "source_id": self.config.source_id,
+                    "source_offset": position - length,
+                    "raw_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                    "parser_error_code": error_code or "PARSER_REJECTED",
+                    "parser_error_message": error_message or "parser rejected line",
+                    "parser_version": PARSER_VERSION,
+                    "observed_at": now,
+                })
                 continue
             offset = position - length
             source = f"ws:{self.config.source_id}"
@@ -457,7 +562,17 @@ class WebSocketCollector:
                 "pipeline_received_at": received_at or now,
                 "raw_line": line,
             })
+        if parse_failures:
+            self._raw_archive.write_parse_failures(parse_failures)
         if not events:
+            self.failpoint.hit("before_checkpoint")
+            from ..db.repositories import CheckpointRepository
+            with postgres_store.transaction() as conn:
+                CheckpointRepository().commit_offset(
+                    conn, self.config.source_id, self.config.log_key,
+                    int(end_offset), self.state, now, self._owner,
+                )
+            self.failpoint.hit("after_checkpoint")
             return end_offset, 0, set(), []
         self.failpoint.hit("after_parse")
         clickhouse_store.insert_events(events)
@@ -468,6 +583,7 @@ class WebSocketCollector:
             events, batch_id, settings.DATASET_LIVE_ID, self.config.source_id,
             start_offset, end_offset, self.config.log_key, self.state,
             now=datetime.fromisoformat(now), failpoint=self.failpoint,
+            owner=self._owner,
         )
         affected = set(result.get("affected", set()))
         with postgres_store.transaction() as conn:
@@ -520,6 +636,9 @@ class WebSocketCollector:
                     asyncio.to_thread(self._enrich_one, ip)
                     for ip in batch[start:start + concurrency]
                 ]))
+            for ip, ok, error in results:
+                if not ok and error:
+                    logger.error("IP enrichment failed for %s: %s", ip, error)
             successful = [ip for ip, ok, _error in results if ok]
             if successful:
                 with postgres_store.transaction() as pg_conn:

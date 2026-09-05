@@ -57,11 +57,30 @@ def _connection_pool():
 
 def open_pool() -> Any:
     """Open process pool explicitly during app startup or test setup."""
-    global _pool_open
+    global _pool, _pool_dsn, _pool_open
     with _pool_lock:
         pool = _connection_pool()
         if not _pool_open:
-            pool.open(wait=True)
+            try:
+                timeout = max(0.1, float(os.getenv("POSTGRES_POOL_OPEN_TIMEOUT_SECONDS", "5")))
+            except ValueError:
+                timeout = 5.0
+            try:
+                pool.open(wait=True, timeout=timeout)
+            except Exception:
+                # psycopg_pool closes a pool after a failed wait(). Never keep
+                # that terminal object in the process-global cache: recovery
+                # must create a fresh pool on the next attempt.
+                try:
+                    pool.close(timeout=1.0)
+                except Exception:
+                    pass
+                if _pool is pool:
+                    _pool = None
+                    _pool_dsn = None
+                    _pool_open = False
+                metrics.increment("postgres.pool_open_errors")
+                raise
             _pool_open = True
         return pool
 
@@ -98,7 +117,11 @@ def health() -> dict[str, Any]:
 
 
 def ensure_schema() -> None:
-    """Apply the idempotent local PostgreSQL schema before split traffic starts."""
+    """Apply schema during explicit deployment/test preparation only.
+
+    Application lifespan must not call this function: DDL can wait on live
+    ingest or intelligence transactions and create a lock convoy.
+    """
     schema_path = Path(__file__).resolve().parents[2] / "infra" / "postgres" / "001_initial.sql"
     sql = schema_path.read_text(encoding="utf-8")
     with transaction() as conn:

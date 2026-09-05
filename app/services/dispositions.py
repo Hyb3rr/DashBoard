@@ -16,7 +16,7 @@ def _now() -> str:
 
 
 def recommendation(label: str | None) -> str | None:
-    return {"bad": "investigate", "watch": "monitor"}.get(label)
+    return {"critical": "investigate", "medium": "monitor"}.get(label)
 
 
 def _decode(value):

@@ -128,6 +128,13 @@ def market_score(region_profile: dict | None) -> dict:
         "market_components": economic.get("market_components", profile.get("market_components", {})),
         "market_evidence": economic.get("market_evidence", profile.get("market_evidence", [])),
         "product_opportunities": economic.get("product_opportunities", profile.get("product_opportunities", [])),
+        "trade_data_year": economic.get("trade_data_year"),
+        "trade_data_age_years": economic.get("trade_data_age_years"),
+        "trade_freshness": economic.get("trade_freshness"),
+        "trade_data_method": economic.get("trade_data_method"),
+        "trade_confidence": economic.get("trade_confidence"),
+        "score_status": economic.get("score_status", "pending"),
+        "missing_reason": economic.get("missing_reason"),
     }
     if result["market_score"] is None and economic.get("schema_version") == 0:
         # Transitional read support for the existing seed until market_refresh runs.
