@@ -14,6 +14,7 @@
         <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
         <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
         <a class="nav-item active" href="/alerts" aria-current="page"><span class="nav-icon">!</span>Alerts</a>
+        <a class="nav-item" href="/raw-logs"><span class="nav-icon">≋</span>Raw Log Tail</a>
         <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
       </nav>
     </aside>
@@ -23,23 +24,34 @@
         <div class="actions"><button id="theme-toggle" class="secondary" type="button">Light mode</button></div>
       </header>
       <section class="alerts-page" aria-label="Security alerts">
-        <div class="alerts-intro">
-          <div><h2>Meaningful security changes</h2><p>Deterministic alerts for severity entering or rising through Low, Medium, and Critical. AI explanations remain separate and non-authoritative.</p></div>
-          <div class="alerts-live-state" id="alerts-state" role="status">Loading alerts…</div>
-        </div>
-        <section class="analytics-card alert-control" aria-label="Automatic AI explanation setting">
-          <div><strong>Automatically explain Critical alerts</strong><span class="secondary-text">Creates one asynchronous AI explanation for each new Critical transition.</span></div>
-          <button id="auto-explain-toggle" class="secondary" type="button" aria-pressed="false" disabled>Loading…</button>
+        <section class="alerts-controls" aria-label="Alert controls">
+          <div class="alerts-control-block alerts-auto-explain"><strong>Automatically explain Critical alerts</strong><button id="auto-explain-toggle" class="secondary" type="button" aria-pressed="false" disabled>Loading…</button></div>
+          <div class="alerts-controls-right">
+            <label class="alerts-status-filter"><span>STATUS</span><select id="alert-status"><option value="">All statuses</option><option value="new">New</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select></label>
+            <div class="alerts-time-filter"><span>TIME</span><div class="alerts-time-picker" id="alert-time"><button class="alerts-time-trigger" id="alert-time-trigger" type="button" aria-haspopup="dialog" aria-expanded="false">Last 24 hours ⌄</button><div class="alerts-time-popover" id="alert-time-popover" role="dialog" aria-label="Alert time range" hidden><div class="alerts-time-summary">Select a preset or choose a custom start and end time</div><div class="alerts-time-body"><div class="alerts-time-fields"><label>Start<input id="alert-time-start" type="datetime-local"></label><label>End<input id="alert-time-end" type="datetime-local"></label></div><div class="alerts-time-presets" role="listbox" aria-label="Preset time ranges"><button type="button" data-range="1h">Last 1 hour</button><button type="button" data-range="6h">Last 6 hours</button><button type="button" data-range="12h">Last 12 hours</button><button type="button" data-range="24h" class="active">Last 24 hours</button><button type="button" data-range="7d">Last 7 days</button><button type="button" data-range="30d">Last 30 days</button></div></div><div class="alerts-time-footer"><button type="button" id="alert-time-apply">Apply</button></div></div></div></div>
+          </div>
+          <div class="alerts-live-state" id="alerts-state" role="status" hidden>Loading alerts…</div>
         </section>
-        <div class="alerts-filters" role="toolbar" aria-label="Alert filters">
-          <label>Severity<select id="alert-severity"><option value="">All severities</option><option value="critical">Critical</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
-          <label>Status<select id="alert-status"><option value="">All statuses</option><option value="new">New</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select></label>
+        <div id="alerts-list" class="alerts-board" aria-live="polite">
+          <section class="alert-column low" data-alert-column="low" aria-labelledby="alerts-low-heading">
+            <header class="alert-column-head"><div><span class="alert-column-kicker">Severity</span><h2 id="alerts-low-heading">Low</h2></div><strong data-alert-count="low">—</strong></header>
+            <div class="alert-column-list" data-alert-items="low"><div class="state">Loading alerts…</div></div>
+          </section>
+          <section class="alert-column medium" data-alert-column="medium" aria-labelledby="alerts-medium-heading">
+            <header class="alert-column-head"><div><span class="alert-column-kicker">Severity</span><h2 id="alerts-medium-heading">Medium</h2></div><strong data-alert-count="medium">—</strong></header>
+            <div class="alert-column-list" data-alert-items="medium"><div class="state">Loading alerts…</div></div>
+          </section>
+          <section class="alert-column critical" data-alert-column="critical" aria-labelledby="alerts-critical-heading">
+            <header class="alert-column-head"><div><span class="alert-column-kicker">Severity</span><h2 id="alerts-critical-heading">Critical</h2></div><strong data-alert-count="critical">—</strong></header>
+            <div class="alert-column-list" data-alert-items="critical"><div class="state">Loading alerts…</div></div>
+          </section>
         </div>
-        <div id="alerts-list" class="alerts-list" aria-live="polite"><div class="state"><strong>Loading alerts…</strong>Reading durable alert state from PostgreSQL.</div></div>
+        <button id="alerts-load-more" class="secondary alerts-load-more" type="button" hidden>Load more alerts</button>
       </section>
     </main>
   </div>
   <script src="/static/time.js"></script>
-  <script src="/static/alerts.js"></script>
+  <script src="/static/sidebar.js"></script>
+  <script src="/static/alerts.js?v=20260921-load-more"></script>
 </body>
 </html>

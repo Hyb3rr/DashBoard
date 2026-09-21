@@ -37,6 +37,11 @@ def map_page():
     return HTMLResponse((TEMPLATES_DIR / "map.html").read_text())
 
 
+@router.get("/raw-logs", response_class=HTMLResponse)
+def raw_logs_page():
+    return HTMLResponse((TEMPLATES_DIR / "raw_logs.html").read_text())
+
+
 @router.get("/regions/{country_code}", response_class=HTMLResponse)
 def region_profile_page(country_code: str):
     return HTMLResponse((TEMPLATES_DIR / "region_detail.html").read_text())

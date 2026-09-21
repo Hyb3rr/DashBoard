@@ -59,6 +59,7 @@ def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeyp
         def fetchall(self):
             return [{
                 "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "low_requests": 0,
                 "medium_requests": 7,
                 "critical_requests": 3,
             }]
@@ -83,6 +84,7 @@ def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeyp
     )
     assert result == [{
         "timestamp": "2026-01-01T00:00:00+00:00",
+        "low_requests": 0,
         "medium_requests": 7,
         "critical_requests": 3,
     }]
@@ -162,6 +164,33 @@ def test_traffic_dataset_selector_separates_stream_and_file():
 @pytest.mark.integration
 def test_ip_page_is_server_paginated_and_searches_global_dataset():
     pytest.skip("Requires PostgreSQL integration environment")
+
+
+def test_ip_list_projection_is_compact_and_keeps_dashboard_contract():
+    from app.routers.ip_state import _pg_compact_item
+
+    item = _pg_compact_item({
+        "ip": "203.0.113.10",
+        "country": "Exampleland",
+        "country_code": "EX",
+        "city": "Example City",
+        "network_location": {"country": "Exampleland"},
+        "provider_status": {},
+        "observation_payload": {
+            "requests": 12, "status_4xx": 2, "status_5xx": 1,
+            "unique_paths": 4, "last_seen": "2026-09-15T10:00:00+00:00",
+        },
+        "label": "medium", "classification_score": 42,
+        "classification_confidence": 80,
+        "disposition": "new",
+    })
+
+    assert item["classification"] == {"label": "medium", "score": 42, "confidence": 80}
+    assert item["requests"] == 12
+    assert item["last_seen"] == "2026-09-15T10:00:00+00:00"
+    assert "provider_errors" not in item
+    assert "field_sources" not in item
+    assert "history" not in item["disposition"]
 
 
 @pytest.mark.integration

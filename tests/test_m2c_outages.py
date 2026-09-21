@@ -161,6 +161,7 @@ def test_telegram_down_leaves_pg_alert_pending(monkeypatch):
         async def telegram_down(_message: str) -> bool:
             return False
 
+        monkeypatch.setattr(classification_watcher, "telegram_enabled", lambda: True)
         monkeypatch.setattr(classification_watcher, "send_message", telegram_down)
         asyncio.run(classification_watcher._deliver_outbox_pg())
         with postgres.transaction() as conn:

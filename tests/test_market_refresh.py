@@ -28,6 +28,34 @@ def test_comtrade_parser_discovers_existing_years_and_parent():
     assert any("8465" in country_data for country_data in trade.values())
 
 
+def test_comtrade_fetch_supports_furniture_export_query(monkeypatch):
+    captured = {}
+
+    def fake_request(request, **kwargs):
+        captured["url"] = request.full_url
+        return {"data": []}
+
+    monkeypatch.setattr(comtrade_update, "_request_json", fake_request)
+    comtrade_update._fetch("VN", 2024, flow_code="X", cmd_code="9403")
+    assert "flowCode=X" in captured["url"]
+    assert "cmdCode=9403" in captured["url"]
+    assert "partnerCode=0" in captured["url"]
+
+
+def test_comtrade_without_key_uses_public_preview(monkeypatch):
+    captured = {}
+
+    def fake_request(request, **kwargs):
+        captured["url"] = request.full_url
+        return {"data": []}
+
+    monkeypatch.delenv("COMTRADE_API_KEY", raising=False)
+    monkeypatch.setattr(comtrade_update, "_request_json", fake_request)
+    comtrade_update._fetch("VN", 2024)
+    assert captured["url"].startswith(comtrade_update.PREVIEW_URL)
+    assert "subscription-key" not in captured["url"]
+
+
 @pytest.mark.integration
 def test_seed_cache_skips_unchanged_file():
     pytest.skip("Requires PostgreSQL RegionRepository")

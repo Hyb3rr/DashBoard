@@ -81,12 +81,15 @@ def build_case_packet(
     risk_score = int(classification.get("risk_score", classification.get("score", 0)) or 0)
     if not 0 <= risk_score <= 100:
         raise ValueError("classification risk_score must be between 0 and 100")
+    confidence = int(classification.get("confidence", 0) or 0)
+    if not 0 <= confidence <= 100:
+        raise ValueError("classification confidence must be between 0 and 100")
     packet = {
         "subject": {"ip": subject_ip},
         "classification": {
             "label": label,
             "risk_score": risk_score,
-            "confidence": int(classification.get("confidence", 0) or 0),
+            "confidence": confidence,
         },
         "window": {"start": str(window.get("start") or ""), "end": str(window.get("end") or "")},
         "traffic_summary": {

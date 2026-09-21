@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from threading import Lock
 from time import perf_counter
+import re
 
 _lock = Lock()
 _counters: dict[str, int] = defaultdict(int)
@@ -46,6 +47,28 @@ def snapshot() -> dict:
             "timings": {key: {**value, "avg_ms": value["total_ms"] / value["count"] if value["count"] else 0.0}
                          for key, value in _timings.items()},
         }
+
+
+def prometheus_text() -> str:
+    """Render process metrics without labels or untrusted string values."""
+    data = snapshot()
+    lines: list[str] = []
+
+    def name(value: str) -> str:
+        return "sentinel_" + re.sub(r"[^a-zA-Z0-9_]", "_", value)
+
+    for key, value in sorted(data["counters"].items()):
+        lines.append(f"{name(key)}_total {int(value)}")
+    for key, value in sorted(data["gauges"].items()):
+        lines.append(f"{name(key)} {float(value)}")
+    for key, timing in sorted(data["timings"].items()):
+        metric = name(key)
+        lines.extend([
+            f"{metric}_count {int(timing['count'])}",
+            f"{metric}_sum_ms {float(timing['total_ms'])}",
+            f"{metric}_last_ms {float(timing['last_ms'])}",
+        ])
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def reset() -> None:

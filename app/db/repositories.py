@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import base64
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -22,6 +23,7 @@ from ..core.failpoints import NoopFailpoint
 from ..core.regions import market_score, normalise_conflict_indicators, normalise_economic_indicators
 from ..core import metrics
 from ..core.security_markers import match_security_marker
+from ..core.path_canonicalization import canonicalize_path
 
 
 def _json(value: Any) -> Any:
@@ -119,14 +121,27 @@ class ProfileRepository:
                 ),
             )
 
-
+    def country_demand_metadata(self, ips: Iterable[str]) -> dict[str, dict[str, Any]]:
+        values = [str(value) for value in ips if value]
+        if not values:
+            return {}
+        with transaction() as conn:
+            rows = conn.execute(
+                """SELECT host(p.ip) AS ip,p.country_code,p.is_tor,p.is_hosting,p.is_vpn,p.is_proxy,
+                          p.network_type,p.abuse_score,cs.label
+                     FROM ip_profiles p
+                     LEFT JOIN ip_classification_state cs ON cs.ip=p.ip
+                    WHERE p.ip = ANY(%s::inet[])""",
+                (values,),
+            ).fetchall()
+        return {str(row["ip"]): dict(row) for row in rows}
 class GeoRepository:
     def persist_resolution(self, ip: str, data: dict[str, Any], ttl_days: int = 14, conn=None) -> None:
         expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
         scope = transaction() if conn is None else nullcontext(conn)
         with scope as conn:
             conn.execute("""INSERT INTO geo_resolutions(ip,network,asn,organization,network_type,country,country_code,latitude,longitude,city,city_source,city_disputed,city_confidence,city_distance_km,confidence,disputed,location_scope,source_ids,evidence,ruleset_version,resolved_at,expires_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'geo-v3',now(),%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'geo-v5',now(),%s)
                 ON CONFLICT(ip) DO UPDATE SET network=EXCLUDED.network,asn=EXCLUDED.asn,organization=EXCLUDED.organization,network_type=EXCLUDED.network_type,country=EXCLUDED.country,country_code=EXCLUDED.country_code,latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,city=EXCLUDED.city,city_source=EXCLUDED.city_source,city_disputed=EXCLUDED.city_disputed,city_confidence=EXCLUDED.city_confidence,city_distance_km=EXCLUDED.city_distance_km,confidence=EXCLUDED.confidence,disputed=EXCLUDED.disputed,location_scope=EXCLUDED.location_scope,source_ids=EXCLUDED.source_ids,evidence=EXCLUDED.evidence,ruleset_version=EXCLUDED.ruleset_version,resolved_at=EXCLUDED.resolved_at,expires_at=EXCLUDED.expires_at""", (ip, data.get("network"), data.get("asn"), data.get("organization"), data.get("network_type"), data.get("country"), data.get("country_code"), data.get("latitude"), data.get("longitude"), data.get("city"), data.get("city_source"), bool(data.get("city_disputed")), data.get("city_confidence"), data.get("city_distance_km"), int(data.get("confidence", 0) or 0), bool(data.get("disputed")), data.get("scope"), _json(data.get("sources", [])), _json({"confidence_breakdown": data.get("confidence_breakdown", {}), "registration": data.get("registration")}), expires))
 
 
@@ -191,29 +206,60 @@ class ClassificationRepository:
 
 
 class AlertRepository:
-    def list(self, severity: str | None = None, status: str | None = None, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    @staticmethod
+    def encode_cursor(created_at: Any, alert_id: int) -> str:
+        value = {"created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at), "id": int(alert_id)}
+        return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+
+    @staticmethod
+    def decode_cursor(cursor: str) -> tuple[str, int]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            value = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+            created_at = str(value["created_at"])
+            alert_id = int(value["id"])
+            if not created_at or alert_id < 1:
+                raise ValueError
+            return created_at, alert_id
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            raise ValueError("invalid alert cursor") from None
+
+    def list(self, severity: str | None = None, status: str | None = None, limit: int = 50,
+             offset: int = 0, cursor: str | None = None) -> dict[str, Any]:
         allowed_severity = {"low", "medium", "critical"}
         allowed_status = {"new", "acknowledged", "resolved"}
         severity = severity if severity in allowed_severity else None
         status = status if status in allowed_status else None
         limit = min(max(int(limit), 1), 100)
         offset = max(int(offset), 0)
-        conditions = []
-        args: list[Any] = []
+        filter_conditions = []
+        filter_args: list[Any] = []
         if severity:
-            conditions.append("severity=%s")
-            args.append(severity)
+            filter_conditions.append("severity=%s")
+            filter_args.append(severity)
         if status:
-            conditions.append("status=%s")
-            args.append(status)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            filter_conditions.append("status=%s")
+            filter_args.append(status)
+        page_conditions = list(filter_conditions)
+        page_args = list(filter_args)
+        if cursor:
+            cursor_created_at, cursor_id = self.decode_cursor(cursor)
+            page_conditions.append("(created_at < %s OR (created_at = %s AND id < %s))")
+            page_args.extend([cursor_created_at, cursor_created_at, cursor_id])
+        identity_guard = "(EXISTS (SELECT 1 FROM ip_profiles p WHERE p.ip = alerts.ip) OR EXISTS (SELECT 1 FROM ip_observations_state o WHERE o.ip = alerts.ip))"
+        inventory_guard = "reason_type <> 'initial_inventory'"
+        guarded_base_where = f"WHERE {identity_guard} AND {inventory_guard}" + (f" AND {' AND '.join(filter_conditions)}" if filter_conditions else "")
+        guarded_page_where = f"WHERE {identity_guard} AND {inventory_guard}" + (f" AND {' AND '.join(page_conditions)}" if page_conditions else "")
         with transaction() as conn:
-            total = conn.execute(f"SELECT COUNT(*) AS n FROM alerts {where}", args).fetchone()["n"]
+            total = conn.execute(f"SELECT COUNT(*) AS n FROM alerts {guarded_base_where}", filter_args).fetchone()["n"]
             rows = conn.execute(
-                f"SELECT * FROM alerts {where} ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
-                [*args, limit, offset],
+                f"SELECT alerts.* FROM alerts {guarded_page_where} ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
+                [*page_args, limit + 1, 0 if cursor else offset],
             ).fetchall()
-        return {"items": [dict(row) for row in rows], "total": int(total or 0)}
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = self.encode_cursor(rows[-1]["created_at"], rows[-1]["id"]) if has_more and rows else None
+        return {"items": [dict(row) for row in rows], "total": int(total or 0), "next_cursor": next_cursor}
 
     def get(self, alert_id: int) -> dict[str, Any] | None:
         with transaction() as conn:
@@ -271,6 +317,11 @@ def should_create_critical_recurrence(
     return reference - latest_alert_at >= CRITICAL_ALERT_REPEAT_COOLDOWN
 
 
+def _alert_evidence_for_classification(classification: dict[str, Any], observation: dict[str, Any]) -> list[Any]:
+    """Keep alert evidence aligned with the evidence used for classification."""
+    return classification.get("evidence") or observation.get("recent_behavior_evidence") or []
+
+
 def create_classification_alert(conn, *, dataset_id: str, batch_id: str, ip: str, old_label: str | None,
                                 old_score: int | None, classification: dict[str, Any], evidence: list[Any]) -> None:
     new_label = str(classification.get("label") or "unknown").lower()
@@ -279,7 +330,7 @@ def create_classification_alert(conn, *, dataset_id: str, batch_id: str, ip: str
         if not should_create_critical_recurrence(old_label, new_label, None):
             return
         latest = conn.execute(
-            "SELECT created_at FROM alerts WHERE ip=%s AND severity='critical' ORDER BY created_at DESC LIMIT 1",
+            "SELECT created_at FROM alerts WHERE ip=%s AND severity='critical' AND reason_type <> 'initial_inventory' ORDER BY created_at DESC LIMIT 1",
             (ip,),
         ).fetchone()
         if not should_create_critical_recurrence(old_label, new_label, latest["created_at"] if latest else None):
@@ -297,11 +348,50 @@ def create_classification_alert(conn, *, dataset_id: str, batch_id: str, ip: str
         """INSERT INTO alerts
            (ip,severity,reason_type,title,description,evidence,evidence_fingerprint,
             previous_classification,current_classification,dedupe_key)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+           WHERE EXISTS (SELECT 1 FROM ip_profiles WHERE ip=%s)
+              OR EXISTS (SELECT 1 FROM ip_observations_state WHERE ip=%s)
            ON CONFLICT(dedupe_key) DO NOTHING""",
         (ip, new_label, reason_type, title, description, _json(evidence), fingerprint,
          _json({"label": old_label or "unknown", "score": old_score}),
-         _json(classification), dedupe_key),
+         _json(classification), dedupe_key, ip, ip),
+    )
+
+
+def persist_classification_alert_and_notification(
+    conn,
+    *,
+    dataset_id: str,
+    batch_id: str,
+    ip: str,
+    old_label: str | None,
+    old_score: int | None,
+    classification: dict[str, Any],
+    evidence: list[Any],
+    created_at=None,
+) -> None:
+    """Persist classification alerts and critical notifications consistently."""
+    create_classification_alert(
+        conn,
+        dataset_id=dataset_id,
+        batch_id=batch_id,
+        ip=ip,
+        old_label=old_label,
+        old_score=old_score,
+        classification=classification,
+        evidence=evidence,
+    )
+    if str(classification.get("label") or "unknown").lower() != "critical":
+        return
+    if (old_label or "unknown").lower() == "critical":
+        return
+    created_at = created_at or utcnow()
+    key = f"classification_critical:{dataset_id}:{ip}:{batch_id}"
+    conn.execute(
+        """INSERT INTO alert_outbox(ip,event_type,payload,status,attempts,next_retry_at,idempotency_key)
+           VALUES (%s,'classification_critical',%s,'pending',0,%s,%s)
+           ON CONFLICT(idempotency_key) DO NOTHING""",
+        (ip, _json({"ip": ip, "classification": classification}), created_at, key),
     )
 
 
@@ -381,7 +471,7 @@ def _feature_deltas(events: Iterable[dict[str, Any]]) -> tuple[dict, dict]:
                 "first_seen": stamp, "last_seen": stamp,
             })
             status = int(event.get("status") or 0)
-            path = str(event.get("path") or "")
+            path = canonicalize_path(str(event.get("path") or ""))
             ua = str(event.get("user_agent") or "").lower()
             row["requests"] += 1
             row["status_2xx"] += int(200 <= status < 300)
@@ -444,11 +534,43 @@ def _rolling_peaks_by_ip(rows: Iterable[dict[str, Any]], cut24: datetime, cut1: 
         by_ip.setdefault(str(row["ip"]), []).append(row)
     return {
         ip: {
+            "peak_requests_1m": max((int(item.get("requests") or 0) for item in items), default=0),
+            "recent_peak_requests_1m": max((int(item.get("requests") or 0) for item in items
+                                             if _utc_minute(item["bucket_minute"]) >= cut24), default=0),
+            "one_hour_peak_requests_1m": max((int(item.get("requests") or 0) for item in items
+                                               if _utc_minute(item["bucket_minute"]) >= cut1), default=0),
             "peak_requests_5m": _rolling_peak_5m(items, cut24),
             "recent_peak_requests_5m": _rolling_peak_5m(items, cut24),
             "one_hour_peak_requests_5m": _rolling_peak_5m(items, cut1),
         }
         for ip, items in by_ip.items()
+    }
+
+
+def _select_recent_behavior_window(
+    one_score: int, one_level: str, one_evidence: list, one_detections: list[dict],
+    recent_score: int, recent_level: str, recent_evidence: list, recent_detections: list[dict],
+) -> tuple[int, str, list, list[dict]]:
+    """Use the strongest active short window as the persisted recent verdict."""
+    if one_score > recent_score:
+        return one_score, one_level, one_evidence, one_detections
+    return recent_score, recent_level, recent_evidence, recent_detections
+
+
+def _build_recent_behavior_fields(
+    one_score: int, one_level: str, one_evidence: list, one_detections: list[dict],
+    recent24_score: int, recent24_level: str, recent24_evidence: list, recent24_detections: list[dict],
+) -> dict[str, Any]:
+    selected_score, selected_level, selected_evidence, selected_detections = _select_recent_behavior_window(
+        one_score, one_level, one_evidence, one_detections,
+        recent24_score, recent24_level, recent24_evidence, recent24_detections,
+    )
+    return {
+        "detections_24h": recent24_detections,
+        "detections_recent": selected_detections,
+        "recent_behavior_score": min(selected_score, 100),
+        "recent_behavior_level": selected_level,
+        "recent_behavior_evidence": selected_evidence,
     }
 
 
@@ -595,8 +717,22 @@ class PgDetectionRepository:
         log_key: str | None = None, status: str = "live", *, now: datetime | None = None,
         owner: str | None = None, failpoint=None,
     ) -> dict[str, Any]:
+        finish = metrics.timed("rules.evaluation_batch_ms")
+        try:
+            return self._process_events(
+                events, batch_id, dataset_id, source_id, start_offset, end_offset,
+                log_key, status, now=now, owner=owner, failpoint=failpoint,
+            )
+        finally:
+            finish()
+
+    def _process_events(
+        self, events: Iterable[dict[str, Any]], batch_id: str, dataset_id: str = "live",
+        source_id: str | None = None, start_offset: int | None = None, end_offset: int | None = None,
+        log_key: str | None = None, status: str = "live", *, now: datetime | None = None,
+        owner: str | None = None, failpoint=None,
+    ) -> dict[str, Any]:
         events = list(events)
-        finish_rules = metrics.timed("rules.evaluation_batch_ms")
         metrics.increment("rules.evaluation_batches")
         buckets, paths = _feature_deltas(events)
         if not buckets:
@@ -634,8 +770,12 @@ class PgDetectionRepository:
             for ip in sorted(affected):
                 lifetime, recent, one_hour = aggregates[ip]
                 lifetime_score, lifetime_level, lifetime_evidence, lifetime_detections = self._score(lifetime, "24h")
-                one_score, _, one_evidence, one_detections = self._score(one_hour, "1h")
-                recent_score, recent_level, recent_evidence, recent_detections = self._score(recent, "24h")
+                one_score, one_level, one_evidence, one_detections = self._score(one_hour, "1h")
+                recent24_score, recent24_level, recent24_evidence, recent24_detections = self._score(recent, "24h")
+                recent_fields = _build_recent_behavior_fields(
+                    one_score, one_level, one_evidence, one_detections,
+                    recent24_score, recent24_level, recent24_evidence, recent24_detections,
+                )
                 payload = {
                     "ip": ip, "first_seen": lifetime.get("first_seen"), "last_seen": lifetime.get("last_seen"),
                     "requests": lifetime["requests"], "status_2xx": lifetime["status_2xx"], "status_3xx": lifetime["status_3xx"],
@@ -644,14 +784,13 @@ class PgDetectionRepository:
                     "bot_requests": lifetime["bot_requests"], "behavior_score": min(lifetime_score + one_score, 100),
                     "behavior_level": lifetime_level, "behavior_evidence": lifetime_evidence + one_evidence,
                     "detections": lifetime_detections + one_detections, "detections_1h": one_detections,
-                    "detections_24h": lifetime_detections, "detections_recent": recent_detections,
+                    **recent_fields,
                     "recent_first_seen": recent.get("first_seen"), "recent_last_seen": recent.get("last_seen"),
                     "recent_requests": recent["requests"], "recent_status_2xx": recent["status_2xx"],
                     "recent_status_3xx": recent["status_3xx"], "recent_status_4xx": recent["status_4xx"],
                     "recent_status_5xx": recent["status_5xx"], "recent_unique_paths": recent["unique_paths"],
                     "recent_wp_login_requests": recent["wp_login_requests"], "recent_sensitive_probe_requests": recent["sensitive_probe_requests"],
-                    "recent_bot_requests": recent["bot_requests"], "recent_behavior_score": min(recent_score, 100),
-                    "recent_behavior_level": recent_level, "recent_behavior_evidence": recent_evidence,
+                    "recent_bot_requests": recent["bot_requests"],
                     "ruleset_hash": ruleset_hash(), "ruleset_hash_1h": ruleset_hash(), "ruleset_hash_24h": ruleset_hash(),
                     "evaluated_at": now.isoformat(), "evaluated_at_1h": now.isoformat(), "evaluated_at_24h": now.isoformat(),
                     "recent_updated_at": now.isoformat(), "updated_at": now.isoformat(),
@@ -685,7 +824,7 @@ class PgDetectionRepository:
                         (dataset_id, ip, now, old_label, classification["label"], old_score, int(classification["score"])),
                     )
                 failpoint.hit("after_classification")
-                create_classification_alert(
+                persist_classification_alert_and_notification(
                     conn,
                     dataset_id=dataset_id,
                     batch_id=batch_id,
@@ -693,15 +832,9 @@ class PgDetectionRepository:
                     old_label=old_label,
                     old_score=old_score,
                     classification=classification,
-                    evidence=payload.get("behavior_evidence") or classification.get("evidence") or [],
+                    evidence=_alert_evidence_for_classification(classification, payload),
+                    created_at=now,
                 )
-                if classification["label"] == "critical" and old_label != "critical":
-                    key = f"classification_critical:{dataset_id}:{ip}:{batch_id}"
-                    conn.execute(
-                        """INSERT INTO alert_outbox(ip,event_type,payload,status,attempts,next_retry_at,idempotency_key)
-                           VALUES (%s,'classification_critical',%s,'pending',0,%s,%s) ON CONFLICT(idempotency_key) DO NOTHING""",
-                        (ip, _json({"ip": ip, "classification": classification}), now, key),
-                    )
                 failpoint.hit("after_alert_outbox")
             state_ready_at = utcnow().isoformat()
             conn.execute(
@@ -721,7 +854,6 @@ class PgDetectionRepository:
                 failpoint.hit("after_checkpoint")
             failpoint.hit("before_pg_commit")
         failpoint.hit("after_pg_commit")
-        finish_rules()
         return {"processed": True, "duplicate": False, "affected": affected}
 
 
@@ -742,7 +874,7 @@ class StateRepository:
         args: list[Any] = []
         if q:
             term = f"%{q.strip()}%"
-            clauses.append("(i.ip::text ILIKE %s OR COALESCE(p.country,'') ILIKE %s OR COALESCE(p.country_code,'') ILIKE %s OR COALESCE(p.asn,'') ILIKE %s OR COALESCE(p.organization,'') ILIKE %s)")
+            clauses.append("(i.ip::text ILIKE %s OR COALESCE(p.country,gr_country,'') ILIKE %s OR COALESCE(p.country_code,gr_country_code,'') ILIKE %s OR COALESCE(p.asn,gr_asn,'') ILIKE %s OR COALESCE(p.organization,gr_organization,'') ILIKE %s)")
             args.extend([term] * 5)
         if privacy == "privacy":
             clauses.append("(COALESCE(p.is_tor,FALSE) OR COALESCE(p.is_vpn,FALSE) OR COALESCE(p.is_proxy,FALSE))")
@@ -780,17 +912,21 @@ class StateRepository:
                     SELECT COUNT(*) AS n FROM identities i
                     LEFT JOIN ip_observations_state o ON o.ip=i.ip
                     LEFT JOIN ip_profiles p ON p.ip=i.ip
+                    LEFT JOIN LATERAL (SELECT country AS gr_country, country_code AS gr_country_code, city AS gr_city, asn AS gr_asn, organization AS gr_organization, network_type AS gr_network_type, confidence AS gr_confidence, disputed AS gr_disputed, location_scope AS gr_location_scope FROM geo_resolutions WHERE ip=i.ip LIMIT 1) gr ON TRUE
                     LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
                     LEFT JOIN ip_dispositions d ON d.ip=i.ip WHERE {where}""", args,
             ).fetchone()["n"]
             rows = conn.execute(
                 f"""WITH identities AS (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles)
                     SELECT host(i.ip) AS identity_ip, p.*, o.payload AS observation_payload,
+                           gr.gr_country, gr.gr_country_code, gr.gr_city, gr.gr_asn, gr.gr_organization,
+                           gr.gr_network_type, gr.gr_confidence, gr.gr_disputed, gr.gr_location_scope,
                            cs.label, cs.score AS classification_score, cs.confidence AS classification_confidence,
                            d.state AS disposition
                       FROM identities i
                       LEFT JOIN ip_observations_state o ON o.ip=i.ip
                       LEFT JOIN ip_profiles p ON p.ip=i.ip
+                      LEFT JOIN LATERAL (SELECT country AS gr_country, country_code AS gr_country_code, city AS gr_city, asn AS gr_asn, organization AS gr_organization, network_type AS gr_network_type, confidence AS gr_confidence, disputed AS gr_disputed, location_scope AS gr_location_scope FROM geo_resolutions WHERE ip=i.ip LIMIT 1) gr ON TRUE
                       LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
                       LEFT JOIN ip_dispositions d ON d.ip=i.ip
                      WHERE {where}
@@ -851,23 +987,44 @@ class StateRepository:
             "priority_ips": [str(item["ip"]) for item in priority],
         }
 
-    def risk_traffic_series(self, start: datetime, end: datetime, bucket_seconds: int, dataset_id: str = "live") -> list[dict[str, Any]]:
-        """Aggregate processed request volume by current risk label and time bucket."""
+    def risk_traffic_series(self, start: datetime, end: datetime, bucket_seconds: int, dataset_id: str = "live",
+                            filter_type: str | None = None, filter_value: str | None = None,
+                            exclude: bool = False) -> list[dict[str, Any]]:
+        """Aggregate risk request volume using the same filter as the traffic series."""
+        # Path filters exist only in ClickHouse raw events; PostgreSQL minute
+        # features have no path dimension, so never return an unfiltered risk
+        # line for a path-filtered total.
+        if filter_type == "path":
+            return []
         bucket_seconds = max(60, int(bucket_seconds))
+        conditions = ["f.dataset_id=%s", "f.bucket_minute >= %s", "f.bucket_minute <= %s"]
+        args: list[Any] = [dataset_id, start, end]
+        if filter_type == "ip" and filter_value:
+            conditions.append("f.ip != %s::inet" if exclude else "f.ip = %s::inet")
+            args.append(filter_value)
+        elif filter_type == "country" and filter_value:
+            conditions.append("COALESCE(p.country_code, '') != %s" if exclude else "p.country_code = %s")
+            args.append(str(filter_value).upper())
+        elif filter_type == "classification" and filter_value:
+            conditions.append("COALESCE(cs.label, 'unknown') != %s" if exclude else "COALESCE(cs.label, 'unknown') = %s")
+            args.append(str(filter_value))
         with transaction() as conn:
             rows = conn.execute(
-                """SELECT date_bin(%s::interval, f.bucket_minute, TIMESTAMPTZ '1970-01-01 00:00:00+00') AS timestamp,
+                f"""SELECT date_bin(%s::interval, f.bucket_minute, TIMESTAMPTZ '1970-01-01 00:00:00+00') AS timestamp,
+                          COALESCE(SUM(f.requests) FILTER (WHERE COALESCE(cs.label,'unknown')='low'),0) AS low_requests,
                           COALESCE(SUM(f.requests) FILTER (WHERE COALESCE(cs.label,'unknown')='medium'),0) AS medium_requests,
                           COALESCE(SUM(f.requests) FILTER (WHERE COALESCE(cs.label,'unknown')='critical'),0) AS critical_requests
                      FROM ip_minute_features f
                      LEFT JOIN ip_classification_state cs ON cs.ip=f.ip
-                    WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute <= %s
+                     LEFT JOIN ip_profiles p ON p.ip=f.ip
+                    WHERE {' AND '.join(conditions)}
                     GROUP BY timestamp ORDER BY timestamp""",
-                (f"{bucket_seconds} seconds", dataset_id, start, end),
+                (f"{bucket_seconds} seconds", *args),
             ).fetchall()
         return [
             {
                 "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
+                "low_requests": int(row["low_requests"] or 0),
                 "medium_requests": int(row["medium_requests"] or 0),
                 "critical_requests": int(row["critical_requests"] or 0),
             }
@@ -885,10 +1042,14 @@ class StateRepository:
             return []
         with transaction() as conn:
             rows = conn.execute("""SELECT host(i.ip) AS identity_ip,p.*,o.payload AS observation_payload,
+                gr.country AS geo_country, gr.country_code AS geo_country_code, gr.city AS geo_city,
+                gr.asn AS geo_asn, gr.organization AS geo_organization, gr.network_type AS geo_network_type,
+                gr.confidence AS geo_confidence, gr.disputed AS geo_disputed, gr.location_scope AS geo_location_scope,
                 cs.label,cs.score AS classification_score,cs.confidence AS classification_confidence,
                 d.state AS disposition, d.suggested_state, d.assigned_to, d.note, d.updated_at AS disposition_updated_at, d.history AS disposition_history
                 FROM (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles) i
                 LEFT JOIN ip_profiles p ON p.ip=i.ip LEFT JOIN ip_observations_state o ON o.ip=i.ip
+                LEFT JOIN geo_resolutions gr ON gr.ip=i.ip
                 LEFT JOIN ip_classification_state cs ON cs.ip=i.ip LEFT JOIN ip_dispositions d ON d.ip=i.ip
                 WHERE i.ip = ANY(%s::inet[])""", (list(values),)).fetchall()
 
@@ -926,6 +1087,17 @@ class CheckpointRepository:
             conn.execute("""INSERT INTO log_sources(source_id,log_key,status,last_error,updated_at)
                 VALUES (%s,%s,%s,%s,now()) ON CONFLICT(source_id) DO UPDATE SET log_key=EXCLUDED.log_key,status=EXCLUDED.status,last_error=EXCLUDED.last_error,updated_at=now()""", (source_id, log_key, state, error))
 
+    def read_status(self, source_id: str) -> dict[str, Any] | None:
+        """Read persisted collector control-plane state for API-only workers."""
+        with transaction() as conn:
+            row = conn.execute(
+                """SELECT source_id, log_key, status, last_offset, last_error,
+                          last_event_at, lease_owner, lease_expires_at, updated_at
+                     FROM log_sources WHERE source_id=%s""",
+                (source_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def acquire(self, source_id: str, log_key: str, owner: str, state: str) -> bool:
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=30)
@@ -936,9 +1108,16 @@ class CheckpointRepository:
             row = conn.execute("SELECT lease_owner FROM log_sources WHERE source_id=%s", (source_id,)).fetchone()
         return bool(row and row["lease_owner"] == owner)
 
-    def renew(self, source_id: str, owner: str) -> None:
+    def renew(self, source_id: str, owner: str) -> bool:
         with transaction() as conn:
-            conn.execute("UPDATE log_sources SET lease_expires_at=%s,updated_at=%s WHERE source_id=%s AND lease_owner=%s", (datetime.now(timezone.utc) + timedelta(seconds=30), datetime.now(timezone.utc), source_id, owner))
+            updated = conn.execute(
+                """UPDATE log_sources SET lease_expires_at=%s,updated_at=%s
+                   WHERE source_id=%s AND lease_owner=%s
+                     AND lease_expires_at > CURRENT_TIMESTAMP
+                   RETURNING source_id""",
+                (datetime.now(timezone.utc) + timedelta(seconds=30), datetime.now(timezone.utc), source_id, owner),
+            ).fetchone()
+        return bool(updated)
 
     def commit_offset(
         self, conn, source_id: str, log_key: str, offset: int, state: str,

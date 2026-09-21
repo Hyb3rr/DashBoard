@@ -33,7 +33,7 @@ SCALE_COUNTRIES = ("SG", "VN", "DE", "TH", "MY", "ID", "PH", "KR", "PL", "IT")
 PRIORITY_COUNTRIES = SCALE_COUNTRIES
 SCALE_SOURCE_URLS = {country: OSM_SOURCE_URLS[country] for country in SCALE_COUNTRIES}
 DEFAULT_RESOLUTIONS = (7, 8)
-FILTER_VERSION = "phase4a-sector-tags-v1"
+FILTER_VERSION = "phase4a-manufacturing-tags-v2"
 CLASSIFICATION_VERSION = FILTER_VERSION
 DEFAULT_OSM_URLS = dict(PRIORITY_SOURCE_URLS)
 RETENTION_BUSY_STATUSES = frozenset({"downloading", "prefiltering", "processing", "persisting", "validating"})
@@ -45,8 +45,8 @@ def production_resolution() -> int:
         raise ValueError("Phase 4B production H3 resolution must be 7")
     return value
 SECTOR_TAGS: dict[str, set[tuple[str, str]]] = {
-    "WOODWORKING": {("craft", "carpenter"), ("craft", "sawmill"), ("industrial", "sawmill"), ("man_made", "sawmill")},
-    "METAL_FABRICATION": {("craft", "metal_construction"), ("industrial", "metalworking"), ("industrial", "steelmaking"), ("man_made", "works")},
+    "WOODWORKING": {("craft", "carpenter"), ("craft", "sawmill"), ("industrial", "sawmill"), ("man_made", "sawmill"), ("craft", "furniture"), ("industrial", "furniture")},
+    "METAL_FABRICATION": {("craft", "metal_construction"), ("industrial", "metalworking"), ("industrial", "steelmaking"), ("industrial", "machine_shop")},
 }
 
 
@@ -89,11 +89,12 @@ def _feature_counts(tags: dict[str, str], sector: str) -> dict[str, int]:
     counts = {"industrial_area_count": 0, "works_count": 0, "sawmill_count": 0,
               "furniture_evidence_count": 0, "wood_processing_count": 0,
               "metal_evidence_count": 0, "machinery_evidence_count": 0, "osm_feature_count": 1}
-    if tags.get("industrial") == "sawmill" or tags.get("man_made") == "sawmill":
+    is_sawmill = tags.get("industrial") == "sawmill" or tags.get("man_made") == "sawmill" or tags.get("craft") == "sawmill"
+    if is_sawmill:
         counts["sawmill_count"] = 1
     if tags.get("man_made") == "works":
         counts["works_count"] = 1
-    if sector == "WOODWORKING":
+    if sector == "WOODWORKING" and not is_sawmill:
         counts["wood_processing_count"] = 1
     if sector == "METAL_FABRICATION":
         counts["metal_evidence_count"] = 1
@@ -691,7 +692,7 @@ def main() -> None:
                                       for item in reports]
     else:
         report = run_pilot(paths, resolutions)
-    encoded = json.dumps(report, indent=2, sort_keys=True)
+    encoded = json.dumps(report, indent=2, sort_keys=True, default=str)
     if args.output:
         args.output.write_text(encoded + "\n", encoding="utf-8")
     print(encoded)

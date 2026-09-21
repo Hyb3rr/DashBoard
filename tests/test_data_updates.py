@@ -3,10 +3,54 @@ from datetime import datetime, timezone
 
 from scripts.ops import data_scheduler
 from scripts.market import worldbank_update
+from app.services.profiles import _claim_privacy_refresh_lease, _release_privacy_refresh_lease
 
 
 def _records(code, value=1):
     return [{"countryiso3code": "USA", "country": {"value": "United States"}, "date": "2025", "value": value}]
+
+
+class _LeaseResult:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _LeaseConnection:
+    def __init__(self, row):
+        self.row = row
+        self.sql = None
+        self.params = None
+
+    def execute(self, sql, params):
+        self.sql = sql
+        self.params = params
+        return _LeaseResult(self.row)
+
+
+def test_privacy_refresh_lease_claim_is_atomic_for_competing_workers():
+    connection = _LeaseConnection(None)
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+
+    assert not _claim_privacy_refresh_lease(
+        connection, "worker-b", now, now.replace(minute=5)
+    )
+    assert "ON CONFLICT(source_id)" in connection.sql
+    assert "RETURNING lease_owner" in connection.sql
+    assert "lease_expires_at <= EXCLUDED.updated_at" in connection.sql
+    assert connection.params[1] == "worker-b"
+
+
+def test_privacy_refresh_lease_claim_accepts_expired_takeover_and_owner_release_is_fenced():
+    connection = _LeaseConnection({"lease_owner": "worker-b"})
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+
+    assert _claim_privacy_refresh_lease(connection, "worker-b", now, now.replace(minute=5))
+    _release_privacy_refresh_lease(connection, "worker-b", now)
+    assert "WHERE source_id=%s AND lease_owner=%s" in connection.sql
+    assert connection.params[1:] == ("privacy-refresh", "worker-b")
 
 
 def test_worldbank_update_validates_and_atomically_writes(tmp_path, monkeypatch):
@@ -41,6 +85,8 @@ def test_scheduler_runs_due_tasks_independently(tmp_path, monkeypatch):
         monkeypatch.setenv(variable, "false")
     monkeypatch.setenv("PRIVACY_REFRESH_SCHEDULER", "false")
     monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("COUNTRY_DEMAND_REFRESH", "false")
+    monkeypatch.setenv("MARKET_SOURCES_REFRESH", "false")
     monkeypatch.setattr(data_scheduler, "connect", lambda: (_ for _ in ()).throw(RuntimeError("isolated")))
     monkeypatch.setattr(data_scheduler, "refresh_tor_exit_list", lambda: calls.append("tor") or {"status": "failed"})
     monkeypatch.setattr(data_scheduler, "update_world_bank", lambda: calls.append("world_bank") or {"status": "updated"})
@@ -57,8 +103,10 @@ def test_scheduler_osm_is_explicit_and_reported(tmp_path, monkeypatch):
     monkeypatch.setenv("OSM_REFRESH", "true")
     monkeypatch.setenv("GEOGRAPHY_REFRESH", "false")
     monkeypatch.setenv("COMTRADE_MIRROR_REFRESH", "false")
+    monkeypatch.setenv("MARKET_SOURCES_REFRESH", "false")
     monkeypatch.setenv("PRIVACY_REFRESH_SCHEDULER", "false")
     monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("COUNTRY_DEMAND_REFRESH", "false")
     monkeypatch.setattr(data_scheduler, "refresh_tor_exit_list", lambda: {"status": "not_modified"})
     monkeypatch.setattr(data_scheduler, "update_world_bank", lambda: {"status": "not_modified"})
     monkeypatch.setattr(data_scheduler, "refresh_osm_pilot", lambda repo: {"status": "completed", "countries": {"SG": {"status": "skipped_unchanged"}}})
@@ -71,10 +119,28 @@ def test_scheduler_auxiliary_is_explicit_and_reported(tmp_path, monkeypatch):
     monkeypatch.setenv("OSM_REFRESH", "false")
     monkeypatch.setenv("GEOGRAPHY_REFRESH", "false")
     monkeypatch.setenv("COMTRADE_MIRROR_REFRESH", "false")
+    monkeypatch.setenv("MARKET_SOURCES_REFRESH", "false")
     monkeypatch.setenv("PRIVACY_REFRESH_SCHEDULER", "false")
     monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("COUNTRY_DEMAND_REFRESH", "false")
     monkeypatch.setattr(data_scheduler, "refresh_tor_exit_list", lambda: {"status": "not_modified"})
     monkeypatch.setattr(data_scheduler, "update_world_bank", lambda: {"status": "not_modified"})
     monkeypatch.setattr(data_scheduler, "refresh_local_evidence", lambda repo: {"status": "completed", "countries": {"DE": {"status": "updated"}}})
     result = data_scheduler.run_scheduler(tmp_path / "state.json", tmp_path / "lock", datetime.now(timezone.utc))
     assert result["tasks"]["osm_auxiliary"]["status"] == "completed"
+
+
+def test_scheduler_market_sources_runs_source_refresh_and_prior(tmp_path, monkeypatch):
+    for variable in ("GEOGRAPHY_REFRESH", "COMTRADE_MIRROR_REFRESH", "OSM_REFRESH", "OSM_AUXILIARY_REFRESH"):
+        monkeypatch.setenv(variable, "false")
+    monkeypatch.setenv("MARKET_SOURCES_REFRESH", "true")
+    monkeypatch.setenv("PRIVACY_REFRESH_SCHEDULER", "false")
+    monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("COUNTRY_DEMAND_REFRESH", "false")
+    monkeypatch.setattr(data_scheduler, "refresh_tor_exit_list", lambda: {"status": "not_modified"})
+    monkeypatch.setattr(data_scheduler, "update_world_bank", lambda: {"status": "not_modified"})
+    monkeypatch.setattr(data_scheduler, "refresh_country_sources", lambda path, now: {"status": "updated", "sources": {}})
+    monkeypatch.setattr(data_scheduler, "refresh_country_prior", lambda: {"status": "updated", "rows": 3})
+    result = data_scheduler.run_scheduler(tmp_path / "state.json", tmp_path / "lock", datetime.now(timezone.utc))
+    assert result["tasks"]["market_sources"]["status"] == "updated"
+    assert result["tasks"]["market_sources"]["country_prior"]["rows"] == 3

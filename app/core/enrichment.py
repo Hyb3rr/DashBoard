@@ -7,12 +7,17 @@ from typing import Any
 
 from ..config.settings import TOR_EXIT_LIST
 from .evidence import UnifiedEvidence
+from ..services.geo_bounds import bounds_for
+from ..services.geo_normalization import normalize_geoip, normalize_geofeed, normalize_ip2region, normalize_rir, normalize_sapics_country
+from ..services.geo_resolution import resolve_geo_records
+from ..services.geo_validation import validate_records
+from ..services.geonames_hierarchy import GeoNamesHierarchy
 
 
 def resolve_network_location(*args, **kwargs):
     from ..db.pg_intelligence import resolve_network_location as resolve_pg
     force_refresh = kwargs.get("force_refresh", False)
-    if len(args) >= 2 and isinstance(args[0], (str, ipaddress._BaseAddress)):
+    if len(args) >= 2 and isinstance(args[0], (str, ipaddress.IPv4Address, ipaddress.IPv6Address)):
         return resolve_pg(str(args[0]), args[1] if len(args) > 1 else kwargs.get("vendor"), force_refresh=force_refresh)
     if len(args) >= 2:  # legacy (conn, ip, vendor) signature
         return resolve_pg(str(args[1]), args[2] if len(args) > 2 else kwargs.get("vendor"), force_refresh=force_refresh)
@@ -30,10 +35,49 @@ except ImportError:
 _reader_cache: dict[tuple[str, str], object] = {}
 _tor_cache: dict[str, tuple[float, set[str]]] = {}
 _cidr_cache: dict[str, tuple[float, tuple[ipaddress._BaseNetwork, ...]]] = {}
+_geo_hierarchy_cache: dict[str, GeoNamesHierarchy | None] = {}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _address_scope(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    if address.is_loopback:
+        return "loopback"
+    if address.is_link_local:
+        return "link_local"
+    if address.is_unspecified:
+        return "unspecified"
+    if address.is_reserved:
+        return "reserved"
+    if address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"):
+        return "shared_cgnat"
+    if address.version == 4 and address in ipaddress.ip_network("192.0.2.0/24"):
+        return "documentation"
+    if address.version == 4 and address in ipaddress.ip_network("198.51.100.0/24"):
+        return "documentation"
+    if address.version == 4 and address in ipaddress.ip_network("203.0.113.0/24"):
+        return "documentation"
+    if address.version == 6 and address in ipaddress.ip_network("2001:db8::/32"):
+        return "documentation"
+    if address.is_private:
+        return "private"
+    return "public"
+
+
+def _geo_hierarchy() -> GeoNamesHierarchy | None:
+    path_text = os.getenv("GEONAMES_HIERARCHY_PATH", "data/geonames/hierarchy.json").strip()
+    if not path_text:
+        return None
+    if path_text in _geo_hierarchy_cache:
+        return _geo_hierarchy_cache[path_text]
+    try:
+        hierarchy = GeoNamesHierarchy.from_path(path_text)
+    except (OSError, ValueError, TypeError, KeyError):
+        hierarchy = None
+    _geo_hierarchy_cache[path_text] = hierarchy
+    return hierarchy
 
 
 def _present(value) -> bool:
@@ -341,6 +385,7 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         return {
             "ip": str(address),
             "is_private": True,
+            "address_scope": _address_scope(address),
             "risk_score": 0,
             "risk_level": "not_applicable",
             "evidence": ["Non-public address"],
@@ -377,6 +422,7 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
     result = {
         "ip": ip_text,
         "is_private": False,
+        "address_scope": "public",
         "is_hosting": None,
         "is_vpn": None,
         "is_proxy": None,
@@ -433,42 +479,86 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
             ip2region = await asyncio.to_thread(ip2region_lookup, ip_text)
         except Exception as exc:
             errors.append(f"ip2region local resolver: {type(exc).__name__}: {exc}")
+        origin_asn = sapics.get("asn", {})
+        if origin_asn.get("number") is not None:
+            result["asn"] = origin_asn["number"]
+            field_sources["asn"] = "SAPICS origin-asn"
+        if origin_asn.get("organization"):
+            result["organization"] = origin_asn["organization"]
+            field_sources["organization"] = "SAPICS origin-asn"
+        owner_override = False
         if geo.get("country_code") or sapics.get("country", {}).get("value"):
-            owner_override = any("geofeed" in str(source).lower() or "cloud" in str(source).lower()
-                                 for source in geo.get("sources", []))
             sap_country = sapics.get("country", {})
             sap_city = sapics.get("city", {})
-            selected_country = geo.get("country") if owner_override else (sap_country.get("value") or geo.get("country"))
-            selected_code = geo.get("country_code") if owner_override else (sap_country.get("value") or geo.get("country_code"))
-            selected_city = sap_city.get("value") or geo.get("city")
-            selected_lat = sap_city.get("latitude") if sap_city.get("latitude") is not None else geo.get("latitude")
-            selected_lon = sap_city.get("longitude") if sap_city.get("longitude") is not None else geo.get("longitude")
+            normalized = [
+                normalize_sapics_country(source, value)
+                for source, value in (sap_country.get("candidates") or {}).items()
+                if value
+            ]
+            normalized.extend(
+                normalize_geoip(source.removesuffix("_city"), value)
+                for source, value in (sap_city.get("candidates") or {}).items()
+                if value
+            )
+            if geo.get("country_code"):
+                owner_override = any("geofeed" in str(source).lower() for source in geo.get("sources", []))
+                normalized.append(normalize_geofeed(geo.get("country_code"), region=geo.get("region"), city=geo.get("city"), verified=True) if owner_override else normalize_geoip("global_geo", geo))
+            registration = geo.get("registration") or {}
+            if registration.get("country_code"):
+                normalized.append(normalize_rir(registration.get("source", "unknown"), registration.get("country_code")))
+            if ip2region:
+                normalized.append(normalize_ip2region(ip2region))
+            codes = {str(record.get("country_code")).upper() for record in normalized if record.get("country_code")}
+            validated = await asyncio.to_thread(validate_records, normalized, country_bounds=await asyncio.to_thread(bounds_for, codes))
+            hierarchy = await asyncio.to_thread(_geo_hierarchy)
+            resolve_kwargs = {
+                "registration_context": registration,
+                "evidence": [{"type": "context_validation", "source": "ip2region",
+                               "value": ip2region, "role": "supporting_context_only",
+                               "confidence": None}] if ip2region else [],
+            }
+            if hierarchy is not None:
+                resolve_kwargs["hierarchy"] = hierarchy
+            canonical = resolve_geo_records(validated, **resolve_kwargs)
+            resolved = canonical["resolved"]
+            selected_code = resolved.get("country_code")
+            selected_country = selected_code
+            selected_city = resolved.get("city")
+            selected_lat = resolved.get("latitude")
+            selected_lon = resolved.get("longitude")
+            status = canonical["status"]
+            location_status = "disputed" if "disputed" in status.values() else "resolved_with_conflict" if "probable" in status.values() else "resolved"
+            country_candidates = canonical["candidates"].get("country", [])
+            city_candidates = canonical["candidates"].get("city", [])
             result["network_location"] = {
                 "country": selected_country,
                 "country_code": selected_code,
                 "city": selected_city,
                 "latitude": selected_lat,
                 "longitude": selected_lon,
-                "confidence": geo.get("confidence", 0),
-                "disputed": bool(geo.get("disputed")),
-                "scope": geo.get("scope", "network") if owner_override else "sapics",
-                "sources": geo.get("sources", []) if owner_override else [
-                    "sapics:user-country", "sapics:server-country", "sapics:geolite2", "sapics:dbip", "sapics:origin-asn"
-                ],
-                "confidence_breakdown": geo.get("confidence_breakdown", {}),
+                "coordinate_granularity": "city" if selected_lat is not None and selected_lon is not None else "unknown",
+                "confidence": canonical["confidence"].get("country") or 0,
+                "disputed": location_status == "disputed",
+                "location_status": location_status,
+                "scope": "network",
+                "sources": [record.get("source") for record in validated if record.get("scope") == "network_operational"],
+                "confidence_breakdown": canonical["confidence"],
                 # See db-backed branch above: registration (RIR/WHOIS) is kept
                 # separate from operational country and is not itself a
                 # dispute signal - check allocation_pattern instead.
-                "registration": geo.get("registration"),
+                "registration": registration,
                 "allocation_pattern": geo.get("allocation_pattern", "unknown"),
                 "volatile_location": geo.get("volatile_location", False),
                 "geo": sapics,
                 "ip2region": ip2region,
-                "country_conflict": bool(sap_country.get("conflict")),
+                "canonical_resolution": canonical,
+                "country_conflict": len(country_candidates) > 1,
+                "country_status": status.get("country", "unknown"),
                 "country_conflict_severity": sap_country.get("conflict_severity", "none"),
-                "city_conflict": bool(sap_city.get("conflict")),
+                "city_conflict": len(city_candidates) > 1 or status.get("city") == "disputed",
+                "city_status": status.get("city", "unknown"),
                 "city_conflict_severity": sap_city.get("conflict_severity", "none"),
-                "coordinate_conflict": bool(sap_city.get("conflict")),
+                "coordinate_conflict": status.get("coordinates") == "disputed" or bool(sap_city.get("coordinate_conflict")),
                 "cross_region_infrastructure": sapics.get("infrastructure", {}).get("cross_region", False),
             }
             for field, value in (("country", selected_country), ("country_code", selected_code),
@@ -476,13 +566,6 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
                 if value is not None:
                     result[field] = value
                     field_sources[field] = "SAPICS" if not owner_override else "owner-declared + SAPICS"
-            origin_asn = sapics.get("asn", {})
-            if origin_asn.get("number") is not None:
-                result["asn"] = origin_asn["number"]
-                field_sources["asn"] = "SAPICS origin-asn"
-            if origin_asn.get("organization"):
-                result["organization"] = origin_asn["organization"]
-                field_sources["organization"] = "SAPICS origin-asn"
             for field in ("ip_prefix", "network_type"):
                 if geo.get(field) is not None:
                     result[field] = geo[field]

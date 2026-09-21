@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -25,6 +26,9 @@ _SAFE_SOURCE = re.compile(r"[^A-Za-z0-9_.-]+")
 _CHUNK_ID = re.compile(r"^(?P<hour>\d{8}T\d{6}Z)-(?P<sequence>\d{6})$")
 DEFAULT_QUEUE_MAX_LINES = 10000
 DEFAULT_QUEUE_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_WRITE_ATTEMPTS = 5
+DEFAULT_WRITE_BACKOFF_SECONDS = 0.25
+DEFAULT_WRITE_BACKOFF_MAX_SECONDS = 10.0
 
 
 class RawArchivePressure(RuntimeError):
@@ -37,6 +41,10 @@ class RawArchiveCompressionError(RuntimeError):
 
 class RawArchiveUploadError(RuntimeError):
     """Azure archival or remote verification failed."""
+
+
+class RawArchiveWriteError(RuntimeError):
+    """Raw persistence failed after the bounded retry policy was exhausted."""
 
 
 @dataclass(frozen=True)
@@ -60,13 +68,24 @@ class _ActiveChunk:
     raw_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class _RawArchiveItem:
+    line: str
+    received_at: datetime
+    receipt: asyncio.Future | None = None
+    is_last: bool = False
+    group_id: str = "legacy"
+
+
 class RawLogArchive:
     """Queue raw lines immediately; one background task writes and seals chunks."""
 
     def __init__(self, source_id: str, spool_dir: str | Path | None = None,
                  max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES,
                  max_queue_lines: int = DEFAULT_QUEUE_MAX_LINES,
-                 max_queue_bytes: int = DEFAULT_QUEUE_MAX_BYTES) -> None:
+                 max_queue_bytes: int = DEFAULT_QUEUE_MAX_BYTES,
+                 max_write_attempts: int | None = None,
+                 write_backoff_seconds: float | None = None) -> None:
         if max_chunk_bytes <= 0:
             raise ValueError("raw archive max chunk bytes must be positive")
         if max_queue_lines <= 0 or max_queue_bytes <= 0:
@@ -76,7 +95,16 @@ class RawLogArchive:
         self.max_chunk_bytes = max_chunk_bytes
         self.max_queue_lines = max_queue_lines
         self.max_queue_bytes = max_queue_bytes
-        self._queue: asyncio.Queue[tuple[str, datetime]] = asyncio.Queue(maxsize=max_queue_lines)
+        self.max_write_attempts = max_write_attempts or int(os.getenv(
+            "RAW_ARCHIVE_MAX_WRITE_ATTEMPTS", str(DEFAULT_MAX_WRITE_ATTEMPTS)
+        ))
+        self.write_backoff_seconds = write_backoff_seconds if write_backoff_seconds is not None else float(
+            os.getenv("RAW_ARCHIVE_WRITE_BACKOFF_SECONDS", str(DEFAULT_WRITE_BACKOFF_SECONDS))
+        )
+        if self.max_write_attempts <= 0 or self.write_backoff_seconds < 0:
+            raise ValueError("raw archive retry settings must be non-negative and attempts must be positive")
+        self._queue: asyncio.Queue[_RawArchiveItem] = asyncio.Queue(maxsize=max_queue_lines)
+        self._queued_stamps: deque[datetime] = deque()
         self._task: asyncio.Task | None = None
         self._compression_task: asyncio.Task | None = None
         self._upload_task: asyncio.Task | None = None
@@ -99,6 +127,11 @@ class RawLogArchive:
         self._receipt_sequence = 0
         self._last_receipt: RawDurableReceipt | None = None
         self._receipt_groups: dict[str, tuple[int, int]] = {}
+        self._stop_lock = asyncio.Lock()
+        self._stopped = False
+        self._writer_status = "READY"
+        self._consecutive_write_failures = 0
+        self._write_retry_count = 0
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -107,10 +140,16 @@ class RawLogArchive:
         await asyncio.to_thread(self._advance_sequence)
         await asyncio.to_thread(self._recover_active)
         self._stop = False
+        self._stopped = False
+        self._writer_status = "READY"
+        self._consecutive_write_failures = 0
         self._task = asyncio.create_task(self._writer_loop(), name="raw-log-archive")
         if shutil.which("zstd"):
-            self._compression_status = "READY"
-            self._compression_task = asyncio.create_task(self._compression_loop(), name="raw-log-zstd")
+            if not self._compression_task or self._compression_task.done():
+                self._compression_status = "READY"
+                self._compression_task = asyncio.create_task(
+                    self._compression_loop(), name="raw-log-zstd"
+                )
         else:
             self._compression_status = "UNAVAILABLE"
             self._last_error = "zstd executable is unavailable; no compression fallback is used"
@@ -119,11 +158,14 @@ class RawLogArchive:
         except RuntimeError:
             self._upload_status = "UNAVAILABLE"
         else:
-            self._upload_status = "READY"
-            self._upload_task = asyncio.create_task(self._upload_loop(), name="raw-log-azure")
+            if not self._upload_task or self._upload_task.done():
+                self._upload_status = "READY"
+                self._upload_task = asyncio.create_task(self._upload_loop(), name="raw-log-azure")
 
     def tap(self, lines: list[str], received_at: datetime | None = None) -> int:
         """Queue raw text immediately; never performs disk or network I/O."""
+        if self._writer_status == "FAILED":
+            raise RawArchiveWriteError(self._last_error or "raw archive writer is failed")
         stamp = received_at or datetime.now(timezone.utc)
         valid = [line for line in lines if isinstance(line, str)]
         requested_bytes = sum(len(line.encode("utf-8")) + 1 for line in valid)
@@ -135,7 +177,8 @@ class RawLogArchive:
             self._update_metrics()
             raise RawArchivePressure(self._last_error)
         for line in valid:
-            self._queue.put_nowait((line, stamp))
+            self._queue.put_nowait(_RawArchiveItem(line, stamp))
+            self._queued_stamps.append(stamp)
         if valid:
             self._pending_bytes += requested_bytes
         self._update_metrics()
@@ -143,6 +186,10 @@ class RawLogArchive:
 
     async def append_batch(self, lines: list[str], received_at: datetime | None = None) -> RawDurableReceipt:
         """Append one admitted group and resolve only after one group fsync."""
+        if self._writer_status == "FAILED":
+            await self.start()
+            if self._writer_status == "FAILED":
+                raise RawArchiveWriteError(self._last_error or "raw archive writer is failed")
         archive_started = bool(self._task and not self._task.done())
         valid = [line for line in lines if isinstance(line, str)]
         if not valid:
@@ -169,7 +216,10 @@ class RawLogArchive:
         loop = asyncio.get_running_loop()
         receipt_future = loop.create_future()
         for index, line in enumerate(valid):
-            self._queue.put_nowait((line, stamp, receipt_future, index == len(valid) - 1, group_id))
+            self._queue.put_nowait(_RawArchiveItem(
+                line, stamp, receipt_future, index == len(valid) - 1, group_id,
+            ))
+            self._queued_stamps.append(stamp)
         self._pending_bytes += requested_bytes
         self._update_metrics()
         return await receipt_future
@@ -200,12 +250,36 @@ class RawLogArchive:
             "upload_status": self._upload_status,
             "uploaded_chunks": self._uploaded_chunks,
             "upload_failures": self._upload_failures,
+            "writer_status": self._writer_status,
+            "consecutive_write_failures": self._consecutive_write_failures,
+            "write_retry_count": self._write_retry_count,
         }
 
+    @staticmethod
+    def _fail_receipt(receipt: asyncio.Future | None, error: Exception) -> None:
+        if receipt is not None and not receipt.done():
+            receipt.set_exception(error)
+
+    def _fail_queued_items(self, error: Exception, current: _RawArchiveItem | None = None) -> None:
+        self._fail_receipt(current.receipt if current else None, error)
+        if current:
+            self._receipt_groups.pop(current.group_id, None)
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._fail_receipt(item.receipt, error)
+                self._receipt_groups.pop(item.group_id, None)
+                self._queue.task_done()
+        self._queued_stamps.clear()
+        self._pending_bytes = 0
+
     def _oldest_queued_age_seconds(self) -> float:
-        if not self._queue._queue:
+        if not self._queued_stamps:
             return 0.0
-        return round(max(0.0, time.time() - self._queue._queue[0][1].timestamp()), 3)
+        return round(max(0.0, time.time() - self._queued_stamps[0].timestamp()), 3)
 
     def _source_name(self) -> str:
         return _SAFE_SOURCE.sub("_", self.source_id).strip("._") or "source"
@@ -280,6 +354,7 @@ class RawLogArchive:
         if not active:
             return
         sealed_path = active.path.with_suffix(".log")
+        self._sync_path(active.path)
         active.path.replace(sealed_path)
         metadata = {
             "source": self.source_id, "chunk_id": active.chunk_id,
@@ -291,7 +366,9 @@ class RawLogArchive:
         sealed_metadata = active.metadata_path.with_name(f"{active.chunk_id}.json")
         temporary = sealed_metadata.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(metadata, indent=2) + "\n")
+        self._sync_path(temporary)
         temporary.replace(sealed_metadata)
+        self._sync_directory(sealed_path.parent)
         if active.metadata_path.exists():
             active.metadata_path.unlink()
         self._sealed_chunks += 1
@@ -318,7 +395,19 @@ class RawLogArchive:
     def _sync_active(self) -> None:
         if not self._active:
             return
-        descriptor = os.open(self._active.path, os.O_RDONLY)
+        self._sync_path(self._active.path)
+
+    @staticmethod
+    def _sync_path(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)
         finally:
@@ -355,36 +444,52 @@ class RawLogArchive:
         while not self._stop or not self._queue.empty():
             try:
                 item = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-                line, received_at = item[:2]
-                receipt_future = item[2] if len(item) > 2 else None
-                is_last = item[3] if len(item) > 3 else False
-                group_id = item[4] if len(item) > 4 else "legacy"
+                self._queued_stamps.popleft()
             except asyncio.TimeoutError:
                 continue
-            payload_size = len(line.encode("utf-8")) + 1
+            payload_size = len(item.line.encode("utf-8")) + 1
             try:
-                await asyncio.to_thread(self._write_line, line, received_at)
+                for attempt in range(1, self.max_write_attempts + 1):
+                    try:
+                        await asyncio.to_thread(self._write_line, item.line, item.received_at)
+                        self._consecutive_write_failures = 0
+                        self._writer_status = "READY"
+                        break
+                    except Exception as exc:
+                        self._failed_writes += 1
+                        self._consecutive_write_failures += 1
+                        self._last_error = f"{type(exc).__name__}: {exc}"[:240]
+                        metrics.increment("raw_archive.write_failures")
+                        if attempt >= self.max_write_attempts:
+                            error = RawArchiveWriteError(
+                                f"raw archive write failed after {attempt} attempts: {self._last_error}"
+                            )
+                            self._writer_status = "FAILED"
+                            metrics.increment("raw_archive.terminal_write_failures")
+                            self._fail_queued_items(error, current=item)
+                            return
+                        self._writer_status = "RETRYING"
+                        self._write_retry_count += 1
+                        await asyncio.sleep(min(
+                            self.write_backoff_seconds * (2 ** (attempt - 1)),
+                            DEFAULT_WRITE_BACKOFF_MAX_SECONDS,
+                        ))
                 self._pending_bytes -= payload_size
-                if receipt_future is not None and is_last:
+                if item.receipt is not None and item.is_last:
                     await asyncio.to_thread(self._sync_active)
-                    group_lines, group_bytes = self._receipt_groups.pop(group_id)
+                    group_lines, group_bytes = self._receipt_groups.pop(item.group_id)
                     receipt = RawDurableReceipt(
-                        self.source_id, group_id,
+                        self.source_id, item.group_id,
                         group_lines,
                         group_bytes,
                         self._active.chunk_id if self._active else None,
                     )
                     self._last_receipt = receipt
-                    if not receipt_future.done():
-                        receipt_future.set_result(receipt)
+                    if not item.receipt.done():
+                        item.receipt.set_result(receipt)
                 self._last_error = None
                 if self._queue.qsize() == 0:
                     self._pressure_state = "NORMAL"
-            except Exception as exc:
-                self._failed_writes += 1
-                self._last_error = f"{type(exc).__name__}: {exc}"[:240]
-                metrics.increment("raw_archive.write_failures")
-                self._queue.put_nowait(item)
             finally:
                 self._queue.task_done()
                 self._update_metrics()
@@ -591,23 +696,27 @@ class RawLogArchive:
         metrics.gauge("raw_archive.writer_lag_seconds", self._oldest_queued_age_seconds())
 
     async def stop(self) -> None:
-        self._stop = True
-        if self._task:
-            await self._task
-            if self._active:
-                await asyncio.to_thread(self._seal_active, datetime.now(timezone.utc))
-            self._task = None
-        if self._compression_task:
-            await self._compression_task
-            self._compression_task = None
-            if await asyncio.to_thread(self._sealed_paths) and shutil.which("zstd"):
-                self._stop = True
-                self._compression_task = asyncio.create_task(self._compression_loop(), name="raw-log-zstd-finalize")
+        async with self._stop_lock:
+            if self._stopped and not self._task and not self._compression_task and not self._upload_task:
+                return
+            self._stop = True
+            if self._task:
+                await self._task
+                if self._active:
+                    await asyncio.to_thread(self._seal_active, datetime.now(timezone.utc))
+                self._task = None
+            if self._compression_task:
                 await self._compression_task
                 self._compression_task = None
-        if self._upload_task:
-            await self._upload_task
-            self._upload_task = None
+                if await asyncio.to_thread(self._sealed_paths) and shutil.which("zstd"):
+                    self._stop = True
+                    self._compression_task = asyncio.create_task(self._compression_loop(), name="raw-log-zstd-finalize")
+                    await self._compression_task
+                    self._compression_task = None
+            if self._upload_task:
+                await self._upload_task
+                self._upload_task = None
+            self._stopped = True
 
     async def maintenance_once(self) -> dict:
         """Drain sealed local artifacts once, for an external locked scheduler."""

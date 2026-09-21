@@ -99,7 +99,7 @@ def test_shadow_detection_never_enters_early_alert_publisher(monkeypatch):
     )()
     collector._window_detector = type(
         "ShadowDetector", (),
-        {"observe": lambda self, line: [EarlyDetection("PENTEST-DISC-001", "content_discovery_sweep", "GET", "/candidate", "203.0.113.10", True)]},
+        {"observe": lambda self, line: [EarlyDetection("PENTEST-UA-001", "scanner_ua", "GET", "/candidate", "203.0.113.10", True, "ffuf", "supporting")]},
     )()
     published = []
     monkeypatch.setattr(
@@ -114,10 +114,62 @@ def test_shadow_detection_never_enters_early_alert_publisher(monkeypatch):
     assert published == []
 
 
+def test_promoted_behavior_detection_enters_early_alert_publisher(monkeypatch):
+    collector = _collector()
+    collector._raw_archive = type(
+        "DurableArchive", (),
+        {"append_batch": lambda self, lines, received_at=None: _completed_receipt()},
+    )()
+    collector._window_detector = type(
+        "BehaviorDetector", (),
+        {"observe": lambda self, line: [EarlyDetection("PENTEST-DISC-001", "content_discovery_sweep", "GET", "/candidate", "203.0.113.10", False, None, "medium")]},
+    )()
+    published = []
+    monkeypatch.setattr(
+        "app.collectors.websocket_collector.early_alerts.enqueue",
+        lambda detection, ip=None: published.append((detection, ip)),
+    )
+
+    async def scenario():
+        await collector.handle_message(json.dumps({"type": "lines", "items": ["behavior line"]}), 0)
+
+    asyncio.run(scenario())
+    assert len(published) == 1
+    assert published[0][0].severity == "medium"
+
+
 def _completed_receipt():
     async def receipt():
         return None
     return receipt()
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_all_accepted_storage_batches(monkeypatch):
+    collector = _collector()
+    collector._raw_archive = type("Archive", (), {"stop": lambda self: asyncio.sleep(0)})()
+    monkeypatch.setattr(collector, "_publish_status", lambda: asyncio.sleep(0))
+    monkeypatch.setattr("app.collectors.websocket_collector.early_alerts.stop", lambda: asyncio.sleep(0))
+
+    processed = []
+
+    async def consume(cursor, affected, new_ips):
+        batch = current_batches.pop(0)
+        processed.append(batch[0])
+
+    current_batches = [["first"], ["second"]]
+    collector._commit_batch = lambda batch, end_offset, current_offset, received_at=None: (
+        end_offset, 1, set(), []
+    )
+    collector._after_commit = consume
+    collector._storage_task = asyncio.create_task(collector._storage_loop())
+    await collector._storage_queue.put((["first"], 1, 0, "received"))
+    await collector._storage_queue.put((["second"], 2, 1, "received"))
+
+    await asyncio.wait_for(collector.stop(), timeout=0.5)
+
+    assert processed == ["first", "second"]
+    assert collector._storage_queue._unfinished_tasks == 0
 
 
 @pytest.mark.integration
@@ -168,6 +220,18 @@ def test_parser_reports_malformed_line_without_creating_event():
     assert event is None
     assert code == "INVALID_APACHE_COMBINED_FORMAT"
     assert message
+
+
+def test_parser_rejection_state_is_observable_and_degrades_after_repeated_batches():
+    collector = _collector()
+    for _ in range(3):
+        collector._record_parser_outcome(1, 0, 1)
+
+    status = collector.status()
+    assert status["parser"]["rejected_lines"] == 3
+    assert status["parser"]["last_rejection_ratio"] == 1.0
+    assert status["parser"]["consecutive_reject_batches"] == 3
+    assert status["parser"]["status"] == "degraded"
 
 
 @pytest.mark.asyncio

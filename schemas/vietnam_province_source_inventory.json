@@ -1,0 +1,85 @@
+{
+  "schema_version": "vn-province-source-inventory-1",
+  "scope": "Vietnam current 34 administrative units; historical observations retain source geography",
+  "canonical_geography": {
+    "catalog": "schemas/vietnam_provinces_2025.json",
+    "crosswalk": "schemas/vietnam_province_crosswalk.json",
+    "effective_from": "2025-07-01",
+    "aggregation_rule": "Only additive absolute measures may be reaggregated when every source unit and definition is covered. Never aggregate index, rate, share, growth, occupancy or other ratios."
+  },
+  "status_values": ["verified", "partial", "unknown", "not_applicable", "blocked"],
+  "sources": [
+    {
+      "source_id": "nso_pxweb_enterprise",
+      "source_name": "National Statistics Office PX-Web Enterprise",
+      "publisher": "National Statistics Office of Vietnam",
+      "url": "https://pxweb.nso.gov.vn/pxweb/en/Enterprise/",
+      "geography_basis": "NSO province dimension; historical table geography must be checked against the 34-unit catalogue",
+      "available_indicators": ["enterprise_count", "employment", "enterprise_size", "turnover", "capital"],
+      "periods_observed": "table-specific; inspect metadata before extraction",
+      "status": "partial",
+      "limitations": ["Province and sector tables are separate in the published catalogue; do not imply an industry-by-province cross-tab without a direct table.", "Table update date is metadata, not the observation period."]
+    },
+    {
+      "source_id": "nso_pxweb_iip",
+      "source_name": "National Statistics Office PX-Web Industry",
+      "publisher": "National Statistics Office of Vietnam",
+      "url": "https://pxweb.nso.gov.vn/pxweb/en/Industry/",
+      "available_indicators": ["industrial_production_index", "manufacturing_growth"],
+      "periods_observed": "2012–2024 in the local E07.02 extract; current monthly/quarterly releases are separate",
+      "geography_basis": "source table geography; preserve legacy province code and name",
+      "status": "partial",
+      "limitations": ["The historical extract contains 63-province geography and cannot be relabeled as a 34-province observation after mergers.", "IIP/index/growth values are not additive across provinces."]
+    },
+    {
+      "source_id": "nso_current_socioeconomic_reports",
+      "source_name": "NSO current monthly and quarterly socio-economic reports",
+      "publisher": "National Statistics Office of Vietnam",
+      "url": "https://www.nso.gov.vn/tin-tuc-thong-ke/",
+      "available_indicators": ["current_iip_growth", "manufacturing_momentum"],
+      "periods_observed": "2026 monthly, 6-month and 8-month releases where published",
+      "geography_basis": "reported current province/municipality names; verify current 34 boundary in each release",
+      "status": "partial",
+      "limitations": ["Many releases describe all provinces but publish numeric values only for selected provinces.", "A national release is not evidence that every province has a numeric record."]
+    },
+    {
+      "source_id": "fia_mof_fdi",
+      "source_name": "Foreign Investment Agency / Ministry of Finance FDI reports",
+      "publisher": "Foreign Investment Agency, Ministry of Finance",
+      "url": "https://fdi.mof.gov.vn/",
+      "available_indicators": ["province_investment_momentum", "registered_fdi", "new_project_capital", "adjusted_capital", "project_count"],
+      "periods_observed": "2025 full year and 2026 YTD reports; attachment availability varies",
+      "geography_basis": "FIA reported province table; preserve reported geography and period",
+      "status": "partial",
+      "limitations": ["HTML reports commonly publish a top-10 ranking rather than a complete province panel.", "Do not treat omitted provinces as zero.", "Total FDI is not manufacturing FDI; manufacturing-by-province requires a direct source table.", "Flow in period and cumulative registered stock are separate measures."]
+    },
+    {
+      "source_id": "official_industrial_park_sources",
+      "source_name": "Provincial industrial-park management boards, UBND portals and official investment portals",
+      "publisher": "Provincial authorities and industrial-park authorities",
+      "url": "https://investvietnam.gov.vn/en/industrial-zones.pl.html",
+      "available_indicators": ["industrial_park_count", "operating_industrial_park_count", "total_area_ha", "industrial_service_land_ha", "leased_land_ha", "occupancy_rate_pct", "infrastructure_investment", "tenant_count"],
+      "periods_observed": "source-specific",
+      "geography_basis": "source authority geography; current province boundary must be explicit",
+      "status": "partial",
+      "limitations": ["Directories mix industrial parks and industrial clusters and can contain duplicates or stale boundary names.", "A national table of communes with an industrial park is not the same as a park count or operating-park count.", "Missing fields remain null."]
+    },
+    {
+      "source_id": "osm_discovery",
+      "source_name": "OpenStreetMap / Overpass discovery evidence",
+      "publisher": "OpenStreetMap contributors",
+      "url": "https://www.openstreetmap.org/",
+      "available_indicators": ["local_business_evidence"],
+      "periods_observed": "retrieval time",
+      "geography_basis": "mapped entity and source geometry; not an official province statistic",
+      "status": "verified",
+      "limitations": ["OSM presence is discovery evidence, not a factory registry or market-size measure.", "Do not use OSM counts to fill missing NSO, FDI or KCN values."]
+    }
+  ],
+  "coverage_policy": {
+    "unknown_is_not_zero": true,
+    "source_period_is_indicator_specific": true,
+    "comparison_gate": "A field may be used for province comparison only after coverage, common definition, common period and geography alignment are verified.",
+    "manufacturing_by_province": "unknown until a direct province-by-industry source is found"
+  }
+}

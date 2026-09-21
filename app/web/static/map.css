@@ -42,13 +42,50 @@
 .map-name-popup .maplibregl-popup-tip{display:none}
 .legend-dot.opportunity{background:#21aebf;box-shadow:0 0 7px rgba(84,207,224,.7)}
 .map-stage .map-empty{z-index:5}
-.dashboard-map-card{margin:0 0 22px;border:1px solid var(--hairline);border-radius:var(--r-lg);overflow:hidden;background:var(--console);box-shadow:0 12px 32px rgba(0,0,0,.1)}
+.dashboard-map-card{position:relative;margin:0 0 22px;border:1px solid var(--hairline);border-radius:var(--r-lg);overflow:visible;background:var(--console);box-shadow:0 12px 32px rgba(0,0,0,.1)}
 .dashboard-map-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px 18px;border-bottom:1px solid var(--hairline-soft);background:linear-gradient(180deg,rgba(255,255,255,.018),transparent)}
 .dashboard-map-head h2{margin:3px 0 0;font-size:18px;letter-spacing:-.02em}
 .dashboard-map-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .dashboard-map-actions button{min-height:30px;padding:0 9px;font-size:10px}
-.dashboard-map-actions .segmented,.dashboard-map-actions .range-control{padding:2px}
-.dashboard-map-actions .segmented button,.dashboard-map-actions .range-control button{min-height:26px;padding:4px 8px}
+.dashboard-map-actions .segmented{padding:2px}
+.dashboard-map-actions .segmented button{min-height:26px;padding:4px 8px}
+.time-picker{position:relative}
+.time-picker-trigger{display:flex;align-items:center;gap:8px;min-width:164px;justify-content:space-between;padding:7px 10px!important;border:1px solid var(--hairline)!important;border-radius:7px!important;background:var(--deck)!important;color:var(--ink)!important;font:600 11px ui-monospace,monospace!important;cursor:pointer}
+.time-picker-trigger:hover,.time-picker-trigger[aria-expanded="true"]{border-color:var(--radar)!important;background:var(--raised)!important}
+.time-picker-icon,.time-picker-calendar{position:relative;display:inline-block;width:15px;height:14px;border:1.5px solid var(--radar);border-radius:2px;color:var(--radar)}
+.time-picker-icon:before,.time-picker-calendar:before{content:"";position:absolute;left:1px;right:1px;top:3px;border-top:1.5px solid currentColor}
+.time-picker-icon:after,.time-picker-calendar:after{content:"";position:absolute;top:-3px;left:3px;width:6px;height:4px;border-left:1.5px solid currentColor;border-right:1.5px solid currentColor}
+.time-picker-chevron{color:var(--tertiary);font-size:14px;line-height:1;transform:translateY(-1px)}
+.time-picker-popover{position:fixed;z-index:100;top:0;left:0;width:min(680px,calc(100vw - 24px));max-width:calc(100vw - 24px);overflow:hidden;border:1px solid var(--hairline);border-radius:var(--r-lg);background:var(--console);box-shadow:0 18px 44px rgba(0,0,0,.35),0 0 0 1px rgba(89,216,230,.05)}
+.time-picker-popover[hidden]{display:none}
+.time-picker-summary{padding:13px 15px;border-bottom:1px solid var(--hairline-soft);color:var(--tertiary);font:11px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.time-picker-body{display:grid;grid-template-columns:1fr 190px;min-height:300px}
+.time-picker-custom{display:grid;grid-template-columns:1fr;gap:14px;align-content:start;padding:16px;border-right:1px solid var(--hairline-soft)}
+.time-picker-calendar-panel{padding-bottom:14px;border-bottom:1px solid var(--hairline-soft)}
+.time-picker-calendar-head{display:grid;grid-template-columns:30px 1fr 30px;align-items:center;gap:8px;margin-bottom:12px}
+.time-picker-calendar-head strong{text-align:center;color:var(--ink);font-size:13px}
+.time-picker-calendar-head button{display:grid;place-items:center;width:30px;height:30px;padding:0;border:1px solid var(--hairline);border-radius:6px;background:var(--deck);color:var(--secondary);font-size:22px;line-height:1;cursor:pointer}
+.time-picker-calendar-head button:hover{border-color:var(--radar);color:var(--ink)}
+.time-picker-weekdays,.time-picker-days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center}
+.time-picker-weekdays{margin-bottom:5px;color:var(--tertiary);font:600 9px ui-monospace,monospace;text-transform:uppercase}
+.time-picker-days button{height:29px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--secondary);font:11px ui-monospace,monospace;cursor:pointer}
+.time-picker-days button:hover{background:var(--raised);color:var(--ink)}
+.time-picker-days button.muted{color:var(--disabled)}
+.time-picker-days button.today{box-shadow:inset 0 0 0 1px var(--hairline)}
+.time-picker-days button.selected{background:var(--radar);color:#071014;font-weight:700}
+.time-picker-days button.in-range{background:rgba(89,216,230,.14);color:var(--ink)}
+.time-picker-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.time-picker-field{display:grid;gap:6px}
+.time-picker-field label{color:var(--tertiary);font:600 10px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em}
+.time-picker-field input{width:100%;height:34px;padding:0 8px;color:var(--secondary);font:11px ui-monospace,monospace}
+.time-picker-presets{display:grid;align-content:start;gap:2px;padding:10px}
+.time-picker-presets button{min-height:32px;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--secondary);text-align:left;font:11px ui-monospace,monospace;cursor:pointer}
+.time-picker-presets button:hover,.time-picker-presets button.active{background:var(--raised);color:var(--ink)}
+.time-picker-presets button.active{box-shadow:inset 2px 0 var(--radar)}
+.time-picker-footer{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--hairline-soft);background:rgba(255,255,255,.018)}
+.time-picker-footer .traffic-window-note{margin-right:auto;color:var(--tertiary);font:10px ui-monospace,monospace}
+.time-picker-footer button{min-height:29px;padding:0 12px;font-size:11px}
+.time-picker-footer .primary{border:1px solid rgba(89,216,230,.55);border-radius:6px;background:var(--radar);color:#071014;font-weight:700;cursor:pointer}
 .dashboard-map-stage{min-height:500px}
 .dashboard-map-foot{display:flex;align-items:center;gap:16px;padding:9px 16px;color:var(--tertiary);font:10px ui-monospace,monospace;border-top:1px solid var(--hairline-soft)}
 .dashboard-map-foot span:first-child{margin-right:auto;color:var(--secondary)}
@@ -63,6 +100,15 @@ html[data-theme="light"] .map-stage .map-tooltip{background:rgba(255,255,255,.96
 html[data-theme="light"] .map-stage .map-tooltip .tooltip-code{color:#087f91}
 html[data-theme="light"] .map-stage .map-tooltip .tooltip-row{color:var(--secondary)}
 html[data-theme="light"] .map-stage .map-tooltip .tooltip-row b{color:var(--ink)}
-@media(max-width:900px){.dashboard-map-head{display:block}.dashboard-map-actions{justify-content:flex-start;margin-top:12px}.dashboard-map-stage{min-height:420px}.dashboard-map-foot{flex-wrap:wrap;gap:8px}.dashboard-map-foot span:first-child{flex-basis:100%}}
+@media(max-width:900px){.dashboard-map-head{display:block}.dashboard-map-actions{justify-content:flex-start;margin-top:12px}.time-picker-popover{right:auto;left:0;width:min(520px,calc(100vw - 40px))}.dashboard-map-stage{min-height:420px}.dashboard-map-foot{flex-wrap:wrap;gap:8px}.dashboard-map-foot span:first-child{flex-basis:100%}}
+@media(max-width:560px){.time-picker-body{grid-template-columns:1fr}.time-picker-custom{border-right:0;border-bottom:1px solid var(--hairline-soft)}.time-picker-presets{grid-template-columns:1fr 1fr}.time-picker-popover{position:fixed;top:74px;left:12px;right:12px;width:auto;max-height:calc(100vh - 90px);overflow:auto}}
+
+/* UI-M1 shell alignment: keep map controls flat and consistent with the hub. */
+.map-card,.map-inspector,.dashboard-map-card{box-shadow:none;border-color:var(--ui-border,var(--hairline))}.map-card-head,.dashboard-map-head{background:var(--ui-surface,var(--console));border-bottom-color:var(--ui-border-soft,var(--hairline-soft))}.segmented,.range-control{background:var(--ui-surface-inset,var(--inset));border-color:var(--ui-border,var(--hairline))}
 /* Five-tier classification colors for map labels. */
 .legend-dot.medium{background:var(--watch)}.legend-dot.critical{background:var(--critical)}
+
+/* UI-M6: map shell presentation; map engine, markers and data hooks unchanged. */
+.map-toolbar{border:1px solid var(--ui-border);border-radius:8px;background:var(--ui-surface);padding:10px 12px}.map-layout{gap:14px;padding:14px 0 24px}.map-card,.map-inspector{border:1px solid var(--ui-border);border-radius:8px;box-shadow:none;background:var(--ui-surface)}.map-card-head{padding:14px 16px;background:var(--ui-surface);border-bottom-color:var(--ui-border-soft)}.map-card h2,.map-inspector h2{font-size:16px}.map-legend{background:var(--ui-surface-inset);border-color:var(--ui-border-soft);border-radius:6px}.map-stage{min-height:540px}.map-foot{padding:10px 16px;background:var(--ui-surface);border-top-color:var(--ui-border-soft)}.map-inspector{padding:16px;background:var(--ui-surface)}.inspect-block{border-top-color:var(--ui-border-soft)}.evidence-grid,.freshness-grid,.decision-matrix{background:var(--ui-border-soft)}.evidence-grid div,.freshness-grid div,.decision-cell{background:var(--ui-surface-inset)}.semantic-note{background:var(--ui-surface-inset);border-color:var(--ui-border-soft)}
+@media(max-width:900px){.map-layout{grid-template-columns:1fr}.map-inspector{min-height:0}.map-card-head{display:block}.map-card-actions{margin-top:10px}.map-legend{justify-content:flex-start;flex-wrap:wrap}.map-stage,.map-stage canvas{min-height:420px}}
+@media(max-width:560px){.map-toolbar{display:grid;gap:8px}.range-control{margin-left:0}.map-status{white-space:normal}.map-layout{padding-top:10px}.map-stage,.map-stage canvas{min-height:330px}.map-card-head{padding:13px}.map-legend{gap:8px;font-size:9px}.map-inspector{padding:13px}}

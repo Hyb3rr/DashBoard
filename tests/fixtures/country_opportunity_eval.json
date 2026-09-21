@@ -1,0 +1,7 @@
+[
+  {"name": "strong_market_strong_demand", "market": 84, "demand": 78, "confidence": 0.80, "expected_status": "PRIORITIZE"},
+  {"name": "strong_market_low_evidence", "market": 90, "demand": 82, "confidence": 0.12, "expected_status": "EMERGING"},
+  {"name": "market_hypothesis_rejected", "market": 88, "demand": 18, "confidence": 0.92, "expected_status": "WATCH"},
+  {"name": "weak_market_strong_demand", "market": 55, "demand": 82, "confidence": 0.90, "expected_status": "INVESTIGATE"},
+  {"name": "no_demand_evidence", "market": 90, "demand": null, "confidence": 0.0, "expected_status": "WATCH"}
+]

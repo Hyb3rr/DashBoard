@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.ai.providers.llama_cpp import LlamaCppHttpProvider
+from app.ai.providers.llama_cpp import PROMPT_SCHEMA_VERSION, LlamaCppHttpProvider
 from app.services.ai_explain_worker import AiExplainWorker
 from app.db.ai_jobs import AiExplainJobRepository
 
@@ -52,15 +52,21 @@ def main() -> int:
     args = parser.parse_args()
     endpoint = args.endpoint or _endpoint_default()
     model = args.model or os.getenv("FOUNDATION_SEC_MODEL_NAME", "Foundation-Sec-8B-Reasoning")
-    timeout = args.timeout if args.timeout is not None else _setting_float("LOCAL_REASONING_TIMEOUT_SECONDS", 120.0)
+    timeout = args.timeout if args.timeout is not None else _setting_float("LOCAL_REASONING_TIMEOUT_SECONDS", 30.0)
     poll_interval = args.poll_interval if args.poll_interval is not None else _setting_float("AI_EXPLAIN_POLL_INTERVAL_SECONDS", 1.0)
-    stale_after = args.stale_after if args.stale_after is not None else _setting_float("AI_EXPLAIN_STALE_AFTER_SECONDS", 300.0)
+    stale_after = args.stale_after if args.stale_after is not None else _setting_float("AI_EXPLAIN_STALE_AFTER_SECONDS", timeout + 45.0)
     packets = _load_packets(args.packets)
     worker = AiExplainWorker(
         AiExplainJobRepository(),
         LlamaCppHttpProvider(endpoint, model, timeout),
         packets.get,
-        provenance={"provider": "llama_cpp", "model": model, "endpoint": endpoint},
+        provenance={
+            "provider": "llama_cpp",
+            "model": model,
+            "endpoint": endpoint,
+            "configured_timeout_seconds": timeout,
+            "prompt_schema_version": PROMPT_SCHEMA_VERSION,
+        },
         poll_interval_seconds=poll_interval,
         stale_after_seconds=stale_after,
     )

@@ -24,6 +24,8 @@ SYSTEM_PROMPT = (
     "Complete every sentence before moving to the next field; do not end text with a comma or fragment."
 )
 
+PROMPT_SCHEMA_VERSION = "case-analysis-v1"
+
 ANALYSIS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -38,7 +40,15 @@ ANALYSIS_SCHEMA = {
     },
 }
 
-CONTEXT_TOKENS = 4096
+def _configured_context_tokens() -> int:
+    try:
+        value = int(os.getenv("FOUNDATION_SEC_CONTEXT_SIZE", "4096"))
+    except ValueError:
+        value = 4096
+    return max(1, value)
+
+
+CONTEXT_TOKENS = _configured_context_tokens()
 INPUT_SAFETY_MARGIN_TOKENS = 384
 MAX_INPUT_TOKENS = CONTEXT_TOKENS - 256 - INPUT_SAFETY_MARGIN_TOKENS
 
@@ -60,7 +70,7 @@ class LlamaCppHttpProvider:
             raise ValueError("llama.cpp endpoint must use localhost HTTP")
         if timeout_seconds <= 0:
             raise ValueError("llama.cpp timeout must be positive")
-        configured_max_tokens = max_tokens if max_tokens is not None else int(os.getenv("LOCAL_REASONING_MAX_TOKENS", "256"))
+        configured_max_tokens = max_tokens if max_tokens is not None else int(os.getenv("LOCAL_REASONING_MAX_TOKENS", "768"))
         if configured_max_tokens <= 0:
             raise ValueError("llama.cpp max tokens must be positive")
         self.endpoint = endpoint
@@ -104,6 +114,10 @@ class LlamaCppHttpProvider:
             choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
             message = choice.get("message") if isinstance(choice, dict) else None
             content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(message, dict) and message.get("reasoning_content"):
+                return ReasoningResult("invalid_response", fingerprint, payload, "reasoning output is not allowed for structured CaseAnalysis")
+            if isinstance(content, str) and ("<think>" in content.lower() or "</think>" in content.lower()):
+                return ReasoningResult("invalid_response", fingerprint, payload, "reasoning markers are not allowed for structured CaseAnalysis")
             if not isinstance(choice, dict) or choice.get("finish_reason") != "stop" or not isinstance(content, str):
                 return ReasoningResult("invalid_response", fingerprint, payload, "response was incomplete or missing content")
             analysis = json.loads(content)

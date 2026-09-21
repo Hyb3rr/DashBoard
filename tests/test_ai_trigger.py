@@ -40,17 +40,24 @@ def test_disabled_consumer_does_not_read_or_create_jobs():
 def test_consumer_advances_traffic_and_creates_only_meaningful_job():
     events = [
         TriggerEvent(1, "203.0.113.10", "traffic"),
-        TriggerEvent(2, "203.0.113.10", "classification", "unknown", "medium"),
+        TriggerEvent(2, "203.0.113.10", "classification", "unknown", "critical"),
+        TriggerEvent(3, "203.0.113.10", "rare_path_evidence_updated"),
     ]
     repo = FakeRepository(events)
     packet = {
         "subject": {"ip": "203.0.113.10"},
-        "classification": {"label": "medium", "risk_score": 42, "confidence": 80},
+        "classification": {"label": "critical", "risk_score": 85, "confidence": 80},
         "evidence": [{"evidence_id": "ev_1", "source": "rule"}],
     }
     assert AiTriggerConsumer(repo, lambda _: packet, enabled=True).run_once() == 0
-    assert repo.recorded == [(events[0], False), (events[1], True)]
+    assert repo.recorded == [(events[0], False), (events[1], True), (events[2], False)]
 
 
 def test_critical_transition_from_good_is_meaningful():
     assert is_meaningful_trigger(TriggerEvent(3, "203.0.113.11", "classification", "good", "critical"))
+
+
+def test_only_classification_transition_to_critical_is_meaningful():
+    assert is_meaningful_trigger(TriggerEvent(4, "203.0.113.12", "classification", "medium", "critical"))
+    assert not is_meaningful_trigger(TriggerEvent(5, "203.0.113.12", "classification", "critical", "critical"))
+    assert not is_meaningful_trigger(TriggerEvent(6, "203.0.113.12", "rare_path_evidence_updated"))

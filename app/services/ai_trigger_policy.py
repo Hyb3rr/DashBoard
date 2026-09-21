@@ -28,8 +28,6 @@ class TriggerEvent:
 
 
 def is_meaningful_trigger(event: TriggerEvent) -> bool:
-    if event.reason == "rare_path_evidence_updated":
-        return True
     if event.reason != "classification":
         return False
     transition = ((event.old_label or "unknown").lower(), (event.new_label or "").lower())

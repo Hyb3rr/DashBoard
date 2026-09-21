@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from collections import deque
 from datetime import datetime, timezone
 import re
+import json
+from pathlib import Path
 from collections import Counter, defaultdict
 
 from .path_canonicalization import canonicalize_path
@@ -16,16 +18,12 @@ _REQUEST_LINE = re.compile(r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]+"')
 _ACCESS_LINE = re.compile(
     r'^(?P<ip>\S+) .*?"(?P<method>[A-Z]+) (?P<path>\S+) [^"]+" (?P<status>\d{3}) '
 )
-_SCANNER_USER_AGENTS = (
-    ("Fuzz Faster U Fool", "ffuf"),
-    ("feroxbuster", "feroxbuster"),
-    ("gobuster", "gobuster"),
-    ("dirsearch", "dirsearch"),
-    ("sqlmap", "sqlmap"),
-    ("nikto", "nikto"),
-    ("commix", "commix"),
-)
-_FANOUT_SUFFIXES = (".bak2", ".orig", ".save", ".bak", ".old", ".php", ".1", "~")
+_EARLY_RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "early" / "short-window.json"
+_EARLY_RULES = json.loads(_EARLY_RULES_PATH.read_text(encoding="utf-8"))
+_SCANNER_USER_AGENTS = tuple(tuple(item) for item in _EARLY_RULES["scanner_user_agents"])
+_FANOUT_SUFFIXES = tuple(_EARLY_RULES["fanout_suffixes"])
+_THRESHOLDS = {key: float(value) for key, value in _EARLY_RULES["thresholds"].items()}
+_WORDPRESS_FAMILIES = tuple((item["name"], re.compile(item["pattern"])) for item in _EARLY_RULES["wordpress_families"])
 
 
 @dataclass(frozen=True)
@@ -37,6 +35,7 @@ class EarlyDetection:
     ip: str | None = None
     shadow_only: bool = False
     scanner_tool: str | None = None
+    severity: str = "high"
 
 
 @dataclass(frozen=True)
@@ -100,23 +99,23 @@ class ShortWindowDetector:
         sensitive = detect_raw_line(raw_line)
         if sensitive:
             candidates.append((sensitive.rule_id, sensitive.marker))
-        if sum(item.is_wp_login for item in current) > 20:
+        if sum(item.is_wp_login for item in current) > _THRESHOLDS["wp_login_burst"]:
             candidates.append(("WEB-BRUTE-001", "wp_login_burst"))
-        if len(current) >= 100:
+        if len(current) >= _THRESHOLDS["request_burst"]:
             candidates.append(("WEB-BURST-001", "request_burst"))
-        if len({item.path for item in current}) > 80:
+        if len({item.path for item in current}) > _THRESHOLDS["path_scan"]:
             candidates.append(("WEB-SCAN-001", "path_scan"))
         unique_paths = len(self._path_counts[ip])
         if (
-            len(current) >= 20
-            and unique_paths >= 15
-            and unique_paths / len(current) >= 0.70
-            and sum(item.is_4xx for item in current) / len(current) >= 0.60
+            len(current) >= _THRESHOLDS["content_discovery_min_requests"]
+            and unique_paths >= _THRESHOLDS["content_discovery_min_unique_paths"]
+            and unique_paths / len(current) >= _THRESHOLDS["content_discovery_min_novelty_ratio"]
+            and sum(item.is_4xx for item in current) / len(current) >= _THRESHOLDS["content_discovery_min_4xx_ratio"]
         ):
             candidates.append(("PENTEST-DISC-001", "content_discovery_sweep"))
-        if len(self._wp_families[ip]) >= 3:
+        if len(self._wp_families[ip]) >= _THRESHOLDS["wordpress_enumeration_min_families"]:
             candidates.append(("PENTEST-WP-001", "wordpress_enumeration_sequence"))
-        if any(len(variants) >= 3 for variants in self._fanout_variants[ip].values()):
+        if any(len(variants) >= _THRESHOLDS["fanout_min_variants"] for variants in self._fanout_variants[ip].values()):
             candidates.append(("PENTEST-FANOUT-001", "extension_backup_fanout"))
         result = []
         for rule_id, marker in candidates:
@@ -124,8 +123,9 @@ class ShortWindowDetector:
             if stamp - self._last_alert.get(key, float("-inf")) < self.cooldown_seconds:
                 continue
             self._last_alert[key] = stamp
-            is_shadow = rule_id.startswith("PENTEST-")
-            result.append(EarlyDetection(rule_id, marker, method, path, ip, is_shadow, scanner_tool))
+            is_shadow = rule_id == "PENTEST-UA-001"
+            severity = "supporting" if is_shadow else "medium" if rule_id.startswith("PENTEST-") else "high"
+            result.append(EarlyDetection(rule_id, marker, method, path, ip, is_shadow, scanner_tool, severity))
         return result
 
     def _expire_ip(self, ip: str, now: float) -> None:
@@ -188,22 +188,9 @@ def detect_scanner_user_agent(raw_line: str | None) -> str | None:
 
 def classify_wordpress_family(path: str | None) -> str | None:
     value = (path or "").lower().rstrip("/") or "/"
-    if value == "/wp-login.php":
-        return "wp_login"
-    if value == "/xmlrpc.php":
-        return "wp_xmlrpc"
-    if value == "/wp-json" or value.startswith("/wp-json/"):
-        return "wp_rest"
-    if value == "/readme.html":
-        return "wp_core_metadata"
-    if re.fullmatch(r"/wp-content/plugins/[^/]+/readme\.txt", value):
-        return "wp_plugin_metadata"
-    if re.fullmatch(r"/wp-content/themes/[^/]+/(?:readme\.txt|style\.css)", value):
-        return "wp_theme_metadata"
-    if value.startswith("/wp-content/uploads/"):
-        return "wp_uploads_probe"
-    if value == "/wp-admin" or value.startswith("/wp-admin/"):
-        return "wp_admin"
+    for family, pattern in _WORDPRESS_FAMILIES:
+        if pattern.fullmatch(value) or pattern.match(value):
+            return family
     return None
 
 

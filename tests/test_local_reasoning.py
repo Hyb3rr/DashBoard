@@ -1,9 +1,10 @@
+import importlib
 import json
 from urllib.error import URLError
 
 import pytest
 
-from app.ai.providers.llama_cpp import LlamaCppHttpProvider, build_analysis_schema
+from app.ai.providers.llama_cpp import LlamaCppHttpProvider, _valid_analysis, build_analysis_schema
 from app.ai.inference_view import build_inference_view
 
 
@@ -33,7 +34,7 @@ def test_provider_posts_structured_untrusted_packet(monkeypatch):
     assert result.status == "received"
     assert result.evidence_fingerprint == "fp_1"
     assert captured["timeout"] == 4
-    assert captured["body"]["max_tokens"] == 256
+    assert captured["body"]["max_tokens"] == 768
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert captured["body"]["response_format"]["json_schema"]["schema"]["additionalProperties"] is False
     assert captured["body"]["response_format"]["json_schema"]["schema"]["properties"]["primary_evidence"]["items"]["properties"]["evidence_id"]["enum"] == []
@@ -71,9 +72,35 @@ def test_provider_maps_timeout_and_malformed_response(monkeypatch):
     assert LlamaCppHttpProvider().explain(PACKET).status == "invalid_response"
 
 
+def test_provider_rejects_reasoning_output_for_structured_case_analysis(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return b'{"choices": [{"finish_reason": "stop", "message": {"content": "{\\"summary\\":\\"ok\\"}", "reasoning_content": "hidden reasoning"}}]}'
+
+    monkeypatch.setattr("app.ai.providers.llama_cpp.urlopen", lambda *args, **kwargs: Response())
+    result = LlamaCppHttpProvider().explain(PACKET)
+    assert result.status == "invalid_response"
+    assert "reasoning output" in result.error
+
+
 def test_provider_rejects_invalid_output_budget():
     with pytest.raises(ValueError, match="max tokens"):
         LlamaCppHttpProvider(max_tokens=0)
+
+
+def test_analysis_rejects_extra_fields():
+    analysis = {
+        "summary": "ok",
+        "primary_evidence": [],
+        "supporting_evidence": [],
+        "alternative_explanation": "none",
+        "uncertainty": "low",
+        "recommended_investigation": [],
+        "mitre_mapping": [],
+    }
+    assert not _valid_analysis(analysis, set())
 
 
 def test_dynamic_schema_enumerates_packet_ids_and_bounds_zero_evidence():
@@ -113,3 +140,15 @@ def test_provider_rejects_case_over_inference_budget_without_http_call(monkeypat
     assert result.status == "too_large"
     assert "inference budget" in result.error
     assert calls == []
+
+
+def test_context_budget_follows_server_context_configuration(monkeypatch):
+    import app.ai.providers.llama_cpp as llama_cpp
+
+    monkeypatch.setenv("FOUNDATION_SEC_CONTEXT_SIZE", "8192")
+    importlib.reload(llama_cpp)
+    assert llama_cpp.CONTEXT_TOKENS == 8192
+    assert llama_cpp.MAX_INPUT_TOKENS == 8192 - 256 - 384
+
+    monkeypatch.setenv("FOUNDATION_SEC_CONTEXT_SIZE", "4096")
+    importlib.reload(llama_cpp)

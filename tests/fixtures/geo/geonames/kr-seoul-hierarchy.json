@@ -1,0 +1,18 @@
+{
+  "source": "GeoNames KR.zip + hierarchy.zip",
+  "source_files": ["KR.zip", "hierarchy.zip"],
+  "source_release": "2026-03-26",
+  "license": "CC BY 4.0",
+  "version": "geonames-2026-03-26-kr-seoul",
+  "generated_payload_sha256": "2407f4f6630f073c1eb30a117f9969e0ce51b401cddc1e8de081c632f51d8e1a",
+  "places": [
+    {"id": "1835847", "name": "Seoul", "kind": "admin1", "country_code": "KR", "parents": []},
+    {"id": "1832311", "name": "Yongsan-gu", "kind": "admin2", "country_code": "KR", "parents": ["1835847"]},
+    {"id": "8692870", "name": "Yongsan-dong", "kind": "admin3", "country_code": "KR", "parents": ["1832311", "1835847"]}
+  ],
+  "aliases": {
+    "Seoul": "1835847",
+    "Yongsan-gu": "1832311",
+    "Yongsan-dong": "8692870"
+  }
+}

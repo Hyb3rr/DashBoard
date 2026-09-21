@@ -88,7 +88,7 @@
   }
   .classification-stat.unknown .accent{color:var(--secondary)}
 
-  .layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.75fr);gap:16px;align-items:start}
+  .layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.75fr);gap:16px;align-items:start;margin-top:16px}
   .column{display:grid;gap:16px}
   .card{border:1px solid var(--line);border-radius:12px;background:var(--console);overflow:hidden}
   .card-head{display:flex;justify-content:space-between;gap:12px;padding:15px 17px;border-bottom:1px solid var(--line)}
@@ -151,7 +151,8 @@
 
   .location-card .body{padding:20px}.location-card .facts{grid-template-columns:repeat(2,minmax(0,1fr));gap:1px}.location-card .facts .fact{min-height:70px;padding:14px}.location-card .confidence-detail{margin-top:18px}.location-card .confidence-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .evidence{display:grid;gap:8px}
-  .evidence-item{padding:10px 12px;border-left:2px solid var(--line);background:#fff003;color:var(--secondary);font-size:12px}
+  .evidence-item{padding:10px 12px;border:1px solid rgba(89,216,230,.18);border-left:3px solid var(--cyan);border-radius:4px;background:rgba(89,216,230,.08);color:var(--secondary);font-size:12px}
+  .evidence-item.rare-path-evidence{border-color:rgba(148,163,184,.22);border-left-color:var(--tertiary);background:rgba(148,163,184,.10)}
   .evidence-item.a{border-left-color:var(--cyan)}
   .evidence-item.b{border-left-color:var(--yellow)}
   .evidence-item.c{border-left-color:var(--green)}
@@ -167,9 +168,12 @@
   .path-bar{height:4px;margin-top:9px;background:var(--line);border-radius:99px;overflow:hidden}
   .path-bar i{display:block;height:100%;background:var(--cyan);border-radius:inherit}
   .path-dates{display:block;margin-top:6px;color:var(--tertiary);font-size:10px}
-  .ip-traffic{margin:24px 0 16px}.ip-traffic-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ip-traffic-head h2{margin:0;font-size:14px}.ip-traffic-summary{margin-top:5px;color:var(--tertiary);font:11px monospace}.ip-range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:6px;background:var(--deck)}.ip-range button{min-height:27px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--tertiary);font:600 10px monospace;cursor:pointer}.ip-range button.active,.ip-range button:hover{color:var(--ink);background:var(--console)}.ip-traffic-chart{position:relative;height:210px;margin:15px 0}.ip-traffic-chart svg{width:100%;height:100%;display:block}.ip-traffic-chart .grid{stroke:var(--line);stroke-width:1}.ip-traffic-chart .axis{fill:var(--tertiary);font:10px monospace}.ip-traffic-chart .area{fill:rgba(89,216,230,.1)}.ip-traffic-chart .line{fill:none;stroke:var(--cyan);stroke-width:2;vector-effect:non-scaling-stroke}.ip-traffic-lower{display:grid;grid-template-columns:.8fr 1.2fr 1.2fr;gap:16px;padding-top:16px;border-top:1px solid var(--line)}.ip-traffic-block h3{margin:0 0 10px;font-size:12px}.status-list{display:grid;gap:8px}.status-row{display:grid;grid-template-columns:32px 1fr 42px;align-items:center;gap:8px;color:var(--secondary);font-size:11px}.status-row strong{font:600 11px monospace;text-align:right;color:var(--ink)}.status-track{height:7px;border-radius:99px;background:var(--deck);overflow:hidden}.status-track i{display:block;height:100%;background:var(--cyan)}.ip-top-paths{display:grid;gap:7px}.ip-top-path{display:flex;justify-content:space-between;gap:10px;color:var(--secondary);font:11px monospace}.ip-top-path span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ip-top-path strong{color:var(--ink)}.recent-list{display:grid;gap:6px;max-height:190px;overflow:auto}.recent-row{display:grid;grid-template-columns:62px 38px minmax(0,1fr) 32px;gap:7px;color:var(--secondary);font:10px monospace}.recent-row .recent-time{color:var(--tertiary)}.recent-row .recent-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row .status-4xx,.recent-row .status-5xx{color:var(--red)}
+  .overview-snapshot .classification-value{display:inline-flex;align-items:center;min-height:28px;transition:color .18s ease;letter-spacing:.04em}.overview-snapshot .classification-value.critical{color:var(--red)}.overview-snapshot .classification-value.medium{color:var(--yellow)}.overview-snapshot .classification-value.low{color:var(--low)}.overview-snapshot .classification-value.good{color:var(--green)}.overview-snapshot .classification-value.unknown{color:var(--secondary)}
+  .ip-traffic{margin:24px 0 16px}.ip-traffic-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ip-traffic-head h2{margin:0;font-size:14px}.ip-traffic-summary{margin-top:5px;color:var(--tertiary);font:11px monospace}.ip-range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:6px;background:var(--deck)}.ip-range button{min-height:27px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--tertiary);font:600 10px monospace;cursor:pointer}.ip-range button.active,.ip-range button:hover{color:var(--ink);background:var(--console)}.investigation-tabs{display:flex;gap:4px;margin:24px 0 4px;padding:4px;border:1px solid var(--line);border-radius:8px;background:var(--deck);overflow-x:auto}.investigation-tabs button{min-height:34px;padding:0 14px;border:0;border-radius:5px;background:transparent;color:var(--tertiary);font:700 11px ui-monospace,monospace;cursor:pointer;white-space:nowrap}.investigation-tabs button:hover,.investigation-tabs button.active{background:var(--console);color:var(--ink)}[data-investigation-section][hidden]{display:none!important}.ip-traffic-chart{position:relative;height:210px;margin:15px 0}.ip-traffic-chart svg{width:100%;height:100%;display:block}.ip-traffic-chart .grid{stroke:var(--line);stroke-width:1}.ip-traffic-chart .axis{fill:var(--tertiary);font:10px monospace}.ip-traffic-chart .area{fill:rgba(89,216,230,.1)}.ip-traffic-chart .line{fill:none;stroke:var(--cyan);stroke-width:2;vector-effect:non-scaling-stroke}.ip-traffic-lower{display:grid;grid-template-columns:.8fr 1.2fr 1.2fr;gap:16px;padding-top:16px;border-top:1px solid var(--line)}.ip-traffic-block h3{margin:0 0 10px;font-size:12px}.status-list{display:grid;gap:8px}.status-row{display:grid;grid-template-columns:32px 1fr 42px;align-items:center;gap:8px;color:var(--secondary);font-size:11px}.status-row strong{font:600 11px monospace;text-align:right;color:var(--ink)}.status-track{height:7px;border-radius:99px;background:var(--deck);overflow:hidden}.status-track i{display:block;height:100%;background:var(--cyan)}.ip-top-paths{display:grid;gap:7px}.ip-top-path{display:flex;justify-content:space-between;gap:10px;color:var(--secondary);font:11px monospace}.ip-top-path span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ip-top-path strong{color:var(--ink)}.recent-list{display:grid;gap:6px;max-height:190px;overflow:auto}.recent-row{display:grid;grid-template-columns:62px 38px minmax(0,1fr) 32px;gap:7px;color:var(--secondary);font:10px monospace}.recent-row .recent-time{color:var(--tertiary)}.recent-row .recent-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row .status-4xx,.recent-row .status-5xx{color:var(--red)}
+  .ip-traffic{margin:24px 0 16px}.ip-traffic-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ip-traffic-head h2{margin:0;font-size:14px}.ip-traffic-summary{margin-top:5px;color:var(--tertiary);font:11px monospace}.ip-range{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:6px;background:var(--deck)}.ip-range button{min-height:27px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--tertiary);font:600 10px monospace;cursor:pointer}.ip-range button.active,.ip-range button:hover{color:var(--ink);background:var(--console)}.investigation-tabs{display:flex;gap:4px;margin:24px 0 4px;padding:4px;border:1px solid var(--line);border-radius:8px;background:var(--deck);overflow-x:auto}.investigation-tabs button{min-height:34px;padding:0 14px;border:0;border-radius:5px;background:transparent;color:var(--tertiary);font:700 11px ui-monospace,monospace;cursor:pointer;white-space:nowrap}.investigation-tabs button:hover,.investigation-tabs button.active{background:var(--console);color:var(--ink)}[data-investigation-section][hidden]{display:none!important}.overview-snapshot{margin:0 0 16px}.overview-snapshot-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}.overview-snapshot .facts{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-signals{display:grid;gap:8px}.overview-signal{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--deck);font-size:12px}.overview-signal span{color:var(--secondary)}.overview-signal strong{color:var(--ink);font-family:ui-monospace,monospace}.investigation-evidence-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.ip-traffic-chart{position:relative;height:210px;margin:15px 0}.ip-traffic-chart svg{width:100%;height:100%;display:block}.ip-traffic-chart .grid{stroke:var(--line);stroke-width:1}.ip-traffic-chart .axis{fill:var(--tertiary);font:10px monospace}.ip-traffic-chart .area{fill:rgba(89,216,230,.1)}.ip-traffic-chart .line{fill:none;stroke:var(--cyan);stroke-width:2;vector-effect:non-scaling-stroke}.ip-traffic-lower{display:grid;grid-template-columns:.8fr 1.2fr 1.2fr;gap:16px;padding-top:16px;border-top:1px solid var(--line)}.ip-traffic-block h3{margin:0 0 10px;font-size:12px}.status-list{display:grid;gap:8px}.status-row{display:grid;grid-template-columns:32px 1fr 42px;align-items:center;gap:8px;color:var(--secondary);font-size:11px}.status-row strong{font:600 11px monospace;text-align:right;color:var(--ink)}.status-track{height:7px;border-radius:99px;background:var(--deck);overflow:hidden}.status-track i{display:block;height:100%;background:var(--cyan)}.ip-top-paths{display:grid;gap:7px}.ip-top-path{display:flex;justify-content:space-between;gap:10px;color:var(--secondary);font:11px monospace}.ip-top-path span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ip-top-path strong{color:var(--ink)}.recent-list{display:grid;gap:6px;max-height:190px;overflow:auto}.recent-row{display:grid;grid-template-columns:62px 38px minmax(0,1fr) 32px;gap:7px;color:var(--secondary);font:10px monospace}.recent-row .recent-time{color:var(--tertiary)}.recent-row .recent-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row .status-4xx,.recent-row .status-5xx{color:var(--red)}
   .ip-time-filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.ip-time-filter label{display:grid;gap:4px;color:var(--tertiary);font:600 10px ui-monospace,monospace;letter-spacing:.03em}.ip-time-filter input{height:32px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--void);color:var(--secondary);font:11px monospace}.ip-time-filter button{height:32px;padding:0 10px;border:1px solid var(--line);border-radius:5px;background:var(--deck);color:var(--secondary);font-weight:700;cursor:pointer}.ip-time-filter button:hover{color:var(--ink);background:var(--raised)}.ip-traffic-chart{overflow:visible}.ip-traffic-tooltip{position:absolute;z-index:2;pointer-events:none;min-width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:5px;background:var(--console);box-shadow:0 8px 24px rgba(0,0,0,.25);opacity:0;transform:translateY(4px);transition:opacity 140ms ease-out,transform 140ms ease-out;font:10px monospace}.ip-traffic-tooltip.show{opacity:1;transform:none}.ip-traffic-tooltip .time{color:var(--tertiary);margin-bottom:5px}.ip-traffic-tooltip .value{display:flex;justify-content:space-between;gap:16px;color:var(--secondary)}.ip-traffic-tooltip strong{color:var(--ink)}
   .layout .column{gap:12px}.investigate-links{display:grid;gap:8px}
+  #ip-investigation-layout[data-active-tab="evidence"]{grid-template-columns:1fr 1fr}#ip-investigation-layout[data-active-tab="evidence"] .column{display:contents}#ip-investigation-layout[data-active-tab="evidence"] .investigation-evidence-grid{grid-column:1/-1}
   .external-link{display:flex;justify-content:space-between;align-items:center;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--deck);color:var(--cyan);text-decoration:none;font-weight:700}
   .external-link:hover{border-color:#59d8e677;background:var(--raised)}
   .external-link span{color:var(--tertiary);font-size:16px}
@@ -183,6 +187,8 @@
   .hero-grid{grid-template-columns:repeat(2,1fr)}
   .stat:first-child{grid-column:1/-1}
   .layout{grid-template-columns:1fr}
+  #ip-investigation-layout[data-active-tab="evidence"]{grid-template-columns:1fr}
+  .investigation-evidence-grid,.overview-snapshot-grid{grid-template-columns:1fr}
   .ip-traffic-lower{grid-template-columns:1fr 1fr}
   .score-components{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
@@ -201,6 +207,7 @@
   .location-status-note{margin-top:14px;padding:11px 12px;border:1px solid #59d8e633;border-left:3px solid var(--cyan);border-radius:6px;background:#59d8e60a;color:var(--secondary);font-size:11px;line-height:1.5}
   .location-status-note.warning{border-color:#e8bd5b44;border-left-color:var(--yellow);background:#e8bd5b0c}
   .location-status-note strong{color:var(--ink)}
+  .location-details{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}.location-details summary{cursor:pointer;color:var(--cyan);font:700 11px ui-monospace,monospace;list-style:none}.location-details summary::-webkit-details-marker{display:none}.location-details summary::before{content:'+';display:inline-block;width:16px;color:var(--cyan)}.location-details[open] summary::before{content:'−'}.location-details .facts{margin-top:10px}.location-details .fact strong{font-size:12px;font-weight:500}.location-primary .fact strong{font-size:13px;font-weight:500}.location-primary .label{color:var(--ink);font-weight:700}
   .location-legend{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
   .location-legend span{padding:4px 6px;border:1px solid var(--line);border-radius:4px;color:var(--tertiary);font:700 9px monospace;text-transform:uppercase}
   .location-legend .operational{color:var(--cyan);border-color:#59d8e644;background:#59d8e60b}
@@ -248,8 +255,9 @@
   .ai-explain-copy{display:grid;gap:14px;margin-top:14px}
   .ai-explain-block h3{margin:0 0 6px;color:var(--secondary);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
   .ai-explain-block p{margin:0;color:var(--secondary);white-space:pre-wrap;text-wrap:pretty}
-  .ai-evidence-ref{display:grid;grid-template-columns:auto 1fr;gap:5px 8px;padding:7px 9px;border-left:2px solid var(--cyan);background:var(--deck);font-size:11px}
-  .ai-evidence-ref strong{color:var(--cyan);font:700 10px monospace}
+  .ai-evidence-ref{display:grid;gap:4px;padding:9px 10px;border-left:2px solid var(--cyan);background:var(--deck);font-size:11px}
+  .ai-evidence-ref strong{color:var(--ink);font-size:11px}
+  .ai-evidence-ref span{color:var(--secondary)}
   .ai-investigation{margin:0;padding-left:18px;color:var(--secondary);font-size:11px}
   .ai-validation{margin-top:14px;padding-top:10px;border-top:1px solid var(--line);color:var(--green);font:700 10px monospace;text-transform:uppercase}
   .evidence-disclosure{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
@@ -274,6 +282,9 @@
   --yellow:#9a6b00;
   --red:#b3423b
   }
+  </style>
+  <style>
+  .score-explainer{overflow:hidden}.score-explainer-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px;cursor:pointer;list-style:none}.score-explainer-summary::-webkit-details-marker{display:none}.score-explainer-summary>span:first-child{display:grid;gap:4px}.score-explainer-summary strong{font-size:14px}.score-explainer-summary small{color:var(--tertiary);font-size:10px}.score-explainer-summary .score-total{margin:0}.score-explainer[open] .score-explainer-summary{border-bottom:1px solid var(--line)}
   </style>
 </head>
 <body>
@@ -323,8 +334,8 @@
   const nativeFetch=window.fetch.bind(window);
   window.fetch=(input,...args)=>nativeFetch(typeof input==='string'&&input.startsWith('/api/')?apiUrl(input):input,...args);
 
-  function facts(items){
-  return `<div class="facts">${items.map(([a,b,s])=>`<div class="fact"><span class="label">${esc(a)}</span><strong>${esc(b??'Unknown')}</strong>${s?`<span class="source">${esc(s)}</span>`:''}</div>`).join('')}</div>`
+  function facts(items,className=''){
+  return `<div class="facts ${className}">${items.map(([a,b,s])=>`<div class="fact"><span class="label">${esc(a)}</span><strong>${esc(b??'Unknown')}</strong>${s?`<span class="source">${esc(s)}</span>`:''}</div>`).join('')}</div>`
   }
   function list(items){
   return items?.length
@@ -350,8 +361,8 @@
   return `<div class="investigate-links">${links.map(([label,href])=>`<a class="external-link" href="${href}" target="_blank" rel="noopener noreferrer">${label} <span>↗</span></a>`).join('')}</div>`
   }
   function rarePathEvidence(items){
-  const paths=Array.isArray(items)?items:[],render=item=>`<div class="evidence-item">${esc(item.path||'Unknown path')} · rarity ${esc(item.rarity_score??'—')}/100 · first seen ${item.first_seen?window.formatVnTime(item.first_seen):'unknown'}<br><small>${esc(item.explanation||'Rarity alone does not establish malicious intent.')}</small></div>`;
-  if(!paths.length)return '<div class="evidence-item">No rare path evidence available.</div>';
+  const paths=Array.isArray(items)?items:[],render=item=>`<div class="evidence-item rare-path-evidence">${esc(item.path||'Unknown path')} · rarity ${esc(item.rarity_score??'—')}/100 · first seen ${item.first_seen?window.formatVnTime(item.first_seen):'unknown'}<br><small>${esc(item.explanation||'Rarity alone does not establish malicious intent.')}</small></div>`;
+  if(!paths.length)return '<div class="evidence-item rare-path-evidence">No rare path evidence available.</div>';
   const visible=paths.slice(0,8).map(render).join(''),remaining=paths.slice(8);
   return visible+(remaining.length?`<details class="evidence-disclosure"><summary>Show ${remaining.length} more rare paths</summary>${remaining.map(render).join('')}</details>`:'');
   }
@@ -367,12 +378,25 @@
   const signed=value=>value>0?`+${value}`:String(value);
   const cards=parts.map(([code,name,value,max,description])=>{const matches=evidence.filter(item=>String(item).startsWith(`${code} —`));return `<article class="score-component"><div class="score-component-head"><span class="score-component-code">${code}</span><span class="score-component-points ${value<0?'negative':''}">${signed(value)} <small>/ ${max}</small></span></div><h3>${name}</h3><p>${description}</p><div class="score-component-reason"><strong>Why:</strong> ${esc(explanations[code]||'No calculation note available.')}</div><div class="score-component-evidence ${matches.length?'':'muted'}">${matches.length?matches.map(item=>esc(item)).join('<br>'):'No direct evidence'}</div></article>`}).join('');
   const formula=parts.map(([code,,value])=>`${code} ${signed(value)}`).join('  ');
-  return `<section class="card score-explainer"><div class="body"><div class="score-explainer-head"><div><h2>How this score is calculated</h2><p>Auditable rule groups. Positive values increase risk; negative values reduce it.</p></div><div class="score-total">${num(c.score??0)} / 100<small>clamped final score</small></div></div><div class="score-formula">${formula}  =  ${num(c.score??0)} final · range 0–100<br><span>${esc(explanations.final||'')}</span></div><div class="score-components">${cards}</div></div></section>`
+  return `<section class="card score-explainer" data-investigation-section="detections"><div class="card-head"><div><h2>Detection breakdown</h2><small>Auditable rule groups behind the current score</small></div><span class="score-total">${num(c.score??0)} / 100<small>final threat score</small></span></div><div class="body"><div class="score-formula">${formula}  =  ${num(c.score??0)} final · range 0–100<br><span>${esc(explanations.final||'')}</span></div><div class="score-components">${cards}</div></div></section>`
   }
-  let aiJobId=sessionStorage.getItem(`hub:ai-explain-job:${ip}`)||'',aiJobState=null,aiPollTimer=null,aiPollActive=false;
+  let aiJobId=sessionStorage.getItem(`hub:ai-explain-job:${ip}`)||'',aiJobState=null,aiPollTimer=null,aiPollActive=false,aiEvidenceCatalog=new Map();
   function aiStatusLabel(state){return ({pending:'Pending',running:'Running',completed:'Grounding validated',failed:'Failed'})[state]||'Not requested'}
+  function aiEvidenceTitle(item){
+    if(item?.path)return `Rare path · ${item.path}`;
+    if(item?.type)return String(item.type).replaceAll('_',' ').replace(/\b\w/g,ch=>ch.toUpperCase());
+    if(item?.description)return item.description;
+    return 'Referenced evidence';
+  }
+  function setAiEvidenceCatalog(data){
+    aiEvidenceCatalog=new Map();
+    const items=[...(data?.classification?.evidence||[]),...(data?.observation?.rare_path_evidence||[]),...(data?.evidence||[])];
+    items.forEach(item=>{
+      if(item&&typeof item==='object'&&item.evidence_id)aiEvidenceCatalog.set(String(item.evidence_id),item);
+    });
+  }
   function aiEvidence(items){
-    return (Array.isArray(items)&&items.length)?items.map(item=>`<div class="ai-evidence-ref"><strong>${esc(item.evidence_id||'unknown')}</strong><span>${esc(item.reason||'Referenced evidence')}</span></div>`).join(''):'<p>No evidence references returned.</p>';
+    return (Array.isArray(items)&&items.length)?items.map(item=>{const id=String(item?.evidence_id||''),source=aiEvidenceCatalog.get(id),title=aiEvidenceTitle(source),detail=item?.reason||source?.description||'Referenced evidence';return `<div class="ai-evidence-ref"><strong>${esc(title)}</strong><span>${esc(detail)}</span></div>`}).join(''):'<p>No evidence references returned.</p>';
   }
   function aiExplainPanel(){
     const state=aiJobState?.status||'idle',analysis=aiJobState?.analysis,validation=aiJobState?.validation;
@@ -382,12 +406,12 @@
     if(state==='failed')content+=`<p class="ai-explain-error">${esc(aiJobState.failure_code||'AI analysis unavailable. No automatic retry was performed.')}</p>`;
     if(state==='completed'&&analysis){content=`<div class="ai-explain-copy"><div class="ai-explain-block"><h3>Summary</h3><p>${esc(analysis.summary)}</p></div><div class="ai-explain-block"><h3>Primary evidence</h3>${aiEvidence(analysis.primary_evidence)}</div><div class="ai-explain-block"><h3>Supporting evidence</h3>${aiEvidence(analysis.supporting_evidence)}</div><div class="ai-explain-block"><h3>Alternative explanation</h3><p>${esc(analysis.alternative_explanation)}</p></div><div class="ai-explain-block"><h3>Model-stated uncertainty · not a confidence score</h3><p>${esc(analysis.uncertainty)}</p></div><div class="ai-explain-block"><h3>Recommended investigation</h3>${analysis.recommended_investigation?.length?`<ul class="ai-investigation">${analysis.recommended_investigation.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>`:'<p>No recommendation returned.</p>'}</div></div><div class="ai-validation">AI-generated analysis · grounding validated</div>`}
     const canRequest=state==='idle'||state==='failed';
-    return `<section class="card ai-explain-card"><div class="card-head"><div><h2>AI Case Analysis</h2><small>case explainer · non-authoritative</small></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':'Explain with AI'}</button></div></div></section>`;
+    return `<section class="card ai-explain-card" data-investigation-section="overview"><div class="card-head"><div><h2>AI Case Analysis</h2><small>case explainer · non-authoritative</small></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':'Explain with AI'}</button></div></div></section>`;
   }
   function renderAiExplainInPlace(){
     const current=document.querySelector('.ai-explain-card');if(!current)return;
     const wrapper=document.createElement('div');wrapper.innerHTML=aiExplainPanel();
-    const next=wrapper.firstElementChild;if(next){current.replaceWith(next);setupAiExplain()}
+    const next=wrapper.firstElementChild;if(next){next.hidden=current.hidden;current.replaceWith(next);setupAiExplain()}
   }
   function scheduleAiPoll(){
     if(aiPollTimer||!aiJobId)return;
@@ -429,17 +453,28 @@
   })[value]||String(value||'unknown').replaceAll('_',' ');
   }
   function locationContextNote(location){
-  const reg=location?.registration||null,pattern=location?.allocation_pattern||'unknown',disputed=Boolean(location?.disputed);
-  if(disputed){
-    return {tone:'warning',html:`<strong>Operational Geo disputed.</strong> Two or more operational location sources disagree closely enough to require review. RIR/WHOIS registration is displayed separately and is not part of this dispute vote.`};
+  const canonical=location?.canonical_resolution||{},status=canonical.status||{},reg=location?.registration||null;
+  const country=status.country||'unknown',city=status.city||'unknown',coordinates=status.coordinates||'unknown';
+  const note=country==='resolved'&&city==='disputed'
+    ? `Country resolved. City sources disagree, so city and coordinates are left unresolved.`
+    : `Country: ${country}. City: ${city}. Coordinates: ${coordinates}.`;
+  return {tone:city==='disputed'||coordinates==='disputed'?'warning':'',html:`<strong>Location conclusion.</strong> ${note} ${reg?'RIR is shown separately as ownership context.':''}`};
   }
-  if(pattern==='cross_region_allocation'&&reg){
-    return {tone:'',html:`<strong>Geo and RIR differ by design.</strong> Operational Geo resolves to ${esc(location?.country_code||'—')}, while RIR registration is ${esc(reg.country_code||'—')}. This cross-region allocation is common for global/cloud networks and does not make the location disputed.`};
+  function countryName(value){
+  const code=String(value||'').trim().toUpperCase();
+  if(!code)return 'Unknown';
+  try{return new Intl.DisplayNames(['en'],{type:'region'}).of(code)||code}catch(_){return code}
   }
-  if(pattern==='registration_estimate_only'){
-    return {tone:'warning',html:`<strong>Weak location estimate.</strong> No operational source was available, so RIR registration is being used only as a fallback estimate.`};
-  }
-  return {tone:'',html:`<strong>Operational Geo resolved.</strong> RIR/WHOIS answers who administers the address space; it is shown as ownership context and does not vote against the operational country.`};
+  function countryPresentation(location){
+  const canonical=location?.canonical_resolution||{},status=canonical.status?.country||'unknown',resolved=canonical.resolved?.country_code||location?.country_code||null,candidates=Array.isArray(canonical.candidates?.country)?canonical.candidates.country:[];
+  const top=candidates[0]?.value||null;
+  const displayCode=resolved||top||null;
+  const displayName=displayCode?countryName(displayCode):status==='disputed'?'Disputed':'Unknown';
+  const confidenceRows=candidates.slice(0,3).map(item=>`${countryName(item.value)} ${num(item.confidence)}%`).join(', ');
+  const cityCandidate=canonical.candidates?.city?.[0];
+  const cityCountry=(cityCandidate?.country_codes||[])[0]||cityCandidate?.country_code||cityCandidate?.country||null;
+  const conflict=cityCountry&&top&&String(cityCountry).toUpperCase()!==String(top).toUpperCase();
+  return {status,code:displayCode||top||'—',name:displayName,candidates:confidenceRows,conflict};
   }
   function geoConfidenceDetails(location){
   const breakdown=location?.confidence_breakdown||{},sources=Array.isArray(breakdown.sources)?breakdown.sources:[];
@@ -462,16 +497,17 @@
   return `<div class="confidence-detail"><div class="confidence-detail-head"><div><h3>Network location confidence</h3><p>${esc(breakdown.formula||'Confidence is based on agreement between operational location sources; registration evidence is separate.')}</p></div><strong>${num(breakdown.final_score??location?.confidence??0)}%</strong></div><div class="confidence-grid">${rows}</div><div class="confidence-factors">${factors.join('')}</div></div>`;
   }
 
-  const IP_TRAFFIC_WINDOW_KEY=`hub:v2:ip-traffic:${ip}`;let trafficRange='1h',trafficStart='',trafficEnd='',trafficRequestSequence=0,trafficRenderKey='';
+  const IP_TRAFFIC_WINDOW_KEY=`hub:v3:ip-traffic:${ip}`;let trafficRange='case',trafficStart='',trafficEnd='',trafficRequestSequence=0,trafficRenderKey='';
   function trafficClock(value){return window.formatVnTime(value)}
   function saveIpTrafficWindow(){try{sessionStorage.setItem(IP_TRAFFIC_WINDOW_KEY,JSON.stringify({range:trafficRange,start:trafficStart,end:trafficEnd}))}catch(_){} }
-  function restoreIpTrafficWindow(){try{const saved=JSON.parse(sessionStorage.getItem(IP_TRAFFIC_WINDOW_KEY)||'null');if(saved){trafficRange=saved.range||trafficRange;trafficStart=saved.start||'';trafficEnd=saved.end||''}}catch(_){} }
+  function restoreIpTrafficWindow(){try{const saved=JSON.parse(sessionStorage.getItem(IP_TRAFFIC_WINDOW_KEY)||'null');if(saved){trafficRange=saved.range||trafficRange;trafficStart=saved.start||'';trafficEnd=saved.end||'';return true}}catch(_){}return false}
+  function selectCaseTrafficWindow(){const node=document.querySelector('.ip-traffic'),start=node?.dataset.caseStart||'',end=node?.dataset.caseEnd||'',startDate=new Date(start),endDate=new Date(end);trafficStart='';trafficEnd='';if(start&&end&&!Number.isNaN(startDate.getTime())&&!Number.isNaN(endDate.getTime())&&endDate>=startDate){trafficRange='case';if(endDate.getTime()===startDate.getTime()){const padding=30*60*1000;trafficStart=new Date(startDate.getTime()-padding).toISOString();trafficEnd=new Date(endDate.getTime()+padding).toISOString()}else{trafficStart=start;trafficEnd=end}return true}trafficRange='1h';return false}
   function renderIpTraffic(data){
   const chart=document.querySelector('#ip-traffic-chart'),summary=document.querySelector('#ip-traffic-summary'),series=data.series||[],renderKey=JSON.stringify({start:data.start,end:data.end,total:data.total_requests||0,series,status_codes:data.status_codes||{},top_paths:data.top_paths||[],recent_requests:data.recent_requests||[]});
   if(!chart||renderKey===trafficRenderKey)return;
   trafficRenderKey=renderKey;
   const max=Math.max(1,...series.map(x=>Number(x.requests||0))),w=1000,h=240,padL=42,padR=18,padT=14,padB=28,innerW=w-padL-padR,innerH=h-padT-padB;
-  if(summary)summary.textContent=`${num(data.total_requests||0)} requests · ${data.range_label||''} · updated ${trafficClock(data.as_of)}`;
+  if(summary)summary.textContent=`${num(data.total_requests||0)} requests · ${data.range==='case'?'case span':data.range_label||''} · updated ${trafficClock(data.as_of)}`;
   const nextChart=document.createElement('div');
   if(!series.length){nextChart.innerHTML='<div class="state">No timeline buckets available.</div>'}else{
     const start=new Date(data.start),end=new Date(data.end),span=Math.max(1,end-start),xFor=x=>padL+Math.max(0,Math.min(1,(new Date(x).getTime()-start.getTime())/span))*innerW;
@@ -522,7 +558,8 @@
     const res=await fetch('/api/ip/'+encodeURIComponent(ip)+'?mode=live',{cache:'no-store'});
     if(!res.ok)throw Error(res.status===404?'IP case not found':'Could not load profile');
 
-    const d=await res.json();
+    const d=await res.json(),privateAddress=Boolean(d.is_private),addressScope=d.address_scope||'public';
+    setAiEvidenceCatalog(d);
     const pathData={paths:[],total_requests:0};
     const
       o=d.observation||{},
@@ -535,6 +572,7 @@
       score=Number(d.threat_signal_score??0),
       src=d.field_sources||{},
       abuse=d.abuse_reputation||{state:'none',recent_hit:false,history_30d_hit:false,sources:[]};
+    const countryView=countryPresentation(d.network_location),scopeLabel=privateAddress?(addressScope==='private'?'Private network':addressScope.replaceAll('_',' ')):'public';
     const freshRules=freshness(o.evaluated_at||o.updated_at),freshRare=freshness((o.rare_path_evidence||[])[0]?.freshness),freshGeo=freshness(d.geo_resolved_at||d.fetched_at),freshIntel=freshness(d.fetched_at);
 
     document.title=`${ip} · Sentinel Hub`;
@@ -545,87 +583,118 @@
       <section class="hero">
         <div>
           <div class="eyebrow">Investigation case / IP intelligence</div>
-          <h1>${esc(ip)}</h1>
-          <div class="subtitle">${esc(d.country||'Unknown location')} · ${esc(d.organization||d.network_type||'Unattributed network')} · first seen ${o.first_seen?window.formatVnTime(o.first_seen):'profile only'}</div>
+          <div style="display:flex;align-items:center;gap:12px;margin:5px 0 8px;flex-wrap:wrap">
+            <h1 style="margin:0">${esc(ip)}</h1>
+            <span class="triage-badge ${(label||'unknown').toLowerCase()}" id="hero-classification-badge" style="padding:4px 10px;font-size:11px">${esc(displayStatus.toUpperCase())} · <span id="hero-score-badge">${score}/100</span></span>
+          </div>
+          <div class="subtitle">${privateAddress?esc(scopeLabel):countryView.conflict?`Location disputed · ${esc(d.organization||d.network_type||'Unattributed network')}`:`${esc(countryView.name)} · ${esc(d.organization||d.network_type||'Unattributed network')}`}</div>
         </div>
         <div class="actions">
-          <a class="button" href="/regions/${encodeURIComponent(d.country_code||"unknown")}">Region profile</a>
+          ${!privateAddress&&countryView.status==='resolved'&&d.country_code?`<a class="button" href="/regions/${encodeURIComponent(d.country_code)}">Region profile</a>`:''}
           <a class="button" href="/#threats">Return to table</a>
           <button id="theme-toggle" class="button" type="button">${initialTheme==='dark'?'Light mode':'Dark mode'}</button>
         </div>
       </section>
 
-      <section class="hero-grid">
-        <div class="stat classification-stat ${esc(label)}">
-          <div class="eyebrow">Classification</div>
-          <span id="detail-classification-value" class="value accent">${esc(displayStatus.toUpperCase())}</span>
-          <span id="detail-classification-note" class="note">${esc(c.summary||'Insufficient evidence')}</span>
-        </div>
+      <nav class="investigation-tabs" aria-label="IP investigation sections">
+        <button type="button" class="active" data-investigation-tab="overview">Overview</button>
+        <button type="button" data-investigation-tab="activity">Activity</button>
+        <button type="button" data-investigation-tab="detections">Detections</button>
+        <button type="button" data-investigation-tab="evidence">Evidence</button>
+        <button type="button" data-investigation-tab="intel">Intel</button>
+      </nav>
 
-        <div class="stat">
-          <div class="eyebrow">Rule score</div>
-          <span id="detail-rule-score" class="value">${score}/100</span>
-          <span class="note">final threat score</span>
-        </div>
-        <div class="stat">
-          <div class="eyebrow">Requests</div>
-          <span id="detail-request-count" class="value">${num(o.requests)}</span>
-          <span class="note">${num(o.unique_paths)} unique paths</span>
-        </div>
-        <div class="stat">
-          <div class="eyebrow">4xx ratio</div>
-          <span id="detail-4xx-ratio" class="value">${o.requests?Math.round(Number(o.status_4xx||0)/Number(o.requests)*100):0}%</span>
-          <span class="note">${num(o.status_4xx)} responses</span>
-        </div>
-        <div class="stat">
-          <div class="eyebrow">Core status</div>
-          <span id="detail-core-status" class="value">${esc(d.core_enrichment_status||'unknown')}</span>
-          <span class="note">${esc(d.fetched_at||'')}</span>
-        </div>
-      </section>
-
-      ${scoreExplainer(b,c)}
-
-      <section class="card ip-traffic">
+      <section class="card ip-traffic" data-investigation-section="activity" data-case-start="${esc(d.first_seen||o.first_seen||'')}" data-case-end="${esc(d.last_seen||o.last_seen||'')}" data-case-span="${esc((d.first_seen||o.first_seen)&&(d.last_seen||o.last_seen)?'available':'unavailable')}">
         <div class="body">
-          <div class="ip-traffic-head"><div><h2>IP traffic</h2><div class="ip-traffic-summary" id="ip-traffic-summary">Loading traffic…</div></div><div class="ip-range" role="group" aria-label="IP traffic time range"><button data-ip-range="30m">30m</button><button class="active" data-ip-range="1h">1h</button><button data-ip-range="6h">6h</button><button data-ip-range="12h">12h</button><button data-ip-range="1d">24h</button><button data-ip-range="3d">3d</button></div></div>
+          <div class="ip-traffic-head"><div><h2>IP traffic</h2><div class="ip-traffic-summary" id="ip-traffic-summary">Loading traffic…</div></div><div class="ip-range" role="group" aria-label="IP traffic time range"><button data-ip-range="case">Case span</button><button data-ip-range="30m">30m</button><button data-ip-range="1h">1h</button><button data-ip-range="6h">6h</button><button data-ip-range="12h">12h</button><button data-ip-range="1d">24h</button><button data-ip-range="3d">3d</button></div></div>
           <div class="ip-time-filter"><label>Started at <input id="ip-traffic-start" type="datetime-local"></label><label>Ended at <input id="ip-traffic-end" type="datetime-local"></label><button type="button" id="ip-traffic-apply">Apply window</button><button type="button" id="ip-traffic-clear">Clear window</button></div>
           <div class="ip-traffic-chart" id="ip-traffic-chart"><div class="state">Loading timeline…</div></div>
           <div class="ip-traffic-lower"><div class="ip-traffic-block"><h3>Status codes</h3><div class="status-list" id="ip-status-codes"></div></div><div class="ip-traffic-block"><h3>Top paths</h3><div class="ip-top-paths" id="ip-top-paths"></div></div><div class="ip-traffic-block"><h3>Recent requests</h3><div class="recent-list" id="ip-recent-requests"></div></div></div>
         </div>
       </section>
 
-      <div class="layout">
-        <div class="column">
-          <section class="card location-card">
-            <div class="card-head"><h2>Network location</h2><small>operational geo · ${esc(d.network_location?.scope||d.location_scope||'unknown')} scope</small></div>
-            <div class="body">${facts([
-              ['Operational country', `${d.network_location?.country||d.country||'Unknown'} (${d.network_location?.country_code||d.country_code||'—'})`, (d.network_location?.sources||[]).join(', ')||src.country_code],
-              ['City', d.network_location?.geo?.city?.value||d.network_location?.city||d.city||'Unknown', d.network_location?.geo?.city?.source||d.network_location?.city_source||'GeoIP vendor'],
-              ['Coordinates', d.network_location?.geo?.city?.latitude!=null&&d.network_location?.geo?.city?.longitude!=null?`${d.network_location.geo.city.latitude}, ${d.network_location.geo.city.longitude}`:d.network_location?.latitude!=null&&d.network_location?.longitude!=null?`${d.network_location.latitude}, ${d.network_location.longitude}`:'Unavailable', d.network_location?.geo?.city?.source||d.network_location?.city_source||'GeoIP vendor'],
-              ...(()=>{const c=d.network_location?.geo?.city?.candidates||{};const rows=[];for(const [source,item] of Object.entries(c)){if(item)rows.push([`${source} city`,`${item.city||'Unknown'}${item.latitude!=null&&item.longitude!=null?` (${Number(item.latitude).toFixed(4)}, ${Number(item.longitude).toFixed(4)})`:''}`, 'city candidate']);}return rows;})(),
-              ...(()=>{const r=d.network_location?.ip2region;if(!r?.city&&!r?.region&&!r?.isp)return [];return [['ip2region context',`${r.city||'Unknown'}${r.region?` · ${r.region}`:''}${r.isp?` · ${r.isp}`:''}`, 'aggregated validation']];})(),
-              ['Operational status', d.network_location?.disputed||d.location_disputed?'Disputed — review operational source disagreement':'Resolved', 'RIR registration does not affect this status'],
-              ...(d.network_location?.country_conflict?[['Country conflict', `${String(d.network_location.country_conflict_severity||'').toUpperCase()} — SAPICS user-country primary`, 'other SAPICS datasets disagree']]:[]),
-              ...(d.network_location?.city_conflict?[[(d.network_location.geo?.city?.value?'City':'Coordinate')+' conflict', `${String(d.network_location.city_conflict_severity||'').toUpperCase()} — ${d.network_location.geo?.city?.distance_km??'—'} km`, 'GeoLite2 vs DB-IP']]:[]),
-              ...(d.network_location?.city_disputed?[['City warning', `MaxMind and DB-IP differ ~${d.network_location.city_distance_km}km — MaxMind used`, 'city-level vendor conflict']]:[]),
-              ['RIR registration', d.network_location?.registration?`${d.network_location.registration.country||d.network_location.registration.country_code||'Unknown'} (${d.network_location.registration.country_code||'—'})`:'Unavailable', d.network_location?.registration?.source||'registration context only'],
-              ['Allocation pattern', allocationLabel(d.network_location?.allocation_pattern), d.network_location?.allocation_pattern==='cross_region_allocation'?'Geo ≠ RIR is not a dispute':'resolver context'],
-              ['ASN / organization', `${d.asn||'—'} · ${d.organization||'Unattributed'}`, d.asn_source||src.asn]
-            ])}${(()=>{const note=locationContextNote(d.network_location);return `<div class="location-status-note ${note.tone}">${note.html}</div><div class="location-legend"><span class="operational">Operational Geo</span><span class="registration">RIR / ownership</span>${d.network_location?.country_conflict||d.network_location?.city_conflict?'<span class="disputed">Geo conflict</span>':''}</div>`})()}</div>
-          </section>
+      ${scoreExplainer(b,c)}
 
-          <section class="card">
-            <div class="card-head"><h2>Investigate further</h2><small>external pivots</small></div>
+      <div class="layout" id="ip-investigation-layout">
+        <div class="column">
+          <section class="card overview-snapshot" data-investigation-section="overview">
+            <div class="card-head"><div><h2>Assessment snapshot</h2></div></div>
             <div class="body">
-              ${investigationLinks(ip)}
-              <span class="source">Opens the provider page only when selected.</span>
+              <div class="facts">
+                <div class="fact">
+                  <span class="label">Classification</span>
+                  <strong id="detail-classification-value" class="classification-value ${(label||'unknown').toLowerCase()}">${esc(displayStatus.toUpperCase())}</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Rule score</span>
+                  <strong id="detail-rule-score">${score}/100</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Requests</span>
+                  <strong id="detail-request-count">${num(o.requests)}</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">4xx ratio</span>
+                  <strong id="detail-4xx-ratio">${o.requests?Math.round(Number(o.status_4xx||0)/Number(o.requests)*100):0}%</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Confidence</span>
+                  <strong>${c.confidence!=null?`${num(c.confidence)}%`:'Unavailable'}</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Activity span</span>
+                  <strong style="font-size:11px">${o.first_seen&&o.last_seen?`${window.formatVnTime(o.first_seen)} → ${window.formatVnTime(o.last_seen)}`:'Unavailable'}</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Network attribution</span>
+                  <strong style="font-size:11px">${privateAddress?esc(scopeLabel):`${esc(countryView.name)} · ${esc(d.organization||d.network_type||'Unattributed')}`}</strong>
+                </div>
+                <div class="fact">
+                  <span class="label">Core status</span>
+                  <strong id="detail-core-status">${esc(d.core_enrichment_status||'unknown')}</strong>
+                </div>
+              </div>
             </div>
           </section>
+
+          <section class="card" data-investigation-section="overview">
+            <div class="card-head"><div><h2>Detection highlights</h2></div></div>
+            <div class="body">
+              <div class="overview-signals">${(()=>{const signals=[['Behavior',b.behavior_a],['Network identity',b.identity_b],['Trust adjustment',b.trust_c],['Region signal',b.region_d],['AI anomaly',b.ai_e]].filter(([,value])=>Number(value||0)!==0);return signals.length?signals.map(([name,value])=>`<div class="overview-signal"><span>${name}</span><strong>${Number(value)>0?'+':''}${num(value)}</strong></div>`).join(''):'<div class="state" style="padding:20px 0">No active score contributions.</div>'})()}</div>
+            </div>
+          </section>
+
+          <section class="card location-card" data-investigation-section="intel">
+            <div class="card-head"><h2>Network location</h2></div>
+            <div class="body">${(()=>{
+              if(privateAddress)return facts([['Network scope',scopeLabel,'Geolocation is not applicable to non-public addresses'],['Address',d.ip,'local/non-public address']]);
+              const loc=d.network_location||{},canonical=loc.canonical_resolution||{},resolved=canonical.resolved||{},status=canonical.status||{};
+              const primary=facts([
+                ['Country',countryView.name||'Unknown'],
+                ['City',resolved.city||loc.city||'Unknown'],
+                ['Coordinates',status.coordinates==='resolved'&&resolved.latitude!=null?`${resolved.latitude}, ${resolved.longitude}`:'Unavailable'],
+                ['ASN / organization',`${d.asn||'—'} · ${d.organization||'Unattributed'}`]
+              ],'location-primary');
+              const detailRows=[];
+              for(const item of canonical.candidates?.city||[])if(item)detailRows.push(['Source location',`${item.value||'Unknown'} · ${(item.sources||[]).join(', ')}`,item.excluded_reason?`excluded: ${item.excluded_reason}`:'city returned by source']);
+              const region=loc.ip2region;if(region?.city||region?.region||region?.isp)detailRows.push(['ip2region context',`${region.city||'Unknown'}${region.region?` · ${region.region}`:''}${region.isp?` · ${region.isp}`:''}`,'aggregated validation']);
+              detailRows.push(['Country status',status.country||'unknown','independent operational country result'],['City status',status.city||'unknown','independent city result; does not downgrade country'],['Coordinate status',status.coordinates||'unknown','marker requires resolved city coordinates'],['Registration context (RIR)',loc.registration?`${loc.registration.country||loc.registration.country_code||'Unknown'} (${loc.registration.country_code||'—'})`:'Unavailable','ownership context only · not operational location'],['Allocation pattern',allocationLabel(loc.allocation_pattern),loc.allocation_pattern==='cross_region_allocation'?'Geo ≠ RIR is not a dispute':'resolver context'],['ASN source',d.asn_source||src.asn]);
+              const note=locationContextNote(loc),presented=countryPresentation(loc);
+              const extras=`<div class="location-status-note ${note.tone}">${note.html}</div><div class="location-country-presentation"><strong>Country presentation</strong><span>${esc(presented.name)} · ${esc(presented.status)}</span>${presented.candidates?`<small>Candidates: ${esc(presented.candidates)}</small>`:''}${presented.conflict?'<small class="warning">Cross-level location conflict: country-level and city-level evidence point to different countries; physical location is not resolved.</small>':''}</div><div class="location-legend"><span class="operational">Operational Geo</span><span class="registration">RIR / ownership</span></div>`;
+              return `${primary}<details class="location-details"><summary>View location details</summary>${facts(detailRows)}</details>${extras}`;
+            })()}</div>
+          </section>
+
+          ${privateAddress?'':`<section class="card" data-investigation-section="intel">
+            <div class="card-head"><h2>Investigate further</h2></div>
+            <div class="body">
+              ${investigationLinks(ip)}
+            </div>
+          </section>`}
         </div>
 
         <div class="column">
-          <section class="card triage-card">
+          <section class="card triage-card" data-investigation-section="overview">
             <div class="card-head">
               <h2>Case Triage & Disposition</h2>
               <span class="triage-badge ${(d.disposition?.state||'new').toLowerCase()}" id="triage-status-badge">${esc((d.disposition?.state||'new').toUpperCase())}</span>
@@ -670,8 +739,8 @@
 
           ${aiExplainPanel()}
 
-          <section class="card">
-            <div class="card-head"><h2>Privacy intelligence</h2><small>${esc(d.privacy_enrichment_status||'unknown')}</small></div>
+          <section class="card" data-investigation-section="intel">
+            <div class="card-head"><h2>Privacy intelligence</h2></div>
             <div class="body">${facts([
               ['Tor exit node',yes(d.is_tor),src.is_tor],
               ['VPN',yes(d.is_vpn),src.is_vpn],
@@ -680,16 +749,16 @@
             ])}</div>
           </section>
 
-          <section class="card">
-            <div class="card-head"><h2>Abuse reputation</h2><small>supporting threat intelligence</small></div>
+          <section class="card" data-investigation-section="intel">
+            <div class="card-head"><h2>Abuse reputation</h2></div>
             <div class="body">
               <div class="fact"><span class="label">Current state</span><strong class="abuse-state ${esc(abuse.state)}">${esc(abuse.state)}</strong></div>
               <div class="evidence">${abuse.sources?.length?abuse.sources.map(source=>`<div class="evidence-item">Matched ${esc(source==='firehol:abuseipdb_1d'?'FireHOL AbuseIPDB 1d':'FireHOL AbuseIPDB 30d')}</div>`).join(''):'<div class="evidence-item">No AbuseIPDB feed match</div>'}<div class="evidence-item">This is supporting reputation evidence, not a standalone malicious verdict.</div></div>
             </div>
           </section>
 
-          <section class="card">
-            <div class="card-head"><h2>Provider status</h2><small>enrichment visibility</small></div>
+          <section class="card" data-investigation-section="intel">
+            <div class="card-head"><h2>Provider status</h2></div>
             <div class="body">
               <ul class="sources">${
                 Object.entries(d.provider_status||{}).filter(([,v])=>v.status!=='not_configured')
@@ -700,16 +769,18 @@
             </div>
           </section>
 
+          <div class="investigation-evidence-grid" data-investigation-section="evidence">
           <section class="card">
-            <div class="card-head"><h2>Identity evidence</h2><small>what data can prove</small></div>
+            <div class="card-head"><h2>Identity evidence</h2></div>
             <div class="body"><div class="evidence">${list(d.identity_evidence)}</div></div>
           </section>
           <section class="card">
-            <div class="card-head"><h2>Rare path evidence</h2><small>supporting evidence only · ${(o.rare_path_evidence||[]).length} paths</small></div>
+            <div class="card-head"><h2>Rare path evidence</h2></div>
             <div class="body"><div class="evidence">${rarePathEvidence(o.rare_path_evidence)}</div></div>
           </section>
-          <section class="card">
-            <div class="card-head"><h2>Data freshness</h2><small>source-specific age</small></div>
+          </div>
+          <section class="card" data-investigation-section="intel">
+            <div class="card-head"><h2>Data freshness</h2></div>
             <div class="body">${[['Rules',freshRules],['Rare baseline',freshRare],['Geo',freshGeo],['Threat intel',freshIntel]].map(([name,item])=>`<div class="fact"><span class="label">${name}</span><strong>${item.label}</strong></div>`).join('')}</div>
           </section>
         </div>
@@ -751,9 +822,18 @@
       }
     });
 
-    document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd='';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item===button));saveIpTrafficWindow();loadIpTraffic()}));
+    function setInvestigationTab(tab){
+      const investigationLayout=document.querySelector('#ip-investigation-layout');
+      if(investigationLayout)investigationLayout.dataset.activeTab=tab;
+      document.querySelectorAll('[data-investigation-tab]').forEach(button=>button.classList.toggle('active',button.dataset.investigationTab===tab));
+      document.querySelectorAll('[data-investigation-section]').forEach(section=>{section.hidden=section.dataset.investigationSection!==tab});
+    }
+    document.querySelectorAll('[data-investigation-tab]').forEach(button=>button.addEventListener('click',()=>setInvestigationTab(button.dataset.investigationTab)));
+    setInvestigationTab('overview');
+    if(!restoreIpTrafficWindow())selectCaseTrafficWindow();
+    document.querySelectorAll('[data-ip-range]').forEach(button=>button.addEventListener('click',()=>{if(button.dataset.ipRange==='case')selectCaseTrafficWindow();else{trafficRange=button.dataset.ipRange;trafficStart='';trafficEnd=''}document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));saveIpTrafficWindow();loadIpTraffic()}));
     document.querySelector('#ip-traffic-apply').addEventListener('click',applyTrafficWindow);
-    document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{trafficStart='';trafficEnd='';trafficRange='1h';document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));saveIpTrafficWindow();loadIpTraffic()});
+    document.querySelector('#ip-traffic-clear').addEventListener('click',()=>{selectCaseTrafficWindow();document.querySelector('#ip-traffic-start').value='';document.querySelector('#ip-traffic-end').value='';document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));saveIpTrafficWindow();loadIpTraffic()});
     document.querySelectorAll('[data-ip-range]').forEach(item=>item.classList.toggle('active',item.dataset.ipRange===trafficRange));
     syncTrafficInputs(trafficStart&&localIso(trafficStart)||new Date(Date.now()-3600000).toISOString(),trafficEnd&&localIso(trafficEnd)||new Date().toISOString());
     const themeButton=document.querySelector('#theme-toggle');themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;localStorage.setItem('sentinel-theme',next);themeButton.textContent=next==='dark'?'Light mode':'Dark mode'});
@@ -775,9 +855,14 @@
   const d=await res.json(),c=d.classification||{},o=d.observation||{},dispState=(d.disposition?.state||'new').toLowerCase();
   const displayStatus=formatStatusWithDisposition(c.label||'unknown',dispState);
   const set=(selector,value)=>{const node=document.querySelector(selector);if(node)node.textContent=value};
-  set('#detail-classification-value',displayStatus.toUpperCase());
-  set('#detail-classification-note',c.summary||'Insufficient evidence');
+  const classificationValue=document.querySelector('#detail-classification-value');
+  if(classificationValue){classificationValue.className=`classification-value ${(c.label||'unknown').toLowerCase()}`;classificationValue.textContent=displayStatus.toUpperCase()}
   set('#detail-rule-score',`${Number(d.threat_signal_score??c.score??0)}/100`);
+  set('#hero-score-badge',`${Number(d.threat_signal_score??c.score??0)}/100`);
+  const heroBadge=document.querySelector('#hero-classification-badge');
+  if(heroBadge){
+    heroBadge.className=`triage-badge ${(c.label||'unknown').toLowerCase()}`;
+  }
   set('#detail-request-count',num(o.requests));
   set('#detail-4xx-ratio',`${o.requests?Math.round(Number(o.status_4xx||0)/Number(o.requests)*100):0}%`);
   set('#detail-core-status',d.core_enrichment_status||'unknown');
@@ -807,7 +892,7 @@
   });
   detailRealtimeSource.onerror=()=>{};
   }
-  restoreIpTrafficWindow();load();startDetailRealtime();
+  load();startDetailRealtime();
   </script>
 </body>
 </html>

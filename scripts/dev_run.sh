@@ -13,6 +13,11 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
+# macOS can inherit allocator diagnostics from an IDE or parent shell. They
+# are not used by this launcher and produce noisy warnings for every Python
+# worker when the flag is only partially enabled, so keep them out of children.
+unset MallocStackLogging MallocStackLoggingNoCompact
+
 POSTGRES_PORT="${POSTGRES_PORT:-55432}"
 CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-$ROOT_DIR/data/postgres}"
@@ -27,13 +32,29 @@ if ! pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
   if [[ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]]; then
     initdb -D "$POSTGRES_DATA_DIR" --auth=trust >/dev/null
   fi
-  if ! pg_ctl -D "$POSTGRES_DATA_DIR" \
-    -l "$ROOT_DIR/data/postgres.log" \
-    -o "-p $POSTGRES_PORT" start >/dev/null; then
-    if ! pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
-      echo "PostgreSQL start failed and readiness check failed" >&2
-      exit 1
+  if pg_ctl -D "$POSTGRES_DATA_DIR" status >/dev/null 2>&1; then
+    echo "PostgreSQL process is running; waiting for readiness on port $POSTGRES_PORT"
+  else
+    if [[ -f "$POSTGRES_DATA_DIR/postmaster.pid" ]]; then
+      POSTMASTER_PID="$(sed -n '1p' "$POSTGRES_DATA_DIR/postmaster.pid")"
+      if [[ "$POSTMASTER_PID" =~ ^[0-9]+$ ]] && ! kill -0 "$POSTMASTER_PID" 2>/dev/null; then
+        echo "Removing stale PostgreSQL PID file for stopped process $POSTMASTER_PID"
+        rm -f "$POSTGRES_DATA_DIR/postmaster.pid"
+      fi
     fi
+    pg_ctl -D "$POSTGRES_DATA_DIR" \
+      -l "$ROOT_DIR/data/postgres.log" \
+      -o "-p $POSTGRES_PORT" start >/dev/null || true
+  fi
+  for _ in {1..30}; do
+    if pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if ! pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+    echo "PostgreSQL process is running or starting but is not ready on port $POSTGRES_PORT" >&2
+    exit 1
   fi
 fi
 
@@ -159,14 +180,15 @@ start_local_ai() {
 
   "${LLAMA_SERVER_BIN:-llama-server}" --model "$FOUNDATION_SEC_MODEL_PATH" \
     --host 127.0.0.1 --port "${LOCAL_REASONING_PORT:-8081}" \
-    --ctx-size "${FOUNDATION_SEC_CONTEXT_SIZE:-4096}" --parallel 1 \
+    --ctx-size "${FOUNDATION_SEC_CONTEXT_SIZE:-8192}" --parallel 1 \
     --n-gpu-layers "${FOUNDATION_SEC_GPU_LAYERS:-0}" \
     --threads "${FOUNDATION_SEC_THREADS:-6}" \
+    --chat-template-kwargs '{"enable_thinking":false}' \
     --reasoning-format deepseek \
     >"${FOUNDATION_SEC_LOG_PATH:-$ROOT_DIR/data/foundation-sec-llama-server.log}" 2>&1 &
   LLAMA_SERVER_PID=$!
 
-  for _ in $(seq 1 "${FOUNDATION_SEC_READY_ATTEMPTS:-60}"); do
+  for _ in $(seq 1 "${FOUNDATION_SEC_READY_ATTEMPTS:-180}"); do
     if curl --fail --silent "http://127.0.0.1:${LOCAL_REASONING_PORT:-8081}/health" >/dev/null 2>&1; then
       "${ROOT_DIR}/.venv/bin/python" -m scripts.ai.run_explain_worker \
         --packets "${AI_EXPLAIN_PACKETS_PATH:-$ROOT_DIR/data/ai/corpora/foundation-sec-real.json}" \

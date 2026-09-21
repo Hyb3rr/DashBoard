@@ -22,12 +22,14 @@ def test_launcher_loads_env_defaults_and_passes_endpoint(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCAL_REASONING_PORT", "18081")
     monkeypatch.setenv("FOUNDATION_SEC_MODEL_NAME", "local-foundation")
     monkeypatch.setenv("LOCAL_REASONING_TIMEOUT_SECONDS", "90")
+    monkeypatch.delenv("AI_EXPLAIN_STALE_AFTER_SECONDS", raising=False)
     monkeypatch.setattr(sys, "argv", ["worker", "--packets", str(tmp_path / "packets.json"), "--once"])
 
     assert run_explain_worker.main() == 0
     assert captured["endpoint"] == "http://127.0.0.1:18081/v1/chat/completions"
     assert captured["model"] == "local-foundation"
     assert captured["timeout"] == 90.0
+    assert captured["kwargs"]["stale_after_seconds"] == 135.0
 
 
 def test_endpoint_base_url_gets_completion_path(monkeypatch):

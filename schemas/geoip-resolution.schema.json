@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelhub.local/schemas/geoip-resolution.schema.json",
+  "title": "GeoIP source normalization and resolution contracts",
+  "$defs": {
+    "coordinateGranularity": {"type": "string", "enum": ["city", "country", "unknown"]},
+    "sourceType": {"type": "string", "enum": ["commercial_geoip", "self_published", "registration", "context_validation", "owner_declared"]},
+    "scope": {"type": "string", "enum": ["network_operational", "allocation_registration", "context_only"]},
+    "normalizedSourceRecord": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source", "derived_from", "source_type", "scope", "coordinate_granularity"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "derived_from": {"type": "string", "minLength": 1},
+        "source_type": {"$ref": "#/$defs/sourceType"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "country_code": {"type": ["string", "null"], "pattern": "^[A-Z]{2}$"},
+        "country_name": {"type": ["string", "null"]},
+        "region": {"type": ["string", "null"]},
+        "city": {"type": ["string", "null"]},
+        "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
+        "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180},
+        "coordinate_granularity": {"$ref": "#/$defs/coordinateGranularity"},
+        "accuracy_radius_km": {"type": ["number", "null"], "minimum": 0},
+        "confidence_hint": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "observed_at": {"type": ["string", "null"], "format": "date-time"},
+        "database_version": {"type": ["string", "null"]},
+        "raw_ref": {"type": ["string", "null"]}
+      }
+    },
+    "validatedSourceRecord": {
+      "allOf": [
+        {"$ref": "#/$defs/normalizedSourceRecord"},
+        {"type": "object", "required": ["valid", "invalid_reason", "is_likely_fallback_value"], "properties": {
+          "valid": {"type": "boolean"},
+          "invalid_reason": {"type": "string", "enum": ["coordinate_country_mismatch", "null_island", "known_vendor_sentinel", "stale_database_version", "duplicate_of_other_source", "none"]},
+          "is_likely_fallback_value": {"type": "boolean"},
+          "possibly_duplicate_of": {"type": "array", "items": {"type": "string"}}
+        }}
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["value", "confidence", "sources"],
+      "properties": {
+        "value": {},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "excluded_reason": {"type": "string"}
+      }
+    },
+    "canonicalResolution": {
+      "type": "object",
+      "required": ["resolved", "status", "confidence", "candidates", "registration_context", "evidence", "coverage"],
+      "properties": {
+        "resolved": {"type": "object", "required": ["country_code", "city", "latitude", "longitude"], "properties": {
+          "country_code": {"type": ["string", "null"], "pattern": "^[A-Z]{2}$"},
+          "city": {"type": ["string", "null"]},
+          "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
+          "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180}
+        }},
+        "status": {"type": "object", "required": ["country", "city", "coordinates"], "properties": {
+          "country": {"type": "string", "enum": ["resolved", "probable", "disputed", "unknown"]},
+          "city": {"type": "string", "enum": ["resolved", "probable", "disputed", "unknown"]},
+          "coordinates": {"type": "string", "enum": ["resolved", "probable", "disputed", "unknown"]}
+        }},
+        "confidence": {"type": "object", "required": ["country", "city", "coordinates"], "properties": {
+          "country": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+          "city": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+          "coordinates": {"type": ["number", "null"], "minimum": 0, "maximum": 100}
+        }},
+        "candidates": {"type": "object", "required": ["country", "city", "coordinates"], "properties": {
+          "country": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+          "city": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+          "coordinates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}
+        }},
+        "registration_context": {"type": "object", "additionalProperties": true},
+        "evidence": {"type": "array", "items": {"type": "object"}},
+        "coverage": {"type": "object", "required": ["operational_sources_total", "operational_sources_valid", "agreeing_country_sources", "agreeing_city_sources"], "properties": {
+          "operational_sources_total": {"type": "integer", "minimum": 0},
+          "operational_sources_valid": {"type": "integer", "minimum": 0},
+          "agreeing_country_sources": {"type": "integer", "minimum": 0},
+          "agreeing_city_sources": {"type": "integer", "minimum": 0}
+        }}
+      }
+    }
+  }
+}

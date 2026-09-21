@@ -224,7 +224,7 @@ def test_lookup_uses_maxmind_when_available(monkeypatch):
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
     monkeypatch.setattr(
         enrichment,
         "_maxmind",
@@ -247,6 +247,129 @@ def test_lookup_uses_maxmind_when_available(monkeypatch):
     assert result["organization"] == "Google LLC"
     assert result["core_enrichment_status"] == "complete"
     assert result["provider_status"]["MaxMind City/ASN"]["status"] == "active"
+
+
+def test_lookup_accepts_sapics_country_without_geo_country(monkeypatch):
+    from app.core import enrichment
+
+    monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
+    monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
+    monkeypatch.setattr(
+        "app.services.sapics_reader.lookup",
+        lambda ip: {"country": {"candidates": {"user_country": "VN"}, "value": "VN"}},
+    )
+    monkeypatch.setattr("app.services.ip2region_reader.lookup", lambda ip: {})
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {})
+    monkeypatch.setattr(enrichment, "validate_records", lambda records, country_bounds=None: records)
+    monkeypatch.setattr(
+        enrichment,
+        "resolve_geo_records",
+        lambda records, registration_context=None, evidence=None: {
+            "resolved": {"country_code": "VN", "city": None, "latitude": None, "longitude": None},
+            "status": {"country": "resolved"},
+            "confidence": {"country": 0.8},
+            "candidates": {"country": records, "city": []},
+        },
+    )
+
+    result = asyncio.run(lookup("8.8.8.8"))
+
+    assert result["country_code"] == "VN"
+    assert result["field_sources"]["country_code"] == "SAPICS"
+    assert "UnboundLocalError" not in " ".join(result["provider_errors"])
+
+
+def test_lookup_correlates_matching_production_sapics_country_claims(monkeypatch):
+    from app.core import enrichment
+
+    monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
+    monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
+    monkeypatch.setattr(
+        "app.services.sapics_reader.lookup",
+        lambda ip: {"country": {"candidates": {"user_country": "SG", "server_country": "SG"}, "value": "SG"}},
+    )
+    monkeypatch.setattr("app.services.ip2region_reader.lookup", lambda ip: {})
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {})
+    captured = {}
+
+    def resolve(records, registration_context=None, evidence=None):
+        captured["records"] = records
+        return {
+            "resolved": {"country_code": "SG", "city": None, "latitude": None, "longitude": None},
+            "status": {"country": "resolved"}, "confidence": {"country": 1.0},
+            "candidates": {"country": [], "city": []},
+        }
+
+    monkeypatch.setattr(enrichment, "validate_records", lambda records, country_bounds=None: records)
+    monkeypatch.setattr(enrichment, "resolve_geo_records", resolve)
+
+    asyncio.run(enrichment.lookup("8.8.8.8"))
+    sapics_records = [record for record in captured["records"] if record["source"].startswith("sapics:")]
+    assert {record["source"] for record in sapics_records} == {"sapics:user_country", "sapics:server_country"}
+    assert {record["derived_from"] for record in sapics_records} == {"sapics_network_country"}
+    assert {record["correlation_group"] for record in sapics_records} == {"sapics_network_country"}
+
+
+def test_lookup_passes_optional_geonames_hierarchy_to_runtime_resolver(monkeypatch):
+    from app.core import enrichment
+
+    monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda *args, **kwargs: {"country_code": "KR"})
+    monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
+    monkeypatch.setattr("app.services.sapics_reader.lookup", lambda ip: {})
+    monkeypatch.setattr("app.services.ip2region_reader.lookup", lambda ip: {})
+    monkeypatch.setattr(enrichment, "_geo_hierarchy", lambda: object())
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {})
+    monkeypatch.setattr(enrichment, "validate_records", lambda records, country_bounds=None: records)
+    captured = {}
+
+    def resolve(records, **kwargs):
+        captured["hierarchy"] = kwargs.get("hierarchy")
+        return {"resolved": {"country_code": None, "city": None, "latitude": None, "longitude": None}, "status": {"country": "unknown", "city": "unknown", "coordinates": "unknown"}, "confidence": {}, "candidates": {"country": [], "city": []}}
+
+    monkeypatch.setattr(enrichment, "resolve_geo_records", resolve)
+    asyncio.run(enrichment.lookup("8.8.8.8"))
+    assert captured["hierarchy"] is not None
+
+
+def test_lookup_preserves_owner_and_sapics_country_attribution(monkeypatch):
+    from app.core import enrichment
+
+    monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(
+        enrichment,
+        "resolve_network_location",
+        lambda conn, ip, vendor=None, force_refresh=False: {
+            "country_code": "VN",
+            "sources": ["geofeed"],
+        },
+    )
+    monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
+    monkeypatch.setattr(
+        "app.services.sapics_reader.lookup",
+        lambda ip: {"country": {"candidates": {"user_country": "VN"}, "value": "VN"}},
+    )
+    monkeypatch.setattr("app.services.ip2region_reader.lookup", lambda ip: {})
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {})
+    monkeypatch.setattr(enrichment, "validate_records", lambda records, country_bounds=None: records)
+    monkeypatch.setattr(
+        enrichment,
+        "resolve_geo_records",
+        lambda records, registration_context=None, evidence=None: {
+            "resolved": {"country_code": "VN", "city": None, "latitude": None, "longitude": None},
+            "status": {"country": "resolved"},
+            "confidence": {"country": 0.8},
+            "candidates": {"country": records, "city": []},
+        },
+    )
+
+    result = asyncio.run(lookup("8.8.8.8"))
+
+    assert result["country_code"] == "VN"
+    assert result["field_sources"]["country_code"] == "owner-declared + SAPICS"
+    assert "UnboundLocalError" not in " ".join(result["provider_errors"])
 
 
 def test_lookup_sets_is_tor_from_local_exit_list(monkeypatch, tmp_path):
@@ -595,9 +718,8 @@ def test_region_detail_contains_precomputed_market_layers_contract():
 
     page = TestClient(app).get("/regions/DE")
     assert page.status_code == 200
-    assert "Local Opportunities" in page.text
+    assert "Local Opportunities" not in page.text
+    assert "National context" in page.text
+    assert "Province / city profiles" in page.text
     assert "Woodworking" in page.text
-    assert "Metal Fabrication" in page.text
-    assert "Overlap / Remaining Opportunity" in page.text
-    assert "insufficient_local_hierarchy" in page.text
-    assert "marketLayerMarkup" in page.text
+    assert "Metalworking" in page.text

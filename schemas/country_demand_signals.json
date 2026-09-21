@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Country Demand Signals",
+  "type": "object",
+  "required": ["period", "min_sample_threshold", "countries"],
+  "properties": {
+    "period": {"type": "string", "enum": ["7d", "30d", "90d"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "min_sample_threshold": {"type": "integer", "minimum": 1},
+    "countries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["country_code", "qualified_sessions", "signal", "confidence", "sample_size_sufficient", "excluded"],
+        "properties": {
+          "country_code": {"type": "string", "pattern": "^[A-Z]{2}$"},
+          "qualified_requests": {"type": "integer", "minimum": 0},
+          "qualified_sessions": {"type": "integer", "minimum": 0},
+          "qualified_visitors": {"type": "integer", "minimum": 0},
+          "unique_organizations": {"type": "integer", "minimum": 0},
+          "identity_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+          "repeat_visitors": {"type": "integer", "minimum": 0},
+          "avg_engaged_sessions": {"type": "number", "minimum": 0},
+          "product_page_visitors": {"type": "integer", "minimum": 0},
+          "trend_pct": {"type": ["number", "null"]},
+          "volume_tier": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW", "UNKNOWN"]},
+          "quality_tier": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+          "trend": {"type": "string", "enum": ["RISING", "STABLE", "DECLINING", "INSUFFICIENT_DATA"]},
+          "signal": {"type": "string", "enum": ["STRONG", "RISING", "STABLE", "WATCH", "LIMITED", "INSUFFICIENT_DATA"]},
+          "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "—"]},
+          "sample_size_sufficient": {"type": "boolean"},
+          "explanation": {"type": "string"},
+          "excluded": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+        }
+      }
+    }
+  }
+}

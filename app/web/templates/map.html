@@ -16,12 +16,13 @@
         <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
         <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
         <a class="nav-item active" href="/map" aria-current="page"><span class="nav-icon">◌</span>Global map</a>
+        <a class="nav-item" href="/raw-logs"><span class="nav-icon">≋</span>Raw Log Tail</a>
         <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
       </nav>
     </aside>
     <main>
       <header class="topbar map-topbar">
-        <div><div class="eyebrow">Intelligence / Global map</div><h1>Opportunity × Threat</h1><p class="map-subtitle">Market context alongside resolved security evidence.</p></div>
+        <div><div class="eyebrow">Intelligence / Global map</div><h1>Opportunity × Threat</h1></div>
         <div class="actions"><button id="theme-toggle" class="secondary" type="button">Light mode</button></div>
       </header>
       <section class="map-toolbar" aria-label="Map controls">
@@ -37,7 +38,7 @@
       </section>
       <section class="map-layout">
         <div class="map-card">
-          <div class="map-card-head"><div><span class="eyebrow">Live read model</span><h2>World map</h2></div><div class="map-card-actions"><button id="back-world" class="secondary map-back" type="button" hidden>← World</button><div class="map-legend"><span><i class="legend-dot opportunity"></i>Opportunity</span><span><i class="legend-dot low"></i>Low</span><span><i class="legend-dot medium"></i>Medium</span><span><i class="legend-dot critical"></i>Critical</span></div></div></div>
+          <div class="map-card-head"><div><span class="eyebrow">Live read model</span><h2>World map</h2></div><div class="map-card-actions"><div class="map-legend"><span><i class="legend-dot opportunity"></i>Opportunity</span><span><i class="legend-dot low"></i>Low</span><span><i class="legend-dot medium"></i>Medium</span><span><i class="legend-dot critical"></i>Critical</span></div></div></div>
           <div class="map-stage" id="map-stage">
             <div class="map-context" aria-hidden="true"><span>RESOLVED GEO · READ ONLY</span><span>Click a marker to inspect</span></div>
             <div id="map-basemap" class="map-basemap" aria-label="World map showing opportunity and threat intelligence"></div>

@@ -12,6 +12,10 @@ GHSL_GEOMETRY_VERSION = "ghsl_ucdb_r2024a"
 _TO_MOLLWEIDE = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
 
 def country_name(iso3: str) -> str:
+    # GHSL uses the short English name for Vietnam while ISO/pycountry uses
+    # the formal spelling "Viet Nam".
+    if iso3.upper() == "VNM":
+        return "Vietnam"
     item = pycountry.countries.get(alpha_3=iso3.upper())
     return item.name if item else iso3.upper()
 

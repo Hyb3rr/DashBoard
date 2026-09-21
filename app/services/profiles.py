@@ -2,12 +2,19 @@
 
 from datetime import datetime, timedelta, timezone
 import asyncio
+import json
 import os
 import socket
 
 from ..config import settings
 from ..core.enrichment import lookup
-from ..db.repositories import GeoRepository, ProfileRepository
+from ..core.intelligence import classify_ip
+from ..db.repositories import (
+    GeoRepository,
+    ProfileRepository,
+    _alert_evidence_for_classification,
+    persist_classification_alert_and_notification,
+)
 from ..db.postgres import transaction
 
 
@@ -57,6 +64,48 @@ def classification_observation(row: dict) -> dict:
     }
 
 
+def _reclassify_after_enrichment(conn, ip: str, profile: dict) -> None:
+    """Refresh persisted classification when enrichment changes identity signals."""
+    observation_result = conn.execute("SELECT payload FROM ip_observations_state WHERE ip=%s", (ip,))
+    if observation_result is None:
+        return
+    observation_row = observation_result.fetchone()
+    if not observation_row:
+        return
+    observation = observation_row["payload"]
+    if isinstance(observation, str):
+        observation = json.loads(observation)
+    if not isinstance(observation, dict):
+        return
+
+    previous_result = conn.execute("SELECT label,score FROM ip_classification_state WHERE ip=%s", (ip,))
+    previous_row = previous_result.fetchone() if previous_result is not None else None
+    classification = classify_ip(profile, observation, {}, None)
+    old_label = previous_row["label"] if previous_row else None
+    old_score = int(previous_row["score"]) if previous_row and previous_row["score"] is not None else None
+    score = int(classification["score"])
+    conn.execute(
+        """INSERT INTO ip_classification_state(ip,label,score,confidence,updated_at)
+           VALUES (%s,%s,%s,%s,%s)
+           ON CONFLICT(ip) DO UPDATE SET label=EXCLUDED.label,score=EXCLUDED.score,
+            confidence=EXCLUDED.confidence,updated_at=EXCLUDED.updated_at""",
+        (ip, classification["label"], score, int(classification.get("confidence", 0)), datetime.now(timezone.utc)),
+    )
+    if old_label == classification["label"] and old_score == score:
+        return
+    conn.execute(
+        """INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at,old_label,new_label,old_score,new_score)
+           VALUES (%s,%s,'enrichment_classification',%s,%s,%s,%s,%s)""",
+        (settings.DATASET_LIVE_ID, ip, datetime.now(timezone.utc), old_label, classification["label"], old_score, score),
+    )
+    persist_classification_alert_and_notification(
+        conn, dataset_id=settings.DATASET_LIVE_ID, batch_id=f"enrichment:{ip}", ip=ip,
+        old_label=old_label, old_score=old_score, classification=classification,
+        evidence=_alert_evidence_for_classification(classification, observation),
+        created_at=datetime.now(timezone.utc),
+    )
+
+
 async def ensure_profile_postgres(ip: str, refresh: bool = False, change_reason: str | None = None):
     """Live split-mode enrichment write path."""
     repository = ProfileRepository()
@@ -70,6 +119,7 @@ async def ensure_profile_postgres(ip: str, refresh: bool = False, change_reason:
             repository.upsert(data, conn=conn)
             if data.get("network_location"):
                 GeoRepository().persist_resolution(ip, data["network_location"], conn=conn)
+            _reclassify_after_enrichment(conn, ip, data)
             if change_reason and profile_state_changed(row, data):
                 conn.execute(
                     "INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at) VALUES(%s,%s,%s,%s)",
@@ -85,6 +135,32 @@ async def ensure_profile(conn, ip: str, refresh: bool = False):
     return await ensure_profile_postgres(ip, refresh)
 
 
+def _claim_privacy_refresh_lease(conn, owner: str, now: datetime, lease_until: datetime) -> bool:
+    """Atomically claim the privacy refresh lease if it is available."""
+    row = conn.execute(
+        """INSERT INTO log_sources(source_id,log_key,status,lease_owner,lease_expires_at,updated_at)
+           VALUES (%s, 'privacy', 'running', %s, %s, %s)
+           ON CONFLICT(source_id) DO UPDATE SET status='running', lease_owner=EXCLUDED.lease_owner,
+             lease_expires_at=EXCLUDED.lease_expires_at, updated_at=EXCLUDED.updated_at
+           WHERE log_sources.lease_owner = EXCLUDED.lease_owner
+              OR log_sources.lease_expires_at IS NULL
+              OR log_sources.lease_expires_at <= EXCLUDED.updated_at
+           RETURNING lease_owner""",
+        ("privacy-refresh", owner, lease_until, now),
+    ).fetchone()
+    return bool(row)
+
+
+def _release_privacy_refresh_lease(conn, owner: str, now: datetime) -> None:
+    """Release only a lease still owned by this refresh worker."""
+    conn.execute(
+        """UPDATE log_sources
+           SET status='idle', lease_owner=NULL, lease_expires_at=NULL, updated_at=%s
+           WHERE source_id=%s AND lease_owner=%s""",
+        (now, "privacy-refresh", owner),
+    )
+
+
 async def refresh_due_profiles(conn, limit: int = 100, now: datetime | None = None) -> dict:
     """Refresh stale privacy enrichment with a PG DB lease shared by runners."""
     now = now or datetime.now(timezone.utc)
@@ -93,21 +169,8 @@ async def refresh_due_profiles(conn, limit: int = 100, now: datetime | None = No
     source_id = "privacy-refresh"
     
     with transaction() as pg_conn:
-        row = pg_conn.execute("SELECT lease_owner, lease_expires_at FROM log_sources WHERE source_id = %s", (source_id,)).fetchone()
-        if row and row["lease_owner"] and row["lease_owner"] != owner:
-            try:
-                if row["lease_expires_at"] > now:
-                    return {"status": "leased", "selected": 0, "processed": 0}
-            except Exception:
-                pass
-        
-        pg_conn.execute(
-            """INSERT INTO log_sources(source_id,log_key,status,lease_owner,lease_expires_at,updated_at)
-               VALUES (%s, 'privacy', 'running', %s, %s, %s)
-               ON CONFLICT(source_id) DO UPDATE SET status='running', lease_owner=EXCLUDED.lease_owner,
-                 lease_expires_at=EXCLUDED.lease_expires_at, updated_at=EXCLUDED.updated_at""",
-            (source_id, owner, lease_until, now),
-        )
+        if not _claim_privacy_refresh_lease(pg_conn, owner, now, lease_until):
+            return {"status": "leased", "selected": 0, "processed": 0}
     
     try:
         with transaction() as pg_conn:
@@ -134,7 +197,4 @@ async def refresh_due_profiles(conn, limit: int = 100, now: datetime | None = No
         return {"status": "completed", "selected": len(selected), "processed": processed, "processed_ips": processed_ips}
     finally:
         with transaction() as pg_conn:
-            pg_conn.execute(
-                "UPDATE log_sources SET status='idle', lease_owner=NULL, lease_expires_at=NULL, updated_at=%s WHERE source_id=%s AND lease_owner=%s",
-                (datetime.now(timezone.utc), source_id, owner),
-            )
+            _release_privacy_refresh_lease(pg_conn, owner, datetime.now(timezone.utc))

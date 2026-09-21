@@ -113,7 +113,13 @@ class AiTriggerRepository:
 
     def deferred(self, limit: int = 1) -> list[dict[str, Any]]:
         with transaction() as conn:
-            rows = conn.execute("SELECT ip,event_seq,reason,old_label,new_label FROM ai_trigger_deferred ORDER BY event_seq,ip LIMIT %s", (max(1, min(int(limit), 50)),)).fetchall()
+            rows = conn.execute(
+                """SELECT ip,event_seq,reason,old_label,new_label
+                   FROM ai_trigger_deferred
+                   WHERE reason='classification' AND new_label='critical'
+                   ORDER BY event_seq,ip LIMIT %s""",
+                (max(1, min(int(limit), 50)),),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def materialize(self, item: dict[str, Any], job_identity: dict[str, str], packet: dict[str, Any], consumer_name: str = TRIGGER_CONSUMER) -> bool:
@@ -126,9 +132,12 @@ class AiTriggerRepository:
             active = conn.execute("SELECT count(*) AS n FROM ai_explain_jobs WHERE status IN ('pending','running')").fetchone()
             if int(active["n"] or 0) >= 1:
                 return False
+            stored_packet = dict(packet)
+            stored_packet["case_id"] = job_identity["case_id"]
+            stored_packet["evidence_fingerprint"] = job_identity["evidence_fingerprint"]
             conn.execute("""INSERT INTO ai_explain_jobs (job_id,case_id,evidence_fingerprint,case_packet_json)
                VALUES (%s,%s,%s,%s::jsonb) ON CONFLICT (case_id,evidence_fingerprint) DO NOTHING""",
-                (deterministic_job_id(job_identity["case_id"], job_identity["evidence_fingerprint"]), job_identity["case_id"], job_identity["evidence_fingerprint"], json.dumps(packet)))
+                (deterministic_job_id(job_identity["case_id"], job_identity["evidence_fingerprint"]), job_identity["case_id"], job_identity["evidence_fingerprint"], json.dumps(stored_packet)))
             conn.execute("DELETE FROM ai_trigger_deferred WHERE ip=%s AND event_seq=%s", (item["ip"], item["event_seq"]))
         return True
 

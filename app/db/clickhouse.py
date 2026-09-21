@@ -12,7 +12,7 @@ def configured() -> bool:
     return bool(os.getenv("CLICKHOUSE_HOST"))
 
 
-def connect():
+def connect(database: str | None = None):
     try:
         import clickhouse_connect
     except ImportError as exc:  # pragma: no cover - optional deployment extra
@@ -22,41 +22,202 @@ def connect():
         port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
         username=os.getenv("CLICKHOUSE_USER", "default"),
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
-        database=os.getenv("CLICKHOUSE_DATABASE", "ipintel"),
+        database=database or os.getenv("CLICKHOUSE_DATABASE", "ipintel"),
         secure=os.getenv("CLICKHOUSE_SECURE", "false").lower() in {"1", "true", "yes"},
     )
 
 
 def health() -> dict[str, Any]:
-    client = None
+    """Probe ClickHouse health with one silent retry for transient keep-alive resets."""
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        client = None
+        try:
+            client = connect()
+            client.query("SELECT 1")
+            return {"status": "ok"}
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            # First failure may be a keep-alive expiry — retry once silently.
+            if attempt == 0:
+                continue
+        finally:
+            if client is not None:
+                client.close()
+    return {"status": "failed", "error": f"{type(last_exc).__name__}: {last_exc}"[:240]}
+
+
+class ClickHouseSchemaError(RuntimeError):
+    """Raised when ClickHouse has not been migrated to the runtime contract."""
+
+
+_REQUIRED_SCHEMA = {
+    "http_events": {
+        "event_time": "DateTime64(3, 'UTC')",
+        "ingested_at": "DateTime64(3, 'UTC')",
+        "dataset_id": "LowCardinality(String)",
+        "source_id": "LowCardinality(String)",
+        "source_offset": "UInt64",
+        "event_id": "FixedString(64)",
+        "src_ip": "IPv6",
+        "method": "LowCardinality(String)",
+        "path": "String",
+        "status": "UInt16",
+        "bytes_sent": "UInt64",
+        "referer": "String",
+        "user_agent": "String",
+        "raw_line": "String",
+        "visitor_id": "Nullable(String)",
+        "identity_method": "LowCardinality(String)",
+        "cf_country": "LowCardinality(String)",
+        "cf_asn": "UInt32",
+        "cf_as_org": "String",
+        "cf_bot_score": "Nullable(UInt8)",
+        "country_source": "Nullable(String)",
+        "cf_js_detection_passed": "Nullable(UInt8)",
+        "is_tor": "Nullable(UInt8)",
+        "is_vpn": "Nullable(UInt8)",
+        "is_proxy": "Nullable(UInt8)",
+        "is_hosting": "Nullable(UInt8)",
+        "is_mobile": "Nullable(UInt8)",
+        "is_scanner": "Nullable(UInt8)",
+        "session_id": "Nullable(String)",
+        "engaged": "Nullable(UInt8)",
+        "engagement_seconds": "Nullable(Float64)",
+        "pageviews": "Nullable(UInt32)",
+        "key_event_count": "Nullable(UInt32)",
+        "geo_confidence": "Nullable(Float64)",
+        "geo_conflict": "Nullable(UInt8)",
+    },
+    "behavior_events": {
+        "event_time": "DateTime64(3, 'UTC')",
+        "ingested_at": "DateTime64(3, 'UTC')",
+        "event_id": "String",
+        "visitor_id": "String",
+        "session_id": "String",
+        "event_name": "LowCardinality(String)",
+        "path": "String",
+        "engagement_ms": "Nullable(Float64)",
+        "key_event_name": "Nullable(String)",
+        "payload_hash": "FixedString(64)",
+        "assigned_country": "Nullable(String)",
+        "country_source": "Nullable(String)",
+        "geo_confidence": "Nullable(Float64)",
+        "geo_conflict": "Nullable(UInt8)",
+        "cf_bot_score": "Nullable(UInt8)",
+        "cf_js_detection_passed": "Nullable(UInt8)",
+        "is_tor": "Nullable(UInt8)",
+        "is_vpn": "Nullable(UInt8)",
+        "is_proxy": "Nullable(UInt8)",
+        "is_hosting": "Nullable(UInt8)",
+        "is_mobile": "Nullable(UInt8)",
+        "is_scanner": "Nullable(UInt8)",
+    },
+}
+
+
+def verify_schema(client: Any | None = None) -> None:
+    """Verify the minimum ClickHouse contract without issuing DDL."""
+    owns_client = client is None
+    client = client or connect()
+    database = os.getenv("CLICKHOUSE_DATABASE", "ipintel")
     try:
-        client = connect()
-        client.query("SELECT 1")
-        return {"status": "ok"}
-    except Exception as exc:
-        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:240]}
+        rows = client.query(
+            """
+            SELECT table, name, type
+            FROM system.columns
+            WHERE database = {database:String}
+              AND table IN {tables:Array(String)}
+            """,
+            parameters={"database": database, "tables": list(_REQUIRED_SCHEMA)},
+        ).result_rows
+        actual = {(str(table), str(name)): str(type_) for table, name, type_ in rows}
+        missing_tables = sorted({table for table in _REQUIRED_SCHEMA if not any(key[0] == table for key in actual)})
+        if missing_tables:
+            raise ClickHouseSchemaError(
+                "Missing ClickHouse table(s): "
+                + ", ".join(missing_tables)
+                + ". Run infra/clickhouse migrations before starting the application."
+            )
+        for table, columns in _REQUIRED_SCHEMA.items():
+            for name, expected_type in columns.items():
+                actual_type = actual.get((table, name))
+                if actual_type is None:
+                    raise ClickHouseSchemaError(f"ClickHouse schema mismatch: {table}.{name} is missing.")
+                if actual_type != expected_type:
+                    raise ClickHouseSchemaError(
+                        f"ClickHouse schema mismatch: {table}.{name} expected {expected_type}, found {actual_type}."
+                    )
     finally:
-        if client is not None:
+        if owns_client:
             client.close()
 
 
 def ensure_schema() -> None:
-    """Create ClickHouse storage once during application startup, never in health checks."""
-    client = connect()
-    try:
-        client.command("""
-            CREATE TABLE IF NOT EXISTS http_events (
-              event_time DateTime64(3, 'UTC'), ingested_at DateTime64(3, 'UTC'),
-              dataset_id LowCardinality(String), source_id LowCardinality(String),
-              source_offset UInt64, event_id FixedString(64), src_ip IPv6,
-              method LowCardinality(String), path String, status UInt16,
-              bytes_sent UInt64, referer String, user_agent String, raw_line String
-            ) ENGINE = ReplacingMergeTree(ingested_at)
-            PARTITION BY toYYYYMM(event_time)
-            ORDER BY (dataset_id, event_id, event_time, src_ip, source_id, source_offset)
-        """)
-    finally:
-        client.close()
+    """Verify ClickHouse storage during explicit startup initialization."""
+    verify_schema()
+
+
+def _insert_events_with_client(client: Any, payload: list[dict[str, Any]]) -> int:
+    columns = [
+        "event_time", "ingested_at", "dataset_id", "source_id", "source_offset",
+        "event_id", "src_ip", "method", "path", "status", "bytes_sent",
+        "referer", "user_agent", "raw_line", "visitor_id", "identity_method",
+        "cf_country", "cf_asn", "cf_as_org", "cf_bot_score",
+        "country_source", "cf_js_detection_passed", "is_tor", "is_vpn", "is_proxy",
+        "is_hosting", "is_mobile", "is_scanner", "session_id", "engaged",
+        "engagement_seconds", "pageviews", "key_event_count", "geo_confidence", "geo_conflict",
+    ]
+    values = []
+    for row in payload:
+        values.append([
+            row.get("timestamp"), row.get("ingested_at"), row.get("dataset_id", "live"),
+            row.get("source_id", ""), int(row.get("source_offset") or 0), row.get("event_id", ""),
+            row.get("src_ip", ""), row.get("method", ""), row.get("path", ""),
+            int(row.get("status") or 0), int(row.get("bytes_sent") or 0), row.get("referer") or "",
+            row.get("user_agent") or "", row.get("raw_line", ""), row.get("visitor_id"),
+            row.get("identity_method", "none"), row.get("cf_country", ""), int(row.get("cf_asn") or 0),
+            row.get("cf_as_org", ""), row.get("cf_bot_score"), row.get("country_source"),
+            row.get("cf_js_detection_passed"), row.get("is_tor"), row.get("is_vpn"), row.get("is_proxy"),
+            row.get("is_hosting"), row.get("is_mobile"), row.get("is_scanner"), row.get("session_id"),
+            row.get("engaged"), row.get("engagement_seconds"), row.get("pageviews"),
+            row.get("key_event_count"), row.get("geo_confidence"), row.get("geo_conflict"),
+        ])
+    client.insert("http_events", values, column_names=columns)
+    metrics.increment("collector.events_ingested", len(payload))
+    metrics.increment("clickhouse.insert_batches")
+    return len(payload)
+
+
+class ClickHouseWriter:
+    """Owned, reusable writer for the collector storage worker."""
+
+    def __init__(self) -> None:
+        self._client: Any | None = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = connect()
+        return self._client
+
+    def insert_events(self, rows: Iterable[dict[str, Any]]) -> int:
+        payload = list(rows)
+        if not payload:
+            return 0
+        finish = metrics.timed("clickhouse.insert_batch_ms")
+        try:
+            return _insert_events_with_client(self._get_client(), payload)
+        except Exception:
+            self.close()
+            metrics.increment("clickhouse.insert_errors")
+            raise
+        finally:
+            finish()
+
+    def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
 
 def insert_events(rows: Iterable[dict[str, Any]]) -> int:
@@ -66,38 +227,92 @@ def insert_events(rows: Iterable[dict[str, Any]]) -> int:
     finish = metrics.timed("clickhouse.insert_batch_ms")
     client = connect()
     try:
-        columns = [
-            "event_time", "ingested_at", "dataset_id", "source_id", "source_offset",
-            "event_id", "src_ip", "method", "path", "status", "bytes_sent",
-            "referer", "user_agent", "raw_line",
-        ]
-        values = []
-        for row in payload:
-            values.append([
-                row.get("timestamp"),
-                row.get("ingested_at"),
-                row.get("dataset_id", "live"),
-                row.get("source_id", ""),
-                int(row.get("source_offset") or 0),
-                row.get("event_id", ""),
-                row.get("src_ip", ""),
-                row.get("method", ""),
-                row.get("path", ""),
-                int(row.get("status") or 0),
-                int(row.get("bytes_sent") or 0),
-                row.get("referer") or "",
-                row.get("user_agent") or "",
-                row.get("raw_line", ""),
-            ])
-        client.insert("http_events", values, column_names=columns)
-        metrics.increment("collector.events_ingested", len(payload))
-        metrics.increment("clickhouse.insert_batches")
-        return len(payload)
+        return _insert_events_with_client(client, payload)
     except Exception:
         metrics.increment("clickhouse.insert_errors")
         raise
     finally:
         finish()
+        client.close()
+
+
+def insert_behavior_events(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Persist validated behavioral events with explicit pre-insert dedupe."""
+    payload = list(rows)
+    if not payload:
+        return {"accepted": 0, "duplicates": 0, "conflicts": 0, "rejected": 0, "errors": []}
+    client = connect()
+    try:
+        event_ids = [str(row["event_id"]) for row in payload]
+        existing_rows = client.query(
+            "SELECT event_id, payload_hash FROM behavior_events WHERE event_id IN {event_ids:Array(String)}",
+            parameters={"event_ids": event_ids},
+        ).result_rows
+        existing = {str(row[0]): (row[1].decode() if isinstance(row[1], bytes) else str(row[1])) for row in existing_rows}
+        accepted, duplicates, conflicts, errors = [], 0, 0, []
+        seen: dict[str, str] = {}
+        for index, row in enumerate(payload):
+            event_id, payload_hash = str(row["event_id"]), str(row["payload_hash"])
+            previous = existing.get(event_id, seen.get(event_id))
+            if previous is not None:
+                if previous == payload_hash:
+                    duplicates += 1
+                else:
+                    conflicts += 1
+                    errors.append({"index": index, "code": "EVENT_ID_CONFLICT"})
+                continue
+            seen[event_id] = payload_hash
+            accepted.append(row)
+        if accepted:
+            columns = ["event_time", "ingested_at", "event_id", "visitor_id", "session_id", "event_name", "path", "engagement_ms", "key_event_name", "payload_hash", "assigned_country", "country_source", "geo_confidence", "geo_conflict", "cf_bot_score", "cf_js_detection_passed", "is_tor", "is_vpn", "is_proxy", "is_hosting", "is_mobile", "is_scanner"]
+            values = [[row["timestamp"], row.get("received_at") or datetime.now(timezone.utc).isoformat(), row["event_id"], row["visitor_id"], row["session_id"], row["event_name"], row["path"], row["engagement_ms"], row["key_event_name"], row["payload_hash"], *[row.get(field) for field in columns[10:]]] for row in accepted]
+            client.insert("behavior_events", values, column_names=columns)
+        return {"accepted": len(accepted), "duplicates": duplicates, "conflicts": conflicts, "rejected": len(errors), "errors": errors}
+    finally:
+        client.close()
+
+
+def behavior_events(start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Read a bounded behavioral event window for offline aggregation."""
+    client = connect()
+    try:
+        result = client.query(
+            """SELECT event_id, event_time, ingested_at, payload_hash, visitor_id, session_id, event_name,
+                      path, engagement_ms, key_event_name, assigned_country, country_source,
+                      geo_confidence, geo_conflict, cf_bot_score, cf_js_detection_passed,
+                      is_tor, is_vpn, is_proxy, is_hosting, is_mobile, is_scanner
+               FROM behavior_events
+               WHERE event_time >= {start:DateTime64(3)}
+                 AND event_time < {end:DateTime64(3)}
+               ORDER BY event_time ASC, event_id ASC""",
+            parameters={"start": start, "end": end},
+        )
+        rows = []
+        for row in result.result_rows:
+            rows.append({"event_id": row[0], "event_time": row[1], "ingested_at": row[2], "payload_hash": row[3], "visitor_id": row[4], "session_id": row[5], "event_name": row[6], "path": row[7], "engagement_ms": row[8], "key_event_name": row[9], "assigned_country": row[10], "country_source": row[11], "geo_confidence": row[12], "geo_conflict": row[13], "cf_bot_score": row[14], "cf_js_detection_passed": row[15], "is_tor": row[16], "is_vpn": row[17], "is_proxy": row[18], "is_hosting": row[19], "is_mobile": row[20], "is_scanner": row[21]})
+        return rows
+    finally:
+        client.close()
+
+
+def country_demand_events(start: datetime, end: datetime, dataset_id: str = "live") -> list[dict[str, Any]]:
+    """Read bounded raw observations for the offline country-demand batch only."""
+    client = connect()
+    try:
+        result = client.query(
+            """SELECT event_time, path, visitor_id, identity_method, src_ip,
+                      cf_country, cf_asn, cf_as_org, cf_bot_score, country_source,
+                      cf_js_detection_passed, is_tor, is_vpn, is_proxy, is_hosting,
+                      is_mobile, is_scanner, session_id, engaged, engagement_seconds,
+                      pageviews, key_event_count, geo_confidence, geo_conflict
+                 FROM http_events FINAL
+                WHERE event_time >= {start:DateTime64(3)}
+                  AND event_time <= {end:DateTime64(3)}
+                  AND dataset_id = {dataset_id:String}""",
+            parameters={"start": start.astimezone(timezone.utc), "end": end.astimezone(timezone.utc), "dataset_id": dataset_id},
+        )
+        return _rows(result)
+    finally:
         client.close()
 
 
@@ -154,6 +369,13 @@ def traffic(
             conditions.append("path != {filter_value:String}" if exclude else "path = {filter_value:String}")
             params["filter_value"] = filter_value
         elif filter_type == "country":
+            ips = allowed_ips or []
+            if exclude:
+                conditions.append("src_ip NOT IN {allowed_ips:Array(IPv6)}")
+            else:
+                conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
+            params["allowed_ips"] = ips
+        elif filter_type == "classification":
             ips = allowed_ips or []
             if exclude:
                 conditions.append("src_ip NOT IN {allowed_ips:Array(IPv6)}")
@@ -234,6 +456,50 @@ def traffic_for_ip(start: datetime, end: datetime, bucket_seconds: int, ip: str,
             "top_paths": [{**row, "requests": int(row["requests"]), "errors": int(row["errors"])} for row in paths],
             "recent_requests": [{"timestamp": _iso_utc(row["timestamp"]), "method": row["method"] or "—", "path": row["path"] or "—", "status": row["status"]} for row in reversed(recent)],
         }
+    finally:
+        client.close()
+
+
+def raw_log_tail(start: datetime, end: datetime, limit: int = 100, dataset_id: str = "live",
+                 ip: str | None = None, status: int | None = None) -> list[dict[str, Any]]:
+    """Return a bounded, read-only tail of raw HTTP events for the live log view."""
+    client = connect()
+    try:
+        conditions = [
+            "event_time >= {start:DateTime64(3)}",
+            "event_time <= {end:DateTime64(3)}",
+            "dataset_id = {dataset_id:String}",
+        ]
+        parameters: dict[str, Any] = {
+            "start": start.astimezone(timezone.utc),
+            "end": end.astimezone(timezone.utc),
+            "dataset_id": dataset_id,
+        }
+        if ip:
+            conditions.append("src_ip = {ip:IPv6}")
+            parameters["ip"] = ip
+        if status is not None:
+            conditions.append("status = {status:UInt16}")
+            parameters["status"] = status
+        where = " AND ".join(conditions)
+        result = client.query(
+            f"""SELECT event_id, event_time, ingested_at, src_ip, method, path,
+                       status, raw_line, source_id, source_offset
+                  FROM http_events FINAL
+                 WHERE {where}
+                 ORDER BY event_time DESC, event_id DESC
+                 LIMIT {max(1, min(int(limit), 500))}""",
+            parameters=parameters,
+        )
+        rows = []
+        for row in result.result_rows:
+            rows.append({
+                "event_id": row[0], "timestamp": _iso_utc(row[1]), "ingested_at": _iso_utc(row[2]),
+                "ip": _display_ip(row[3]), "method": row[4] or "—", "path": row[5] or "—",
+                "status": int(row[6]), "raw_line": row[7] or "", "source_id": row[8] or "—",
+                "source_offset": int(row[9]),
+            })
+        return list(reversed(rows))
     finally:
         client.close()
 

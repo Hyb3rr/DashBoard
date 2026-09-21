@@ -1,10 +1,17 @@
 (() => {
   const list = document.getElementById('alerts-list');
   const state = document.getElementById('alerts-state');
-  const severity = document.getElementById('alert-severity');
   const status = document.getElementById('alert-status');
+  const timeFilter = document.getElementById('alert-time');
+  let selectedRange = '24h';
+  let customStart = '';
+  let customEnd = '';
   const autoExplainToggle = document.getElementById('auto-explain-toggle');
+  const loadMoreButton = document.getElementById('alerts-load-more');
   let busy = false;
+  let loadGeneration = 0;
+  let nextCursor = null;
+  let renderedItems = [];
 
   const themeButton = document.getElementById('theme-toggle');
   const savedTheme = localStorage.getItem('sentinel-theme') || 'dark';
@@ -21,26 +28,32 @@
   const when = value => window.formatVnTime ? window.formatVnTime(value) : (value ? new Date(value).toLocaleString() : '—');
   const label = value => String(value || '').replace(/^./, ch => ch.toUpperCase());
 
-  function render(items) {
-    if (!items.length) {
-      list.innerHTML = '<div class="state"><strong>No alerts match these filters.</strong>New meaningful severity changes will appear here.</div>';
-      return;
-    }
-    list.innerHTML = items.map(item => `
-      <article class="alert-card ${esc(item.severity)} ${esc(item.status)}" data-alert-id="${esc(item.id)}">
+  function alertCard(item) {
+    return `
+      <article class="alert-card ${esc(item.severity)} ${esc(item.status)}" data-alert-id="${esc(item.id)}" data-ip="${esc(item.ip)}" tabindex="0" role="link" aria-label="Open details for ${esc(item.ip)}">
         <div class="alert-card-head">
-          <div class="alert-severity"><span class="alert-dot"></span><strong>${esc(label(item.severity))}</strong><span class="alert-status">${esc(label(item.status))}</span></div>
           <time datetime="${esc(item.created_at || '')}">${esc(when(item.created_at))}</time>
         </div>
         <div class="alert-card-body">
-          <div><h3>${esc(item.title)}</h3><p>${esc(item.description)}</p><div class="alert-meta"><span>Reason: ${esc(item.reason_type)}</span><span>IP: <a href="/ip/${encodeURIComponent(item.ip)}?mode=live">${esc(item.ip)}</a></span></div></div>
-          <div class="alert-actions">
-            <a class="secondary alert-open" href="/ip/${encodeURIComponent(item.ip)}?mode=live">Open IP</a>
-            ${item.status === 'new' ? '<button class="secondary" data-status="acknowledged">Acknowledge</button>' : ''}
-            ${item.status !== 'resolved' ? '<button class="secondary" data-status="resolved">Resolve</button>' : ''}
-          </div>
+          <div class="alert-card-content"><h3 title="${esc(item.ip)}">${esc(item.ip)}</h3><div class="alert-reason"><span>Reason</span><strong title="${esc(item.reason_type)}">${esc(item.reason_type)}</strong></div></div>
         </div>
-      </article>`).join('');
+      </article>`;
+  }
+
+  function render(items) {
+    const cutoffHours = {'1h': 1, '6h': 6, '12h': 12, '24h': 24, '7d': 24 * 7, '30d': 24 * 30}[selectedRange];
+    const visibleItems = cutoffHours ? items.filter(item => {
+      const created = Date.parse(item.created_at || '');
+      return Number.isFinite(created) && Date.now() - created <= cutoffHours * 60 * 60 * 1000;
+    }) : items.filter(item => { const stamp = Date.parse(item.created_at || ''); return (!customStart || stamp >= Date.parse(customStart)) && (!customEnd || stamp <= Date.parse(customEnd)); });
+    const grouped = {low: [], medium: [], critical: []};
+    visibleItems.forEach(item => { if (grouped[item.severity]) grouped[item.severity].push(item); });
+    Object.entries(grouped).forEach(([level, levelItems]) => {
+      const column = list.querySelector(`[data-alert-items="${level}"]`);
+      const count = list.querySelector(`[data-alert-count="${level}"]`);
+      if (count) count.textContent = String(levelItems.length);
+      if (column) column.innerHTML = levelItems.length ? levelItems.map(alertCard).join('') : '<div class="state">No alerts</div>';
+    });
     list.querySelectorAll('[data-status]').forEach(button => button.addEventListener('click', async () => {
       const card = button.closest('.alert-card');
       const id = card?.dataset.alertId;
@@ -55,6 +68,16 @@
         state.textContent = 'Alert update failed';
       }
     }));
+    list.querySelectorAll('.alert-card').forEach(card => {
+      const open = () => { window.location.href = `/ip/${encodeURIComponent(card.dataset.ip)}?mode=live`; };
+      card.addEventListener('click', event => { if (!event.target.closest('button')) open(); });
+      card.addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && !event.target.closest('button')) { event.preventDefault(); open(); } });
+    });
+  }
+
+  function renderItems(items) {
+    renderedItems = items;
+    render(items);
   }
 
   function renderAutoExplain(enabled) {
@@ -88,26 +111,54 @@
     }
   });
 
-  async function load() {
-    if (busy) return;
+  async function load(loadMore = false) {
+    if (loadMore && busy) return;
+    const generation = ++loadGeneration;
     busy = true;
+    if (!loadMore) {
+      nextCursor = null;
+      renderedItems = [];
+    }
     const query = new URLSearchParams({limit: '100'});
-    if (severity.value) query.set('severity', severity.value);
     if (status.value) query.set('status', status.value);
+    // The visible list is client-filtered by time; continue from the number
+    // of raw items already fetched so the next page cannot reuse a stale or
+    // malformed cursor after a live refresh.
+    if (loadMore) query.set('offset', String(renderedItems.length));
     try {
       const response = await fetch(`/api/alerts?${query}`, {cache: 'no-store'});
       if (!response.ok) throw new Error('load failed');
       const data = await response.json();
-      render(data.items || []);
+      if (generation !== loadGeneration) return;
+      const incoming = data.items || [];
+      const seen = new Set(renderedItems.map(item => String(item.id)));
+      const merged = loadMore ? renderedItems.concat(incoming.filter(item => !seen.has(String(item.id)))) : incoming;
+      nextCursor = data.next_cursor || null;
+      renderItems(merged);
+      loadMoreButton.hidden = !nextCursor;
       state.textContent = `${data.total || 0} alert${data.total === 1 ? '' : 's'} · updated just now`;
     } catch (_) {
+      if (generation !== loadGeneration) return;
       list.innerHTML = '<div class="state"><strong>Alerts unavailable</strong>PostgreSQL did not return the alert read model.</div>';
       state.textContent = 'Unable to load alerts';
-    } finally { busy = false; }
+    } finally {
+      if (generation === loadGeneration) busy = false;
+    }
   }
 
-  severity.addEventListener('change', load);
-  status.addEventListener('change', load);
+  status.addEventListener('change', () => load(false));
+  timeFilter.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => {
+    selectedRange = button.dataset.range;
+    customStart = ''; customEnd = '';
+    document.getElementById('alert-time-trigger').textContent = button.textContent.trim() + ' ⌄';
+    timeFilter.querySelectorAll('[data-range]').forEach(option => option.classList.toggle('active', option === button));
+    document.getElementById('alert-time-popover').hidden = true;
+    document.getElementById('alert-time-trigger').setAttribute('aria-expanded', 'false');
+    render(renderedItems);
+  }));
+  document.getElementById('alert-time-trigger').addEventListener('click', () => { const popover = document.getElementById('alert-time-popover'); popover.hidden = !popover.hidden; document.getElementById('alert-time-trigger').setAttribute('aria-expanded', String(!popover.hidden)); });
+  document.getElementById('alert-time-apply').addEventListener('click', () => { const start = document.getElementById('alert-time-start').value; const end = document.getElementById('alert-time-end').value; if (start || end) { customStart = start; customEnd = end; selectedRange = ''; document.getElementById('alert-time-trigger').textContent = 'Custom range ⌄'; } else { customStart = ''; customEnd = ''; const active = timeFilter.querySelector('[data-range].active'); document.getElementById('alert-time-trigger').textContent = `${active?.textContent.trim() || 'Last 24 hours'} ⌄`; } document.getElementById('alert-time-popover').hidden = true; document.getElementById('alert-time-trigger').setAttribute('aria-expanded', 'false'); render(renderedItems); });
+  loadMoreButton.addEventListener('click', () => load(true));
   setInterval(() => { if (!document.hidden) load(); }, 5000);
   loadAutoExplainSetting();
   load();

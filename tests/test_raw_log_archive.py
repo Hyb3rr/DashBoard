@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import subprocess
+import threading
 
 import pytest
 
@@ -135,6 +136,69 @@ def test_queue_byte_capacity_refuses_batch_atomically(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_writer_retry_does_not_raise_queue_full_or_kill_worker(tmp_path, monkeypatch):
+    archive = RawLogArchive("source", tmp_path, max_queue_lines=1, max_queue_bytes=100)
+    attempts = 0
+
+    def flaky_write(_line, _received_at):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("transient write failure")
+
+    monkeypatch.setattr(archive, "_write_line", flaky_write)
+    await archive.start()
+    try:
+        await archive.append_batch(["retry me"])
+        await asyncio.wait_for(archive._queue.join(), timeout=1)
+        assert attempts >= 2
+        assert archive._task is not None and not archive._task.done()
+    finally:
+        await archive.stop()
+
+
+@pytest.mark.asyncio
+async def test_inflight_write_failure_cannot_crash_worker_on_full_queue(tmp_path, monkeypatch):
+    archive = RawLogArchive("source", tmp_path, max_queue_lines=1, max_queue_bytes=100)
+    write_started = threading.Event()
+    allow_failure = threading.Event()
+    writes = []
+
+    def blocked_write(line, _received_at):
+        writes.append(line)
+        if line == "first" and writes.count("first") == 1:
+            write_started.set()
+            allow_failure.wait(timeout=1)
+            raise OSError("forced write failure")
+
+    monkeypatch.setattr(archive, "_write_line", blocked_write)
+    await archive.start()
+    try:
+        archive.tap(["first"])
+        await asyncio.wait_for(asyncio.to_thread(write_started.wait, 1), timeout=1)
+
+        archive.tap(["second"])
+        assert archive._queue.full()
+
+        allow_failure.set()
+        await asyncio.wait_for(archive._queue.join(), timeout=1)
+
+        assert writes == ["first", "first", "second"]
+        assert archive._task is not None and not archive._task.done()
+        assert archive.status()["failed_writes"] == 1
+    finally:
+        allow_failure.set()
+        tasks = [archive._task, archive._compression_task, archive._upload_task]
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in tasks if task), return_exceptions=True)
+        if archive._task and archive._task.done() and not archive._task.cancelled():
+            archive._task.exception()
+        archive._task = archive._compression_task = archive._upload_task = None
+
+
+@pytest.mark.asyncio
 async def test_collector_taps_before_detection_and_storage(monkeypatch, tmp_path):
     collector = WebSocketCollector(
         CollectorConfig(True, "wss://example.test", "secret", "access", "source", 200, 1000, 300)
@@ -254,6 +318,20 @@ async def test_sealed_chunk_is_zstd_compressed_verified_and_original_removed(tmp
     assert metadata["status"] == "VERIFIED"
     assert metadata["original_bytes"] == len(b"one\ntwo\n")
     assert metadata["original_sha256"] == hashlib.sha256(b"one\ntwo\n").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stop_is_idempotent_and_seals_once(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.services.raw_log_archive.shutil.which", lambda _name: None)
+    archive = RawLogArchive("source", tmp_path)
+    await archive.start()
+    archive.tap(["one"], datetime(2026, 8, 29, 12, tzinfo=timezone.utc))
+    await archive._queue.join()
+    await asyncio.gather(archive.stop(), archive.stop())
+    chunks = list(tmp_path.rglob("*.log"))
+    assert len(chunks) == 1
+    assert chunks[0].read_text() == "one\n"
+    assert archive.status()["active_chunk"] is None
 
 
 def test_upload_sealed_zstd_streams_blocks_verifies_and_writes_manifest(tmp_path):

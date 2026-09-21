@@ -1,0 +1,14 @@
+(() => {
+  const $=id=>document.getElementById(id),list=$('raw-log-list'),state=$('raw-log-state'),pause=$('raw-log-pause');
+  let paused=false,timer=null,events=[];
+  const themeToggle=$('theme-toggle'),applyTheme=theme=>{document.documentElement.dataset.theme=theme;localStorage.setItem('sentinel-theme',theme);themeToggle.textContent=theme==='dark'?'Light mode':'Dark mode'};
+  const esc=value=>String(value??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+  const time=value=>{const d=new Date(value);return Number.isNaN(d.getTime())?'—':d.toLocaleTimeString()};
+  const query=()=>{const p=new URLSearchParams({window:'300',limit:'100'}),ip=$('raw-log-ip').value.trim(),status=$('raw-log-status').value.trim();if(ip)p.set('ip',ip);if(status)p.set('status',status);return p};
+  function render(){if(!events.length){list.innerHTML='<div class="state"><strong>No raw events in this window.</strong><span>New events will appear here when available.</span></div>';return}list.innerHTML=`<div class="raw-log-table-wrap"><table class="raw-log-table"><thead><tr><th>Time</th><th>Source IP</th><th>Method</th><th>Raw request</th><th>Status</th><th>Offset</th></tr></thead><tbody>${events.map(e=>{const status=Number(e.status),tone=status>=500?'error':status>=400?'warn':status>=300?'redirect':'ok';return `<tr><td><time>${esc(time(e.timestamp))}</time></td><td><a href="/ip/${encodeURIComponent(e.ip)}">${esc(e.ip)}</a></td><td>${esc(e.method)}</td><td><pre>${esc(e.raw_line||`${e.method} ${e.path} (${e.status})`)}</pre></td><td><span class="raw-log-status-code ${tone}">${esc(e.status)}</span></td><td>${esc(e.source_offset)}</td></tr>`}).join('')}</tbody></table></div>`}
+  async function load(){if(paused)return;try{const response=await fetch(`/api/raw-logs/tail?${query()}`,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();events=(data.events||[]).slice(-100);state.innerHTML='<i></i>Live';render()}catch(error){state.innerHTML='<i class="error"></i>Unavailable';if(!events.length)list.innerHTML=`<div class="state"><strong>Raw log tail unavailable.</strong><span>${esc(error.message)}</span></div>`}}
+  pause.addEventListener('click',()=>{paused=!paused;pause.textContent=paused?'Resume':'Pause';pause.setAttribute('aria-pressed',String(paused));state.innerHTML=paused?'<i class="paused"></i>Paused':'<i></i>Live'});$('raw-log-clear').addEventListener('click',()=>{events=[];render()});$('raw-log-ip').addEventListener('change',load);$('raw-log-status').addEventListener('change',load);load();timer=setInterval(load,2000);
+  applyTheme(localStorage.getItem('sentinel-theme')||'dark');
+  themeToggle.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
+  window.addEventListener('beforeunload',()=>clearInterval(timer));
+})();

@@ -20,9 +20,11 @@ class Provider:
 
 def test_worker_completes_only_grounded_analysis():
     repo, provider = Repo(), Provider(ReasoningResult("received", "fp_1", {"choices": [{"finish_reason": "stop", "message": {"content": VALID}}]}))
-    worker = AiExplainWorker(repo, provider, {"case_1": PACKET}.get, provenance={"run": "test"})
+    worker = AiExplainWorker(repo, provider, {"case_1": PACKET}.get, provenance={"run": "test", "provider": "llama_cpp", "model": "test-model", "configured_timeout_seconds": 30, "prompt_schema_version": "case-analysis-v1"})
     assert worker.run_once() is True
     assert provider.calls == 1 and repo.completed[0] == "job_1" and repo.failed is None
+    provenance = repo.completed[3]
+    assert {"provider", "model", "configured_timeout_seconds", "prompt_schema_version", "evidence_fingerprint", "latency_ms"} <= provenance.keys()
 
 
 def test_worker_maps_timeout_without_retry():
@@ -79,3 +81,22 @@ def test_worker_database_error_is_bounded_and_does_not_escape():
     worker = AiExplainWorker(BrokenRepo(), Provider(ReasoningResult("timeout")), {}, sleep=lambda seconds: (sleeps.append(seconds), worker.stop()), stale_after_seconds=1)
     worker.run_forever()
     assert sleeps == [1.0]
+
+
+def test_worker_backs_off_after_repeated_provider_failures():
+    class OneJobRepo(Repo):
+        pass
+
+    sleeps = []
+    repo = OneJobRepo()
+    worker = AiExplainWorker(
+        repo,
+        Provider(ReasoningResult("timeout", "fp_1", error="timeout")),
+        {"case_1": PACKET}.get,
+        sleep=lambda seconds: (sleeps.append(seconds), worker.stop()),
+        stale_after_seconds=1000,
+        provider_failure_threshold=1,
+        provider_failure_backoff_seconds=7,
+    )
+    worker.run_forever()
+    assert sleeps and sleeps[0] >= 6.9

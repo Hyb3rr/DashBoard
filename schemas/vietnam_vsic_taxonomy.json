@@ -1,0 +1,26 @@
+{
+  "taxonomy": "VSIC 2018",
+  "taxonomy_version": "VSIC2018",
+  "source": "https://www.gso.gov.vn/en/",
+  "applicable_to_nso_tables": ["E05.01", "E05.03", "E05.07", "E05.10", "E05.16", "E05.22", "E05.25", "E07.01", "E07.02"],
+  "activity_level": "division_level_2_broad_sector_proxy",
+  "vsic_2025_crosswalk_status": "not applied; all 2023-2024 source tables remain classified as VSIC2018 until an official code-level crosswalk is ingested",
+  "scope": "manufacturing_only",
+  "tracks": {
+    "woodworking": [
+      {"raw_vsic_code": "16", "official_label": "Manufacture of wood and of products of wood and cork, except furniture; manufacture of articles of straw and plaiting materials", "mapping_rationale": "Primary wood processing and wood products; excludes furniture, which is tracked separately in the same manufacturing track.", "role": "primary"},
+      {"raw_vsic_code": "31", "official_label": "Manufacture of furniture", "mapping_rationale": "Broad sector proxy only: VSIC division 31 includes furniture materials other than wood; it is not equivalent to wood furniture alone.", "role": "broad_sector_proxy"}
+    ],
+    "metalworking": [
+      {"raw_vsic_code": "24", "official_label": "Manufacture of basic metals", "mapping_rationale": "Upstream metal production context; retained as structural context, not a machine-user proxy by itself.", "role": "structural_context"},
+      {"raw_vsic_code": "25", "official_label": "Manufacture of fabricated metal products, except machinery and equipment", "mapping_rationale": "Direct fabricated-metal and sheet-metal production activity.", "role": "primary"},
+      {"raw_vsic_code": "28", "official_label": "Manufacture of machinery and equipment n.e.c.", "mapping_rationale": "Direct machinery and component manufacturing activity relevant to metal machining equipment.", "role": "primary"}
+    ]
+  },
+  "excluded_separate_activity": [
+    {"code_prefix": "G45-G47", "label": "Wholesale and retail trade", "reason": "distribution activity, not manufacturing"},
+    {"code_prefix": "S95.2", "label": "Repair of personal and household goods", "reason": "repair activity, not manufacturing"},
+    {"raw_vsic_code": "33", "official_label": "Repair and installation of machinery and equipment", "reason": "kept separate from manufacturing machine-user counts"}
+  ],
+  "limitation": "NSO E05/E07 snapshots expose activity labels at division-level breadth, not a complete raw VSIC code dimension. VSIC 2025 is not applied retroactively; refine below division level only when NSO publishes that level and the official 2018↔2025 crosswalk is stored."
+}

@@ -1,0 +1,8 @@
+[
+  {"id":"bg_sc_frankfurt","description":"BG majority, invalid Seychelles coordinate, Frankfurt context","required_invalid_reason":"coordinate_country_mismatch","expected_country":"BG","expected_city":null},
+  {"id":"non_independent_majority","description":"Three agreeing records, two duplicate family members","required_invalid_reason":null,"expected_country":"NL","expected_city":"Amsterdam"},
+  {"id":"nearby_city_conflict","description":"Frankfurt and Cologne within one region","required_invalid_reason":null,"expected_country":"DE","expected_city":"Frankfurt"},
+  {"id":"sentinel_coordinate","description":"Null Island vendor sentinel","required_invalid_reason":"null_island","expected_country":"US","expected_city":null},
+  {"id":"verified_geofeed","description":"Verified self-published geofeed beats commercial disagreement","required_invalid_reason":null,"expected_country":"JP","expected_city":"Tokyo"},
+  {"id":"complete_disagreement","description":"No country candidate exceeds the confidence threshold","required_invalid_reason":null,"expected_country":null,"expected_city":null}
+]

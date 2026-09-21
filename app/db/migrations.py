@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .migration_baseline import LEGACY_BASELINE_VERSION, validate_legacy_baseline
+
 
 MIGRATION_DIR = Path(__file__).resolve().parents[2] / "infra" / "postgres"
 _MIGRATION_RE = re.compile(r"^(?P<version>\d+)_(?P<name>.+)\.sql$")
@@ -113,6 +115,9 @@ def apply_after_base_schema(conn: Any, migrations: list[Migration] | None = None
             missing = ", ".join(sorted(later_tables - present))
             raise RuntimeError(f"Cannot adopt partially migrated database; missing tables: {missing}")
         if present == later_tables:
+            validate_legacy_baseline(conn)
+            if LEGACY_BASELINE_VERSION != migrations[-1].version:
+                raise RuntimeError("Legacy baseline version does not match discovered migrations")
             _record_if_missing(conn, ledger, applied)
             _record_if_missing(conn, base, applied)
             for migration in migrations[2:]:

@@ -17,7 +17,8 @@ import pycountry
 from scripts.market import market_refresh
 from app.core.market_catalog import catalog_rows
 
-BILATERAL_URL = "https://comtradeapi.un.org/tools/v1/getBilateralData/C/A/HS"
+PREVIEW_URL = "https://comtradeapi.un.org/public/v1/preview/C/A/HS"
+DATA_URL = "https://comtradeapi.un.org/data/v1/get/C/A/HS"
 MIRROR_PATH = market_refresh.MIRROR_CACHE
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
@@ -58,17 +59,18 @@ def _request_json(request: Request, timeout: float = 30.0, opener=urlopen,
     raise RuntimeError("Comtrade request exhausted")
 
 
-def _fetch(country: str, year: int, timeout: float = 30.0) -> list[dict]:
+def _fetch(country: str, year: int, timeout: float = 30.0, flow_code: str = "M", cmd_code: str | None = None) -> list[dict]:
     numeric = _numeric_code(country)
     if not numeric:
         return []
-    params = {"period": str(year), "reporterCode": numeric, "cmdCode": market_refresh.HS_PARENT,
-              "flowCode": "M", "partnerCode": "0", "maxRecords": "500", "format": "json",
+    params = {"period": str(year), "reporterCode": numeric, "cmdCode": cmd_code or market_refresh.HS_PARENT,
+              "flowCode": flow_code, "partnerCode": "0", "maxrecords": "500", "format": "json",
               "includeDesc": "false"}
     api_key = os.getenv("COMTRADE_API_KEY")
+    endpoint = DATA_URL if api_key else PREVIEW_URL
     if api_key:
         params["subscription-key"] = api_key
-    request = Request(f"{BILATERAL_URL}?{urlencode(params)}", headers={"User-Agent": "IPIntel-Comtrade/1.0"})
+    request = Request(f"{endpoint}?{urlencode(params)}", headers={"User-Agent": "IPIntel-Comtrade/1.0"})
     payload = _request_json(request, timeout=float(os.getenv("COMTRADE_REQUEST_TIMEOUT", timeout)))
     return payload.get("data", []) if isinstance(payload, dict) else []
 
@@ -163,8 +165,23 @@ def refresh(countries: list[str] | None = None, years: list[int] | None = None,
         except OSError:
             pass
         raise
+    furniture_report = {"status": "disabled", "updated": 0, "failed": 0}
+    if os.getenv("COMTRADE_FURNITURE_EXPORT_REFRESH", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        furniture_report = {"status": "updated", "updated": 0, "failed": 0}
+        for country in countries:
+            for year in years:
+                try:
+                    rows = fetcher(country, year, flow_code="X", cmd_code="9403")
+                    value = _aggregate(rows, country, year)
+                    if value is not None:
+                        trade.setdefault(country, {}).setdefault("9403", {})[str(year)] = value
+                        furniture_report["updated"] += 1
+                except Exception:
+                    furniture_report["failed"] += 1
+        furniture_report["status"] = "updated" if furniture_report["updated"] else "no_data"
     report = {"status": "updated", "countries": len(countries), "observations": updated, "skipped": skipped,
               "failed": failed, "failed_requests": failed_requests}
+    report["furniture_exports"] = furniture_report
     if path == MIRROR_PATH:
         report["market_refresh"] = market_refresh.refresh()
         if os.getenv("POSTGRES_DSN"):

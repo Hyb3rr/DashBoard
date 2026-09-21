@@ -44,7 +44,7 @@ def ip_page(
     privacy = None if intel_tag else privacy
     result = StateRepository().page(page, page_size, sort, direction, q, privacy, classification, disposition, intel_tag)
     return {
-        "items": _pg_rows(result["rows"]), "page": page, "page_size": page_size,
+        "items": _pg_list_rows(result["rows"]), "page": page, "page_size": page_size,
         "total_items": result["total"], "total_pages": (result["total"] + page_size - 1) // page_size,
         "change_cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -58,7 +58,7 @@ def ip_summary(start: str | None = None, end: str | None = None):
     if end_stamp is None or start_stamp is None or end_stamp > now or end_stamp <= start_stamp:
         raise HTTPException(400, "Invalid summary time range")
     summary = StateRepository().summary_window(start_stamp, end_stamp)
-    summary["priority_items"] = _pg_items(summary.pop("priority_ips"))
+    summary["priority_items"] = _pg_items(summary.pop("priority_ips"), compact=True)
     summary["ai"] = AiRepository().summary()
     summary["snapshot_at"] = datetime.now(timezone.utc).isoformat()
     return summary
@@ -74,12 +74,45 @@ def _parse_summary_time(value: str | None) -> datetime | None:
         return None
 
 
+def _apply_geo_fallback(profile: dict) -> dict:
+    """Use the canonical profile location, falling back to the geo cache."""
+    location = profile.get("network_location")
+    if not isinstance(location, dict) or not location:
+        country = profile.get("geo_country")
+        country_code = profile.get("geo_country_code")
+        if country is not None or country_code is not None:
+            profile["network_location"] = {
+                key: value for key, value in {
+                    "country": country,
+                    "country_code": country_code,
+                    "city": profile.get("geo_city"),
+                    "asn": profile.get("geo_asn"),
+                    "organization": profile.get("geo_organization"),
+                    "network_type": profile.get("geo_network_type"),
+                    "confidence": profile.get("geo_confidence"),
+                    "disputed": profile.get("geo_disputed"),
+                    "scope": profile.get("geo_location_scope"),
+                    "sources": ["geo_resolutions"],
+                }.items() if value is not None
+            }
+        else:
+            profile["network_location"] = {}
+    location = profile["network_location"]
+    for field, geo_field in (("country", "geo_country"), ("country_code", "geo_country_code"),
+                             ("city", "geo_city"), ("asn", "geo_asn"),
+                             ("organization", "geo_organization"), ("network_type", "geo_network_type")):
+        if not profile.get(field) and profile.get(geo_field) is not None:
+            profile[field] = profile[geo_field]
+    return profile
+
+
 def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
     """Build the dashboard contract from the PostgreSQL state read model."""
     observation = dict(row.get("observation_payload") or {})
     observation.setdefault("recent_behavior_score", observation.get("behavior_score", 0))
     observation.setdefault("behavior_evidence", observation.get("recent_behavior_evidence", []))
     profile = {key: value for key, value in row.items() if key not in {"observation_payload", "label", "classification_score", "classification_confidence", "disposition"}}
+    _apply_geo_fallback(profile)
     profile["ip"] = str(row.get("ip") or observation.get("ip") or profile.get("ip"))
     for key in ("identity_evidence", "reputation", "provider_errors", "provider_status", "field_sources", "evidence", "sources"):
         if profile.get(key) is None:
@@ -173,17 +206,91 @@ def _elapsed_ms(start, end) -> float | None:
         return None
 
 
-def _pg_items(ips: list[str] | set[str]) -> list[dict]:
+def _pg_items(ips: list[str] | set[str], compact: bool = False) -> list[dict]:
+    return _pg_items_with_mode(ips, compact=compact)
+
+
+def _pg_items_with_mode(ips: list[str] | set[str], compact: bool = False) -> list[dict]:
     repo = StateRepository()
     rows = repo.get_many(ips)
     scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
-    return [_pg_item(row, scores.get(str(row["ip"]))) for row in rows]
+    return [_pg_compact_item(row, scores.get(str(row["ip"]))) if compact else _pg_item(row, scores.get(str(row["ip"]))) for row in rows]
 
 
 def _pg_rows(rows: list[dict]) -> list[dict]:
     ips = [str(row["ip"]) for row in rows]
     scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
     return [_pg_item(row, scores.get(str(row["ip"]))) for row in rows]
+
+
+def _pg_compact_item(row: dict, ai_profile: dict | None = None) -> dict:
+    """Build the bounded list/realtime DTO; investigation detail stays full-fat."""
+    source_observation = dict(row.get("observation_payload") or {})
+    profile = dict(row)
+    _apply_geo_fallback(profile)
+    observation = {
+        key: source_observation.get(key)
+        for key in (
+            "requests", "status_4xx", "status_5xx", "unique_paths",
+            "first_seen", "last_seen", "pipeline_received_at",
+            "pipeline_state_ready_at",
+        )
+        if source_observation.get(key) is not None
+    }
+    label = row.get("label") or "unknown"
+    score = int(row.get("classification_score") or 0)
+    confidence = int(row.get("classification_confidence") or 0)
+    provider_status = row.get("provider_status") or {}
+    reputation = abuse_reputation_state(row.get("threat_indicators"), provider_status)
+    source_location = profile.get("network_location")
+    location = source_location if isinstance(source_location, dict) else None
+    compact_location = None
+    if location:
+        canonical = location.get("canonical_resolution") or {}
+        compact_location = {
+            key: location.get(key)
+            for key in ("country", "country_code", "city", "scope", "location_status")
+            if location.get(key) is not None
+        }
+        if canonical:
+            compact_location["canonical_resolution"] = {
+                key: canonical.get(key)
+                for key in ("status", "resolved", "candidates")
+                if canonical.get(key) is not None
+            }
+    item = {
+        "ip": str(row.get("ip") or ""),
+        "country": profile.get("country"), "country_code": profile.get("country_code"),
+        "city": profile.get("city"), "region": profile.get("region"),
+        "network_location": compact_location,
+        "network_type": profile.get("network_type"),
+        "organization": profile.get("organization"), "asn": profile.get("asn"),
+        "is_tor": row.get("is_tor"), "is_vpn": row.get("is_vpn"),
+        "is_proxy": row.get("is_proxy"), "is_hosting": row.get("is_hosting"),
+        "intel_tags": intel_tags_for_abuse(reputation),
+        "observation": observation,
+        "classification": {"label": label, "score": score, "confidence": confidence},
+        "threat_signal_score": score, "threat_signal_label": label,
+        "disposition": {
+            "state": row.get("disposition") or "new",
+            "suggested_state": row.get("suggested_state"),
+            "assigned_to": row.get("assigned_to"), "note": row.get("note"),
+            "updated_at": row.get("disposition_updated_at").isoformat() if hasattr(row.get("disposition_updated_at"), "isoformat") else row.get("disposition_updated_at"),
+        },
+        "requests": int(observation.get("requests") or 0),
+        "status_4xx": int(observation.get("status_4xx") or 0),
+        "status_5xx": int(observation.get("status_5xx") or 0),
+        "unique_paths": int(observation.get("unique_paths") or 0),
+        "first_seen": observation.get("first_seen"), "last_seen": observation.get("last_seen"),
+        "ai_profile": ai_profile or {}, "ai_status": "ready" if ai_profile else "pending",
+    }
+    return item
+
+
+def _pg_list_rows(rows: list[dict]) -> list[dict]:
+    ips = [str(row["ip"]) for row in rows]
+    scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
+    return [_pg_compact_item(row, scores.get(str(row["ip"]))) for row in rows]
 
 
 @router.get("/api/ips/snapshot")
@@ -200,7 +307,7 @@ def ip_updates(after: int = 0, limit: int = 500):
     if result.get("reset_required"):
         return {"items": [], "cursor": result["current"], "has_more": False, "reset_required": True, "transitions": []}
     rows = result["rows"]
-    items = _pg_items({str(row["ip"]) for row in rows})
+    items = _pg_items({str(row["ip"]) for row in rows}, compact=True)
     return {
         "items": items,
         "transitions": [row for row in rows if row["reason"] == "classification"],

@@ -14,6 +14,8 @@ from .telegram import enabled as telegram_enabled, format_critical_alert, send_m
 
 logger = logging.getLogger(__name__)
 WATCH_INTERVAL_SECONDS = 5
+_RETRY_MAX_SECONDS = 30.0
+_status = {"status": "stopped", "failures": 0, "last_error": None}
 
 
 def _now() -> datetime:
@@ -80,9 +82,29 @@ _deliver_outbox_pg = _deliver_outbox
 
 async def run_classification_watcher(stop_event: asyncio.Event | None = None) -> None:
     stop_event = stop_event or asyncio.Event()
-    while not stop_event.is_set():
-        await _deliver_outbox()
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=WATCH_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+    backoff = 1.0
+    _status.update(status="running", last_error=None)
+    try:
+        while not stop_event.is_set():
+            try:
+                await _deliver_outbox()
+                _status["status"] = "running"
+                backoff = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _status.update(status="retrying", failures=_status["failures"] + 1, last_error=f"{type(exc).__name__}: {exc}"[:240])
+                metrics.increment("classification_watcher.failures")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _RETRY_MAX_SECONDS)
+                continue
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=WATCH_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        _status["status"] = "stopped"
+
+
+def status() -> dict:
+    return dict(_status)

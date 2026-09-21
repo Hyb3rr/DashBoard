@@ -1,4 +1,20 @@
 from app.core.regions import market_score
+from app.routers.regions import region_list
+
+
+def test_region_list_exposes_all_seeded_country_profiles(monkeypatch):
+    requested = []
+
+    class Repository:
+        def list(self, limit):
+            requested.append(limit)
+            return []
+
+    monkeypatch.setattr("app.routers.regions.RegionRepository", Repository)
+
+    region_list(limit=999)
+
+    assert requested == [250]
 
 
 def test_region_score_contract_preserves_trade_freshness_metadata():

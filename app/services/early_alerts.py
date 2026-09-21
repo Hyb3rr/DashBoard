@@ -36,7 +36,7 @@ class EarlyAlertPublisher:
             "type": "preliminary",
             "ip": ip,
             "rule_id": detection.rule_id,
-            "severity": "high",
+            "severity": detection.severity,
             "request": f"{detection.method} {detection.path}",
         }
         try:

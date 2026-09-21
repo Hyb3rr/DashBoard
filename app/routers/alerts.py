@@ -46,9 +46,13 @@ def list_alerts(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None),
 ):
-    result = AlertRepository().list(severity, status, limit, offset)
-    return {"items": [_item(row) for row in result["items"]], "total": result["total"], "limit": limit, "offset": offset}
+    try:
+        result = AlertRepository().list(severity, status, limit, offset, cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": [_item(row) for row in result["items"]], "total": result["total"], "limit": limit, "offset": offset, "next_cursor": result["next_cursor"]}
 
 
 @router.patch("/api/alerts/{alert_id}")

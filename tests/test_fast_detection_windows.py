@@ -1,9 +1,14 @@
+from pathlib import Path
+
 from app.core.fast_detection import (
     ShortWindowDetector,
     classify_wordpress_family,
     detect_scanner_user_agent,
     fanout_parts,
 )
+from app.core.intelligence import classify_ip
+from app.db.repositories import PgDetectionRepository
+from app.core.fast_detection import _EARLY_RULES_PATH
 
 
 def _line(path: str, ip: str = "203.0.113.10", status: int = 404, user_agent: str = "client") -> str:
@@ -11,6 +16,11 @@ def _line(path: str, ip: str = "203.0.113.10", status: int = 404, user_agent: st
         f'{ip} - - [24/Aug/2026:12:00:00 +0000] "GET {path} HTTP/1.1" '
         f'{status} 1 "-" "{user_agent}"'
     )
+
+
+def test_early_detection_rules_are_externalized():
+    assert _EARLY_RULES_PATH == Path("rules/early/short-window.json").resolve()
+    assert _EARLY_RULES_PATH.exists()
 
 
 def test_burst_crossing_threshold_emits_once_during_cooldown():
@@ -58,7 +68,8 @@ def test_content_discovery_sweep_uses_path_shape_and_4xx_ratio():
 
     matches = [item for item in alerts if item.rule_id == "PENTEST-DISC-001"]
     assert len(matches) == 1
-    assert matches[0].shadow_only is True
+    assert matches[0].shadow_only is False
+    assert matches[0].severity == "medium"
 
 
 def test_content_discovery_sweep_rejects_low_novelty_or_low_4xx():
@@ -82,6 +93,7 @@ def test_wordpress_enumeration_counts_families_not_requests():
         alerts.extend(detector.observe(_line(path), now=float(index)))
     matches = [item for item in alerts if item.rule_id == "PENTEST-WP-001"]
     assert len(matches) == 1
+    assert matches[0].severity == "medium"
 
 
 def test_wordpress_static_assets_do_not_create_discovery_family():
@@ -95,6 +107,7 @@ def test_extension_backup_fanout_groups_variants_by_base_path():
     for index, path in enumerate(("/config", "/config.php", "/config.bak", "/config.old")):
         alerts.extend(detector.observe(_line(path), now=float(index)))
     assert sum(item.rule_id == "PENTEST-FANOUT-001" for item in alerts) == 1
+    assert next(item for item in alerts if item.rule_id == "PENTEST-FANOUT-001").severity == "medium"
     assert fanout_parts("/logo.png") == ("/logo.png", "")
 
 
@@ -103,6 +116,7 @@ def test_scanner_user_agent_is_shadow_only_supporting_signal():
     alerts = detector.observe(_line("/index", user_agent="Fuzz Faster U Fool v2.1"), now=0)
     assert detect_scanner_user_agent(_line("/index", user_agent="sqlmap/1.8")) == "sqlmap"
     assert [(item.rule_id, item.shadow_only) for item in alerts] == [("PENTEST-UA-001", True)]
+    assert alerts[0].severity == "supporting"
 
 
 def test_detector_state_expires_and_respects_ip_capacity():
@@ -113,3 +127,53 @@ def test_detector_state_expires_and_respects_ip_capacity():
     detector.observe(_line("/three", ip="203.0.113.3"), now=9)
     assert detector.active_ip_count(now=9) == 2
     assert detector.active_ip_count(now=10) == 2
+
+
+def test_score_window_returns_evidence_from_the_same_observation_window():
+    recent = {
+        "requests": 21,
+        "status_4xx": 21,
+        "unique_paths": 21,
+        "sensitive_probe_requests": 0,
+        "wp_login_requests": 0,
+        "bot_requests": 0,
+    }
+
+    score, level, evidence, detections = PgDetectionRepository._score(recent, "24h")
+
+    assert score > 0
+    assert level in {"low", "medium", "high", "critical"}
+    assert len(evidence) == len(detections)
+    assert all(item["evidence"] in evidence for item in detections)
+
+
+def test_recent_clean_score_does_not_leak_historical_behavior_evidence():
+    result = classify_ip(
+        {},
+        {
+            "recent_behavior_score": 0,
+            "recent_behavior_evidence": [],
+            "behavior_score": 80,
+            "behavior_evidence": ["historical malicious activity"],
+            "recent_requests": 10,
+        },
+    )
+
+    assert result["score_breakdown"]["behavior_a"] == 0
+    assert "historical malicious activity" not in "\n".join(result["evidence"])
+
+
+def test_recent_behavior_score_uses_recent_behavior_evidence():
+    result = classify_ip(
+        {},
+        {
+            "recent_behavior_score": 80,
+            "recent_behavior_evidence": ["recent probe activity"],
+            "behavior_score": 0,
+            "behavior_evidence": [],
+            "recent_requests": 10,
+        },
+    )
+
+    assert result["score_breakdown"]["behavior_a"] == 80
+    assert "A — recent probe activity" in result["evidence"]

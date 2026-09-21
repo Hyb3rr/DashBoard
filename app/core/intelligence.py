@@ -36,13 +36,18 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     observation = observation or {}
     region_profile = region_profile or {}
     evidence: list[str] = []
-    behavior_score = max(0, min(int(observation.get("recent_behavior_score", observation.get("behavior_score")) or 0), 100))
+    recent_window = "recent_behavior_score" in observation
+    behavior_score = max(0, min(int(
+        observation.get("recent_behavior_score" if recent_window else "behavior_score") or 0
+    ), 100))
     requests = int(observation.get("recent_requests", observation.get("requests")) or 0)
     hard_behavior = int(observation.get("recent_sensitive_probe_requests", observation.get("sensitive_probe_requests")) or 0) > 0
 
     # Group A: logs.py is the single owner of behavior scoring.
     group_a = behavior_score
-    behavior_evidence = observation.get("behavior_evidence") or []
+    behavior_evidence = observation.get(
+        "recent_behavior_evidence" if recent_window else "behavior_evidence"
+    ) or []
     if behavior_evidence:
         evidence.extend(f"A — {item}" for item in behavior_evidence)
     elif group_a:

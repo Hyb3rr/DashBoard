@@ -1,6 +1,8 @@
-"""Re-resolve every IP already stored in geo_resolutions."""
+"""Re-enrich every IP already stored in geo_resolutions through the canonical pipeline."""
+import asyncio
+
+from app.core.enrichment import lookup
 from app.db.postgres import transaction
-from app.db.pg_intelligence import resolve_network_location
 from app.db.repositories import GeoRepository
 from psycopg.types.json import Jsonb
 
@@ -9,9 +11,11 @@ with transaction() as conn:
 
 updated = 0
 for ip in ips:
-    data = resolve_network_location(ip, force_refresh=True)
+    data = asyncio.run(lookup(ip, refresh=True))
+    if not data.get("network_location"):
+        continue
     GeoRepository().persist_resolution(ip, data)
-    network_location = dict(data)
+    network_location = dict(data["network_location"])
     with transaction() as conn:
         conn.execute("""UPDATE ip_profiles
             SET country=%s, country_code=%s, city=%s, latitude=%s, longitude=%s,
@@ -20,8 +24,8 @@ for ip in ips:
             WHERE ip=%s""", (
             data.get("country"), data.get("country_code"), data.get("city"),
             data.get("latitude"), data.get("longitude"), Jsonb(network_location),
-            int(data.get("confidence", 0) or 0), bool(data.get("disputed")),
-            data.get("scope"), Jsonb(data.get("sources", [])), ip))
+            int(data.get("location_confidence", 0) or 0), bool(data.get("location_disputed", False)),
+            data.get("location_scope"), Jsonb(data.get("geo_sources", [])), ip))
     updated += 1
     if updated % 1000 == 0:
         print(f"updated={updated}")

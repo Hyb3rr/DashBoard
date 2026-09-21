@@ -72,32 +72,62 @@ class CollectorConfig:
         return bool(self.url and self.token and self.log_key and self.source_id)
 
 
+class _StorageStop:
+    """Private queue marker used only after all accepted storage work drains."""
+
+
+_STORAGE_STOP = _StorageStop()
+
+
 class RealtimeBus:
     """Small process-local fanout bus used by the SSE endpoint."""
 
     def __init__(self) -> None:
-        self._queues: set[asyncio.Queue[tuple[str, dict[str, Any]]]] = set()
+        self._subscriptions: set[_RealtimeSubscription] = set()
         self._lock = asyncio.Lock()
 
     async def publish(self, event: str, payload: dict[str, Any]) -> None:
         async with self._lock:
-            queues = tuple(self._queues)
-        for queue in queues:
-            try:
-                queue.put_nowait((event, payload))
-            except asyncio.QueueFull:
-                pass
+            for subscription in tuple(self._subscriptions):
+                if event == "ip_changes" and subscription.ip_changes_pending:
+                    # Cursor notifications are wake-ups, not durable events.
+                    # Keep only the newest cursor while a client is consuming.
+                    subscription.latest_ip_changes = payload
+                    continue
+                try:
+                    subscription.queue.put_nowait((event, payload))
+                except asyncio.QueueFull:
+                    metrics.increment("realtime_bus_dropped_events")
+                    continue
+                if event == "ip_changes":
+                    subscription.ip_changes_pending = True
 
     async def subscribe(self):
-        queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=100)
+        subscription = _RealtimeSubscription()
         async with self._lock:
-            self._queues.add(queue)
+            self._subscriptions.add(subscription)
         try:
             while True:
-                yield await queue.get()
+                event, payload = await subscription.queue.get()
+                yield event, payload
+                if event == "ip_changes":
+                    async with self._lock:
+                        if subscription.latest_ip_changes is None:
+                            subscription.ip_changes_pending = False
+                        else:
+                            latest = subscription.latest_ip_changes
+                            subscription.latest_ip_changes = None
+                            subscription.queue.put_nowait(("ip_changes", latest))
         finally:
             async with self._lock:
-                self._queues.discard(queue)
+                self._subscriptions.discard(subscription)
+
+
+class _RealtimeSubscription:
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=100)
+        self.ip_changes_pending = False
+        self.latest_ip_changes: dict[str, Any] | None = None
 
 
 bus = RealtimeBus()
@@ -132,6 +162,8 @@ class WebSocketCollector:
         self.pending_lines = 0
         self.reconnect_attempt = 0
         self._stop = asyncio.Event()
+        self._lease_lost = asyncio.Event()
+        self._active_websocket = None
         self._task: asyncio.Task | None = None
         self._flush_task: asyncio.Task | None = None
         self._storage_task: asyncio.Task | None = None
@@ -146,11 +178,19 @@ class WebSocketCollector:
         self._window_detector = ShortWindowDetector()
         self._governor = WorkloadGovernor()
         self._storage_oldest_started: float | None = None
+        self._parser_accepted_lines = 0
+        self._parser_rejected_lines = 0
+        self._parser_consecutive_reject_batches = 0
+        self._parser_last_rejection_ratio = 0.0
+        self._privacy_failures = 0
+        self._privacy_last_error: str | None = None
         self._stream_offset = 0
         self._flush_lock = asyncio.Lock()
         self._owner = f"{socket.gethostname()}:{os.getpid()}"
+        self._supervisor_backoff = 1.0
         self.failpoint = NoopFailpoint()
         self._raw_archive = RawLogArchive(self.config.source_id)
+        self._clickhouse_writer = clickhouse_store.ClickHouseWriter()
 
     async def start(self) -> None:
         if os.getenv("RARE_PATH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
@@ -159,9 +199,15 @@ class WebSocketCollector:
                                 should_run=self._governor.allow_rare_path),
                 name="rare-path-shadow",
             )
-        if self._task:
+        if self._task and not self._task.done():
             await self._publish_status()
             return
+        if self._task and self._task.done():
+            try:
+                self._task.exception()
+            except asyncio.CancelledError:
+                pass
+            self._task = None
         self._stop.clear()
         await self._raw_archive.start()
 
@@ -175,36 +221,40 @@ class WebSocketCollector:
         self._privacy_task = asyncio.create_task(self.privacy_loop(), name="websocket-privacy-refresh")
         await early_alerts.start()
         if self.config.enabled and self.config.valid:
-            self._task = asyncio.create_task(self.run(), name="websocket-collector")
+            self._task = asyncio.create_task(self._supervise_run(), name="websocket-collector")
             self._flush_task = asyncio.create_task(self._flush_loop(), name="websocket-flush")
-            self._storage_task = asyncio.create_task(self._storage_loop(), name="websocket-storage")
+            self._ensure_storage_worker()
         else:
             self.state = "disabled" if not self.config.enabled else "config_error"
         await self._publish_status()
 
     async def stop(self) -> None:
         self._stop.set()
-        tasks = [
+        producer_tasks = [
             task
             for task in (
                 self._task,
                 self._flush_task,
-                self._storage_task,
                 self._enrichment_task,
                 self._privacy_task,
                 self._rare_path_task,
             )
             if task
         ]
+        for task in producer_tasks:
+            task.cancel()
+        if producer_tasks:
+            await asyncio.gather(*producer_tasks, return_exceptions=True)
         if self._pending:
             await self._flush_pending()
-        if self._storage_task:
+        if self._storage_task and not self._storage_task.done():
             await self._storage_queue.join()
+            await self._storage_queue.put(_STORAGE_STOP)
+            await self._storage_task
+        elif self._storage_task:
+            self._discard_uncommitted_storage()
         await self._raw_archive.stop()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        self._clickhouse_writer.close()
         self._task = self._flush_task = self._storage_task = self._enrichment_task = self._privacy_task = self._rare_path_task = None
         await early_alerts.stop()
         self.state = "stopped"
@@ -223,6 +273,21 @@ class WebSocketCollector:
         metrics.gauge("storage.oldest_age_ms", oldest_age_ms)
         metrics.gauge("collector.reconnect_attempt", self.reconnect_attempt)
         raw_archive = self._raw_archive.status()
+        tasks = {
+            "run": self._task_status(self._task),
+            "flush": self._task_status(self._flush_task),
+            "storage": self._task_status(self._storage_task),
+            "enrichment": self._task_status(self._enrichment_task),
+            "privacy": self._task_status(self._privacy_task),
+            "raw_writer": raw_archive.get("writer_status", "unknown"),
+        }
+        parser = {
+            "accepted_lines": self._parser_accepted_lines,
+            "rejected_lines": self._parser_rejected_lines,
+            "last_rejection_ratio": self._parser_last_rejection_ratio,
+            "consecutive_reject_batches": self._parser_consecutive_reject_batches,
+            "status": "degraded" if self._parser_consecutive_reject_batches >= 3 else "ok",
+        }
         return {
             "enabled": self.config.enabled,
             "source_id": self.config.source_id,
@@ -232,6 +297,7 @@ class WebSocketCollector:
             "pending_lines": self.pending_lines,
             "reconnect_attempt": self.reconnect_attempt,
             "last_error": self.last_error,
+            "tasks": tasks,
             "workload": {
                 "mode": state.mode,
                 "storage_queue_depth": state.storage_queue_depth,
@@ -239,8 +305,69 @@ class WebSocketCollector:
                 "early_alert_queue_depth": state.early_alert_queue_depth,
             },
             "raw_archive": raw_archive,
+            "parser": parser,
+            "privacy_refresh": {
+                "status": "failed" if self._privacy_failures else "ok",
+                "consecutive_failures": self._privacy_failures,
+                "last_error": self._privacy_last_error,
+            },
             "ai_runtime": ai_runtime.status(),
         }
+
+    def shared_status(self) -> dict[str, Any]:
+        """Use persisted control-plane state when this process is API-only."""
+        local = self.status()
+        if any(value == "running" for value in local.get("tasks", {}).values()):
+            return local
+        persisted = CheckpointRepository().read_status(self.config.source_id)
+        if not persisted:
+            return local
+        lease_expires_at = persisted.get("lease_expires_at")
+        lease_expired = bool(
+            lease_expires_at
+            and lease_expires_at <= datetime.now(timezone.utc)
+        )
+        local.update({
+            "enabled": True,
+            "status": persisted.get("status") or "unknown",
+            "source_id": persisted.get("source_id") or self.config.source_id,
+            "log_key": persisted.get("log_key") or self.config.log_key,
+            "last_offset": int(persisted.get("last_offset") or 0),
+            "last_error": persisted.get("last_error"),
+            "shared_control_plane": True,
+            "updated_at": persisted.get("updated_at").isoformat() if hasattr(persisted.get("updated_at"), "isoformat") else persisted.get("updated_at"),
+            "last_event_at": persisted.get("last_event_at").isoformat() if hasattr(persisted.get("last_event_at"), "isoformat") else persisted.get("last_event_at"),
+            "lease_owner_present": bool(persisted.get("lease_owner")),
+            "lease_expires_at": lease_expires_at.isoformat() if hasattr(lease_expires_at, "isoformat") else lease_expires_at,
+            "control_plane_stale": lease_expired,
+        })
+        if lease_expired and local["status"] in {"live", "connecting", "backlog", "retrying"}:
+            local["status"] = "stale"
+        return local
+
+    def _record_parser_outcome(self, total_lines: int, accepted_lines: int, rejected_lines: int) -> None:
+        self._parser_accepted_lines += accepted_lines
+        self._parser_rejected_lines += rejected_lines
+        self._parser_last_rejection_ratio = rejected_lines / total_lines if total_lines else 0.0
+        if total_lines and rejected_lines == total_lines:
+            self._parser_consecutive_reject_batches += 1
+        elif accepted_lines:
+            self._parser_consecutive_reject_batches = 0
+        metrics.increment("collector.parser_batches")
+        metrics.increment("collector.parser_rejected_lines", rejected_lines)
+        metrics.increment("collector.parser_accepted_lines", accepted_lines)
+        metrics.gauge("collector.parser_rejection_ratio", self._parser_last_rejection_ratio)
+        metrics.gauge("collector.parser_consecutive_reject_batches", self._parser_consecutive_reject_batches)
+
+    @staticmethod
+    def _task_status(task: asyncio.Task | None) -> str:
+        if task is None:
+            return "not_started"
+        if not task.done():
+            return "running"
+        if task.cancelled():
+            return "cancelled"
+        return "failed" if task.exception() is not None else "stopped"
 
     def schedule_enrichment(self, ip: str) -> bool:
         """Queue one IP on the existing bounded, deduplicated worker queue."""
@@ -258,7 +385,13 @@ class WebSocketCollector:
         return True
 
     async def _publish_status(self) -> None:
-        await asyncio.to_thread(self._persist_status)
+        try:
+            await asyncio.to_thread(self._persist_status)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"[:240]
+            metrics.increment("collector.postgres_control_plane_failures")
         await bus.publish("collector_status", self.status())
 
     def _persist_status(self) -> None:
@@ -271,13 +404,74 @@ class WebSocketCollector:
     def _acquire_lease(self) -> bool:
         return CheckpointRepository().acquire(self.config.source_id, self.config.log_key, self._owner, self.state)
 
-    def _renew_lease(self) -> None:
-        CheckpointRepository().renew(self.config.source_id, self._owner)
+    def _renew_lease(self) -> bool:
+        return CheckpointRepository().renew(self.config.source_id, self._owner)
+
+    async def _signal_lease_loss(self, error: str) -> None:
+        self.last_error = error[:240]
+        self.state = "standby"
+        self._lease_lost.set()
+        metrics.increment("collector.lease_loss")
+        websocket = self._active_websocket
+        if websocket is not None:
+            await websocket.close()
 
     async def _lease_loop(self) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(10)
-            await asyncio.to_thread(self._renew_lease)
+            try:
+                renewed = await asyncio.to_thread(self._renew_lease)
+                if not renewed:
+                    await self._signal_lease_loss("collector lease ownership lost")
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._signal_lease_loss(
+                    f"collector lease renewal failed: {type(exc).__name__}: {exc}"
+                )
+                return
+
+    def _discard_uncommitted_storage(self) -> None:
+        while True:
+            try:
+                self._storage_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._storage_queue.task_done()
+        self._storage_oldest_started = None
+        self._pending = []
+        self.pending_lines = 0
+
+    async def _reset_after_lease_loss(self) -> None:
+        self._discard_uncommitted_storage()
+        durable_offset = await asyncio.to_thread(self._load_offset)
+        self._stream_offset = durable_offset
+        self.last_offset = durable_offset
+
+    async def _supervise_run(self) -> None:
+        """Keep an unexpected control-plane failure from killing ingestion permanently."""
+        while not self._stop.is_set():
+            try:
+                await self.run()
+                self._supervisor_backoff = 1.0
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"[:240]
+                self.state = "retrying"
+                metrics.increment("collector.task_failures")
+                metrics.increment("collector.supervisor_restarts")
+                logger.exception("collector run task failed; retrying")
+                delay = self._supervisor_backoff
+                self._supervisor_backoff = min(self._supervisor_backoff * 2, 30.0)
+                try:
+                    await self._publish_status()
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise
 
     async def _flush_loop(self) -> None:
         interval = self.config.flush_ms / 1000
@@ -305,6 +499,8 @@ class WebSocketCollector:
     async def _enqueue_storage(
         self, batch: list[str], end_offset: int, current_offset: int, received_at: str,
     ) -> None:
+        if not self._storage_task or self._storage_task.done():
+            self._ensure_storage_worker()
         if not self._storage_task:
             new_offset, cursor, affected, new_ips = await asyncio.to_thread(
                 self._commit_batch, batch, end_offset, current_offset, received_at
@@ -317,16 +513,25 @@ class WebSocketCollector:
             self._storage_oldest_started = time.monotonic()
         await self._storage_queue.put((batch, end_offset, current_offset, received_at))
 
+    def _ensure_storage_worker(self) -> None:
+        if self._storage_task and not self._storage_task.done():
+            return
+        self._storage_task = asyncio.create_task(self._storage_loop(), name="websocket-storage")
+
     async def _storage_loop(self) -> None:
-        while not self._stop.is_set():
+        while True:
             try:
-                batch, end_offset, current_offset, received_at = await asyncio.wait_for(
+                item = await asyncio.wait_for(
                     self._storage_queue.get(), timeout=1.0
                 )
             except asyncio.TimeoutError:
                 continue
+            if item is _STORAGE_STOP:
+                self._storage_queue.task_done()
+                return
+            batch, end_offset, current_offset, received_at = item
             try:
-                while not self._stop.is_set():
+                while True:
                     try:
                         new_offset, cursor, affected, new_ips = await asyncio.to_thread(
                             self._commit_batch, batch, end_offset, current_offset, received_at
@@ -338,10 +543,8 @@ class WebSocketCollector:
                     except asyncio.CancelledError:
                         raise
                     except CheckpointCommitRejected as exc:
-                        self.last_error = str(exc)
-                        self.state = "standby"
+                        await self._signal_lease_loss(str(exc))
                         metrics.increment("collector.checkpoint_commit_rejected")
-                        self._stop.set()
                         return
                     except Exception as exc:
                         self.last_error = f"{type(exc).__name__}: {exc}"[:240]
@@ -409,12 +612,13 @@ class WebSocketCollector:
                 )
                 connect_options[header_argument] = self._connection_headers()
                 async with websockets.connect(url, **connect_options) as websocket:
+                    self._active_websocket = websocket
                     self.state = "backlog"
                     self.reconnect_attempt = 0
                     self.last_error = None
                     await self._publish_status()
                     async for raw in websocket:
-                        if self._stop.is_set():
+                        if self._stop.is_set() or self._lease_lost.is_set():
                             break
                         result = await self.handle_message(raw, offset)
                         if result is not None:
@@ -434,6 +638,11 @@ class WebSocketCollector:
             finally:
                 lease_task.cancel()
                 await asyncio.gather(lease_task, return_exceptions=True)
+                self._active_websocket = None
+            if self._lease_lost.is_set() and not self._stop.is_set():
+                self._lease_lost.clear()
+                await self._reset_after_lease_loss()
+                self.state = "standby"
 
     async def handle_message(self, raw: str | None, current_offset: int) -> int | None:
         if raw is None:
@@ -564,6 +773,7 @@ class WebSocketCollector:
             })
         if parse_failures:
             self._raw_archive.write_parse_failures(parse_failures)
+        self._record_parser_outcome(len(lines), len(events), len(parse_failures))
         if not events:
             self.failpoint.hit("before_checkpoint")
             from ..db.repositories import CheckpointRepository
@@ -575,7 +785,7 @@ class WebSocketCollector:
             self.failpoint.hit("after_checkpoint")
             return end_offset, 0, set(), []
         self.failpoint.hit("after_parse")
-        clickhouse_store.insert_events(events)
+        self._clickhouse_writer.insert_events(events)
         self.failpoint.hit("after_clickhouse_insert")
         from ..db.repositories import PgDetectionRepository
         batch_id = hashlib.sha256(f"{self.config.source_id}:{start_offset}:{end_offset}".encode()).hexdigest()
@@ -663,10 +873,15 @@ class WebSocketCollector:
                     await bus.publish(
                         "ip_changes", {"cursor": cursor, "count": len(changed_ips), "ips": changed_ips, "published_at": utc_now()}
                     )
+                self._privacy_failures = 0
+                self._privacy_last_error = None
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                self._privacy_failures += 1
+                self._privacy_last_error = f"{type(exc).__name__}: {exc}"
+                metrics.increment("collector.privacy_refresh_failures")
+                logger.warning("Privacy refresh failed (%s consecutive): %s", self._privacy_failures, exc)
 
     async def _publish_rare_changes(self, changed_ips: list[str]) -> None:
         with postgres_store.transaction() as conn:

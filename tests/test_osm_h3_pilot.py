@@ -4,7 +4,7 @@ import inspect
 from app.config.market_sources import UNSUPPORTED_OSM_COUNTRIES, WAVE_1_COUNTRIES, resolve_osm_source
 from app.db.market_repository import MarketRepository
 from scripts.geo.osm_h3_pilot import (
-    CLASSIFICATION_VERSION, FILTER_VERSION, PRIORITY_COUNTRIES, PilotMetrics, _entity_points,
+    CLASSIFICATION_VERSION, FILTER_VERSION, PRIORITY_COUNTRIES, PilotMetrics, _entity_points, _feature_counts,
     classify_tags, download_snapshot, native_filter_args, percentile, persist_report, preflight_osm_source,
     preflight_osm_sources, refresh_osm_pilot, safe_snapshot_activation,
     apply_cache_retention, cache_retention_plan,
@@ -71,6 +71,14 @@ def test_tag_filter_keeps_sectors_separate():
     assert classify_tags({"amenity": "school"}) == set()
 
 
+def test_broad_works_tag_is_not_a_metal_signal_and_sawmill_is_counted_once():
+    assert classify_tags({"man_made": "works"}) == set()
+    assert classify_tags({"industrial": "sawmill"}) == {"WOODWORKING"}
+    counts = _feature_counts({"industrial": "sawmill"}, "WOODWORKING")
+    assert counts["sawmill_count"] == 1
+    assert counts["wood_processing_count"] == 0
+
+
 def test_metrics_report_rejection_rate():
     metrics = PilotMetrics("SG", str(Path("sg.osm.pbf")), candidates_seen=10, rejected_by_tag=7)
     assert metrics.rejection_rate == 0.7
@@ -86,7 +94,7 @@ def test_failed_snapshot_keeps_previous_active():
 
 def test_native_filter_is_versioned_and_matches_classification_rules():
     filters = set(native_filter_args())
-    assert FILTER_VERSION == "phase4a-sector-tags-v1"
+    assert FILTER_VERSION == "phase4a-manufacturing-tags-v2"
     assert "nwr/craft=carpenter" in filters
     assert "nwr/industrial=metalworking" in filters
     assert "nwr/amenity=school" not in filters

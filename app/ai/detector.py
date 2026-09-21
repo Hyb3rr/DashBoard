@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -27,6 +28,9 @@ DEFAULT_TRAIN_LOOKBACK_HOURS = 168
 DEFAULT_SCORE_LOOKBACK_HOURS = 24
 DEFAULT_MIN_IP_WINDOWS = 3
 DEFAULT_EXPIRE_HOURS = 24
+DEFAULT_TRAIN_MAX_WINDOWS = 100_000
+DEFAULT_TRAIN_MAX_IPS = 10_000
+DEFAULT_TRAIN_N_JOBS = 2
 
 
 def _utc_now() -> datetime:
@@ -61,7 +65,7 @@ def _fit_model_frame(frame: pd.DataFrame, metadata: dict[str, Any]) -> dict[str,
         n_estimators=300,
         contamination=0.02,
         random_state=42,
-        n_jobs=-1,
+        n_jobs=_env_int("AI_TRAIN_N_JOBS", DEFAULT_TRAIN_N_JOBS),
     )
     model.fit(scaled)
     decisions = model.decision_function(scaled)
@@ -77,6 +81,12 @@ def _fit_model_frame(frame: pd.DataFrame, metadata: dict[str, Any]) -> dict[str,
         "training_end": metadata["training_end"],
         "training_windows": int(len(frame)),
         "training_ips": int(frame["ip"].nunique()),
+        "training_windows_before_bound": int(metadata.get("training_windows_before_bound", len(frame))),
+        "training_ips_before_bound": int(metadata.get("training_ips_before_bound", frame["ip"].nunique())),
+        "training_input_bounded": bool(metadata.get("training_input_bounded", False)),
+        "training_source_rows_bounded": bool(metadata.get("training_source_rows_bounded", False)),
+        "training_source_row_limit": metadata.get("training_source_row_limit"),
+        "training_source_ip_limit": metadata.get("training_source_ip_limit"),
         "training_decision_floor": floor,
         "scaler": scaler,
         "model": model,
@@ -131,6 +141,8 @@ def _state(conn):
 
 
 def _feature_frame(conn, start: datetime, end: datetime, ips: list[str] | None = None) -> pd.DataFrame:
+    max_ips = _env_int("AI_TRAIN_MAX_IPS", DEFAULT_TRAIN_MAX_IPS)
+    max_windows = _env_int("AI_TRAIN_MAX_WINDOWS", DEFAULT_TRAIN_MAX_WINDOWS)
     sql = """SELECT host(f.ip) AS ip, f.bucket_minute, f.requests,
                      COALESCE(p.unique_paths_approx, 0) AS unique_paths_approx,
                      f.status_404, f.status_403, f.status_5xx, f.post_requests,
@@ -144,10 +156,71 @@ def _feature_frame(conn, start: datetime, end: datetime, ips: list[str] | None =
               WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute < %s"""
     params: list[Any] = ["live", start, end]
     if ips is not None:
+        params.extend([ips])
+    else:
+        sql = """WITH selected_ips AS (
+                    SELECT f.ip
+                      FROM ip_minute_features f
+                     WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute < %s
+                     GROUP BY f.ip
+                     ORDER BY md5(host(f.ip)), host(f.ip)
+                     LIMIT %s
+                ), bounded_features AS (
+                    SELECT f.*,
+                           row_number() OVER (ORDER BY f.bucket_minute DESC, host(f.ip), f.dataset_id) AS source_rank
+                      FROM ip_minute_features f
+                      JOIN selected_ips s ON s.ip=f.ip
+                     WHERE f.dataset_id=%s AND f.bucket_minute >= %s AND f.bucket_minute < %s
+                ), bounded_paths AS (
+                    SELECT p.dataset_id, p.ip, p.bucket_minute, COUNT(*) AS unique_paths_approx
+                      FROM ip_minute_path_seen p
+                      JOIN selected_ips s ON s.ip=p.ip
+                     WHERE p.dataset_id=%s AND p.bucket_minute >= %s AND p.bucket_minute < %s
+                     GROUP BY p.dataset_id, p.ip, p.bucket_minute
+                )
+                SELECT host(f.ip) AS ip, f.bucket_minute, f.requests,
+                       COALESCE(p.unique_paths_approx, 0) AS unique_paths_approx,
+                       f.status_404, f.status_403, f.status_5xx, f.post_requests,
+                       f.sensitive_hits, f.wp_login_hits, f.bytes_sum
+                  FROM bounded_features f
+                  LEFT JOIN bounded_paths p
+                    ON p.dataset_id=f.dataset_id AND p.ip=f.ip AND p.bucket_minute=f.bucket_minute
+                 WHERE f.source_rank <= %s"""
+        params = ["live", start, end, max_ips, "live", start, end, "live", start, end, max_windows]
+    if ips is not None:
         sql += " AND f.ip=ANY(%s::inet[])"
-        params.append(ips)
     rows = conn.execute(sql, params).fetchall()
-    return build_window_features([dict(row) for row in rows])
+    frame = build_window_features([dict(row) for row in rows])
+    if ips is None:
+        frame.attrs["training_source_rows_bounded"] = True
+        frame.attrs["training_source_row_limit"] = max_windows
+        frame.attrs["training_source_ip_limit"] = max_ips
+    return frame
+
+
+def _bound_training_frame(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Apply deterministic AI resource limits without row-order truncation."""
+    before_windows = len(frame)
+    before_ips = int(frame["ip"].nunique()) if not frame.empty else 0
+    max_ips = _env_int("AI_TRAIN_MAX_IPS", DEFAULT_TRAIN_MAX_IPS)
+    max_windows = _env_int("AI_TRAIN_MAX_WINDOWS", DEFAULT_TRAIN_MAX_WINDOWS)
+    bounded = frame
+    if before_ips > max_ips:
+        ranked = sorted(
+            (str(ip) for ip in frame["ip"].dropna().unique()),
+            key=lambda ip: (hashlib.sha256(ip.encode("utf-8")).hexdigest(), ip),
+        )
+        keep = set(ranked[:max_ips])
+        bounded = bounded[bounded["ip"].astype(str).isin(keep)]
+    if len(bounded) > max_windows:
+        bounded = bounded.sort_values(["window_start", "ip"], ascending=[False, True], kind="mergesort").head(max_windows)
+    bounded = bounded.sort_values(["ip", "window_start"], kind="mergesort").reset_index(drop=True)
+    metadata = {
+        "training_windows_before_bound": before_windows,
+        "training_ips_before_bound": before_ips,
+        "training_input_bounded": len(bounded) != before_windows or int(bounded["ip"].nunique()) != before_ips,
+    }
+    return bounded, metadata
 
 
 def train_model(conn, fit_executor=None) -> dict[str, Any]:
@@ -159,6 +232,7 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
     base = {"model_mode": MODEL_MODE, "status": "failed", "model_version": None}
     try:
         frame = _feature_frame(conn, start, end)
+        frame, bound_metadata = _bound_training_frame(frame)
         if len(frame) < MIN_WINDOWS:
             conn.execute(
                 """UPDATE ai_model_state SET last_train_status=%s, last_train_error=%s, updated_at=%s
@@ -173,6 +247,10 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
             "trained_at": _iso(now),
             "training_start": _iso(start),
             "training_end": _iso(end),
+            **bound_metadata,
+            "training_source_rows_bounded": bool(frame.attrs.get("training_source_rows_bounded", False)),
+            "training_source_row_limit": frame.attrs.get("training_source_row_limit"),
+            "training_source_ip_limit": frame.attrs.get("training_source_ip_limit"),
         }
         if fit_executor is None:
             bundle = _fit_model_frame(frame, metadata)

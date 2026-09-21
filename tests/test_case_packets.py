@@ -41,6 +41,30 @@ def test_packet_never_changes_authoritative_classification():
     assert "new_risk_score" not in packet
 
 
+@pytest.mark.parametrize("confidence", [-1, 101])
+def test_packet_rejects_out_of_range_confidence(confidence):
+    with pytest.raises(ValueError, match="classification confidence"):
+        build_case_packet(
+            "203.0.113.10",
+            {"label": "medium", "score": 42, "confidence": confidence},
+            {},
+            {},
+            [],
+        )
+
+
+@pytest.mark.parametrize("confidence", [0, 100])
+def test_packet_accepts_confidence_boundaries(confidence):
+    packet = build_case_packet(
+        "203.0.113.10",
+        {"label": "medium", "score": 42, "confidence": confidence},
+        {},
+        {},
+        [],
+    )
+    assert packet["classification"]["confidence"] == confidence
+
+
 def test_trigger_identity_ignores_moving_window_and_request_samples():
     first = _packet()
     second = dict(first, window={"start": "later", "end": "later"}, representative_requests=[])
@@ -57,6 +81,6 @@ def test_trigger_identity_changes_when_evidence_changes():
 
 def test_trigger_policy_ignores_traffic_and_allows_meaningful_transitions():
     assert not is_meaningful_trigger(TriggerEvent(1, "203.0.113.10", "traffic"))
-    assert is_meaningful_trigger(TriggerEvent(2, "203.0.113.10", "rare_path_evidence_updated"))
-    assert is_meaningful_trigger(TriggerEvent(3, "203.0.113.10", "classification", "unknown", "medium"))
+    assert not is_meaningful_trigger(TriggerEvent(2, "203.0.113.10", "rare_path_evidence_updated"))
+    assert is_meaningful_trigger(TriggerEvent(3, "203.0.113.10", "classification", "unknown", "critical"))
     assert not is_meaningful_trigger(TriggerEvent(4, "203.0.113.10", "classification", "good", "medium"))

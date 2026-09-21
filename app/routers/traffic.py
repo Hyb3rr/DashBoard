@@ -30,8 +30,29 @@ def _country_ips(country: str, exclude: bool) -> list[str] | None:
         raise HTTPException(503, f"PostgreSQL country state unavailable: {exc}") from exc
 
 
+def _classification_ips(label: str, exclude: bool) -> list[str]:
+    """Resolve the current classification cohort before querying ClickHouse."""
+    if label not in {"critical", "medium", "low", "good", "unknown"}:
+        raise HTTPException(400, "Invalid classification filter")
+    try:
+        with postgres_store.transaction() as conn:
+            rows = conn.execute(
+                """SELECT host(i.ip) AS ip
+                     FROM (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles) i
+                     LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
+                    WHERE COALESCE(cs.label, 'unknown') {} %s
+                    ORDER BY i.ip""".format("!=" if exclude else "="),
+                (label,),
+            ).fetchall()
+        return [str(row["ip"]) for row in rows]
+    except Exception as exc:
+        raise HTTPException(503, f"PostgreSQL classification state unavailable: {exc}") from exc
+
+
 def _traffic(start, end, bucket, name, label, source, filter_type, filter_value, exclude):
-    allowed = _country_ips(str(filter_value), exclude) if filter_type == "country" else None
+    allowed = (_country_ips(str(filter_value), exclude) if filter_type == "country"
+               else _classification_ips(str(filter_value), exclude) if filter_type == "classification"
+               else None)
     try:
         result = clickhouse_store.traffic(start, end, bucket, dataset_id=settings.DATASET_LIVE_ID,
                                           filter_type=filter_type, filter_value=filter_value,
@@ -40,7 +61,8 @@ def _traffic(start, end, bucket, name, label, source, filter_type, filter_value,
         raise HTTPException(503, f"ClickHouse traffic unavailable: {exc}") from exc
     try:
         result["risk_series"] = StateRepository().risk_traffic_series(
-            start, end, bucket, dataset_id=settings.DATASET_LIVE_ID
+            start, end, bucket, dataset_id=settings.DATASET_LIVE_ID,
+            filter_type=filter_type, filter_value=filter_value, exclude=exclude
         )
     except Exception as exc:
         raise HTTPException(503, f"PostgreSQL risk traffic unavailable: {exc}") from exc
@@ -72,7 +94,7 @@ def traffic_analytics(range_key: str = Query("1h", alias="range"), start: str | 
     bucket = selected[1]
     if start:
         bucket = max(60, min(3600, int((end_stamp - start_stamp).total_seconds()) // 12))
-    if filter_type not in {None, "ip", "path", "country"} or (filter_type and not filter_value):
+    if filter_type not in {None, "ip", "path", "country", "classification"} or (filter_type and not filter_value):
         raise HTTPException(400, "Invalid traffic filter")
     return _traffic(start_stamp, end_stamp, bucket, "custom" if start else range_key,
                     "custom window" if start else selected[2], source, filter_type, filter_value, exclude)

@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "scanner_user_agents": [
+    ["Fuzz Faster U Fool", "ffuf"],
+    ["feroxbuster", "feroxbuster"],
+    ["gobuster", "gobuster"],
+    ["dirsearch", "dirsearch"],
+    ["sqlmap", "sqlmap"],
+    ["nikto", "nikto"],
+    ["commix", "commix"]
+  ],
+  "fanout_suffixes": [".bak2", ".orig", ".save", ".bak", ".old", ".php", ".1", "~"],
+  "thresholds": {
+    "wp_login_burst": 20,
+    "request_burst": 100,
+    "path_scan": 80,
+    "content_discovery_min_requests": 20,
+    "content_discovery_min_unique_paths": 15,
+    "content_discovery_min_novelty_ratio": 0.7,
+    "content_discovery_min_4xx_ratio": 0.6,
+    "wordpress_enumeration_min_families": 3,
+    "fanout_min_variants": 3
+  },
+  "wordpress_families": [
+    {"name": "wp_login", "pattern": "^/wp-login\\.php$"},
+    {"name": "wp_xmlrpc", "pattern": "^/xmlrpc\\.php$"},
+    {"name": "wp_rest", "pattern": "^/wp-json(?:/|$)"},
+    {"name": "wp_core_metadata", "pattern": "^/readme\\.html$"},
+    {"name": "wp_plugin_metadata", "pattern": "^/wp-content/plugins/[^/]+/readme\\.txt$"},
+    {"name": "wp_theme_metadata", "pattern": "^/wp-content/themes/[^/]+/(?:readme\\.txt|style\\.css)$"},
+    {"name": "wp_uploads_probe", "pattern": "^/wp-content/uploads/"},
+    {"name": "wp_admin", "pattern": "^/wp-admin(?:/|$)"}
+  ]
+}

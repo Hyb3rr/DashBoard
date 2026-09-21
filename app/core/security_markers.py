@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 
-SECURITY_MARKERS: tuple[tuple[str, str], ...] = (
-    ("/.env", "sensitive_path_probe"),
-    ("/.git", "sensitive_path_probe"),
-    ("/wp-config.php", "sensitive_path_probe"),
-    ("/xmlrpc.php", "sensitive_path_probe"),
-    ("/vendor/phpunit", "sensitive_path_probe"),
-    ("/phpmyadmin", "sensitive_path_probe"),
-    ("/adminer", "sensitive_path_probe"),
+
+_RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "early" / "security-markers.json"
+SECURITY_MARKERS: tuple[tuple[str, str], ...] = tuple(
+    (str(marker), str(rule_id))
+    for marker, rule_id in json.loads(_RULES_PATH.read_text(encoding="utf-8"))["markers"]
 )
 
 

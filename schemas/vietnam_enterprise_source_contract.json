@@ -1,0 +1,54 @@
+{
+  "schema_version": "vn-enterprise-source-contract-1",
+  "scope": "Vietnam current 34 administrative units",
+  "source": {
+    "source_id": "doanhnghiep_vn_api",
+    "source_name": "Doanhnghiep.vn public company API",
+    "source_url": "https://doanhnghiep.vn/api/docs",
+    "publisher_type": "public third-party company registry mirror",
+    "api_version": "v1",
+    "rate_limit": "60 requests/minute/IP",
+    "cache_policy": "source terms require cache refresh within 24 hours",
+    "source_taxonomy_revision": "not stated in API documentation"
+  },
+  "geography": {
+    "canonical_catalog": "schemas/vietnam_provinces_2025.json",
+    "province_reference_endpoint": "https://doanhnghiep.vn/api/v1/provinces",
+    "matching_rule": "exact normalized province name; no nearest-city or historical merge inference",
+    "missing_province_rule": "null with limitation, never zero"
+  },
+  "taxonomy": {
+    "working_mapping_version": "VSIC2018-working-1",
+    "api_prefixes": {
+      "woodworking": ["C16", "C31"],
+      "metalworking": ["C24", "C25", "C28"]
+    },
+    "mapping_note": "API codes are preserved verbatim. The C-prefix maps to manufacturing, while division mappings remain provisional until the API's underlying VSIC revision is verified.",
+    "excluded_from_counts": ["wholesale", "retail", "repair", "C33 machinery repair and installation"]
+  },
+  "indicators": [
+    {
+      "indicator_id": "target_enterprise_count",
+      "unit": "active registered enterprises",
+      "method": "sum API total values for disjoint target prefixes within a track; no company records are downloaded for aggregate counts",
+      "status": "proxy",
+      "limitations": [
+        "Registered activity is not proof of current production or machine purchasing intent.",
+        "Counts are not an official NSO statistic until reconciled against NSO tables.",
+        "A source failure or missing prefix leaves the track value null."
+      ]
+    },
+    {
+      "indicator_id": "target_enterprise_density",
+      "unit": "active registered enterprises per population or total enterprises",
+      "method": "not computed in this phase; requires a same-period denominator",
+      "status": "deferred"
+    }
+  ],
+  "missingness": {
+    "unknown_is_null": true,
+    "zero_requires_source_observation": true,
+    "no_composite_score": true,
+    "no_industry_province_inference": true
+  }
+}

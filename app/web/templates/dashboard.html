@@ -21,7 +21,7 @@
         </div>
       </div>
       <nav aria-label="Main navigation">
-        <a class="nav-item" data-view="overview" href="#overview"><span class="nav-icon">⌁</span>Overview</a> <a class="nav-item" data-view="threats" href="#threats"><span class="nav-icon">◎</span>IP Intelligence</a> <a class="nav-item" href="/alerts"><span class="nav-icon">!</span>Alerts</a> <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
+        <a class="nav-item" data-view="overview" href="#overview"><span class="nav-icon">⌁</span>Overview</a> <a class="nav-item" data-view="threats" href="#threats"><span class="nav-icon">◎</span>IP Intelligence</a> <a class="nav-item" href="/alerts"><span class="nav-icon">!</span>Alerts</a> <a class="nav-item" href="/raw-logs"><span class="nav-icon">≋</span>Raw Log Tail</a> <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
       </nav>
     </aside>
     <main>
@@ -37,13 +37,21 @@
         </div>
       </header>
       <section id="overview" class="view-panel" data-view-panel="overview">
+        <section class="country-demand-panel" aria-label="Country opportunity">
+          <div class="country-demand-head">
+            <div><h2>Potential markets</h2></div>
+            <label class="country-demand-view">View <select id="country-demand-scope" aria-label="Potential markets view"><option value="all">All countries</option></select></label>
+            <div class="country-demand-periods" role="group" aria-label="Country demand period"><button type="button" data-country-period="7d">7d</button><button type="button" class="active" data-country-period="30d">30d</button><button type="button" data-country-period="90d">90d</button></div>
+          </div>
+          <div class="country-demand-table-wrap"><div id="country-demand-table" class="state">Loading country signals…</div></div>
+          <aside id="country-demand-drawer" class="country-demand-drawer" hidden aria-label="Country demand details"></aside>
+        </section>
         <section class="dashboard-map-card" aria-label="Global intelligence map">
           <div class="dashboard-map-head">
             <div><div class="eyebrow">Live geographic read model</div><h2>Global intelligence map</h2></div>
-            <div class="dashboard-map-actions"><div class="segmented" id="view-mode" role="group" aria-label="Map layer"><button class="active" type="button" data-mode="opportunity" aria-pressed="true">Opportunity</button><button type="button" data-mode="threat" aria-pressed="false">Threat</button></div><div class="range-control" id="map-range" role="group" aria-label="Map time range"><span class="eyebrow">Window</span><button type="button" data-range="1h">1h</button><button class="active" type="button" data-range="24h">24h</button><button type="button" data-range="7d">7d</button></div></div>
+          <div class="dashboard-map-actions"><div class="segmented" id="view-mode" role="group" aria-label="Map layer"><button class="active" type="button" data-mode="opportunity" aria-pressed="true">Opportunity</button><button type="button" data-mode="threat" aria-pressed="false">Threat</button></div><div class="time-picker" id="dashboard-time-picker"><button class="time-picker-trigger" id="time-picker-trigger" type="button" aria-haspopup="dialog" aria-expanded="false"><span class="time-picker-icon" aria-hidden="true"></span><span id="time-picker-label">Last 24 hours</span><span class="time-picker-chevron" aria-hidden="true">⌄</span></button><div class="time-picker-popover" id="time-picker-popover" role="dialog" aria-label="Dashboard time range" hidden><div class="time-picker-summary" id="time-picker-summary">Select a time window for the map and timeline</div><div class="time-picker-body"><div class="time-picker-custom"><div class="time-picker-calendar-panel"><div class="time-picker-calendar-head"><button type="button" id="calendar-prev" aria-label="Previous month">‹</button><strong id="calendar-month">September 2026</strong><button type="button" id="calendar-next" aria-label="Next month">›</button></div><div class="time-picker-weekdays" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div><div class="time-picker-days" id="calendar-days" role="grid" aria-label="Calendar"></div></div><div class="time-picker-fields"><div class="time-picker-field"><label for="traffic-start">Start</label><input id="traffic-start" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:mm" autocomplete="off"></div><div class="time-picker-field"><label for="traffic-end">End</label><input id="traffic-end" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:mm" autocomplete="off"></div></div></div><div class="time-picker-presets" id="time-picker-presets" role="listbox" aria-label="Preset time ranges"><button type="button" data-range="30m">Last 30 minutes</button><button type="button" data-range="1h">Last 1 hour</button><button type="button" data-range="6h">Last 6 hours</button><button type="button" data-range="12h">Last 12 hours</button><button type="button" data-range="24h">Last 24 hours</button><button type="button" data-range="7d">Last 7 days</button><button type="button" data-range="30d">Last 30 days</button></div></div><div class="time-picker-footer"><span class="traffic-window-note" id="traffic-window-note">Choose a start and end, then apply</span><button type="button" id="time-picker-apply" class="primary">Apply</button></div></div></div></div>
           </div>
           <div class="map-stage dashboard-map-stage" id="map-stage"><div class="map-context" aria-hidden="true"><span>RESOLVED GEO · READ ONLY</span><span>Click a marker to inspect</span></div><div id="map-basemap" class="map-basemap" aria-label="World map showing opportunity and threat intelligence"></div><div id="map-tooltip" class="map-tooltip" hidden></div><div id="map-empty" class="map-empty" hidden><strong>No map points in this view</strong><span>Resolved coordinates or the selected layer are unavailable.</span></div></div>
-          <div class="dashboard-map-foot"><span id="map-status" role="status">Loading map data…</span><span id="map-updated">Awaiting snapshot</span><span><b id="mapped-count">0</b> plotted · <b id="total-count">0</b> countries</span><button id="back-world" class="secondary map-back" type="button" hidden>← World</button></div>
         </section>
         <section class="overview-top" aria-label="Dashboard overview">
           <div class="classification-donut-card" aria-label="Classification breakdown">
@@ -96,19 +104,13 @@
                 request buckets
               </div>
             </div>
-            <div class="traffic-range" id="traffic-range" role="group" aria-label="Traffic time range">
-              <button data-range="30m">30m</button><button data-range="1h">1h</button><button data-range="6h">6h</button><button data-range="12h">12h</button><button class="active" data-range="1d">1d</button><button data-range="3d">3d</button><button data-range="7d">7d</button><button data-range="30d">30d</button>
-            </div>
-          </div>
-          <div class="traffic-window" aria-label="Traffic time window">
-            <label>Started at<input id="traffic-start" type="datetime-local"></label><label>Ended at<input id="traffic-end" type="datetime-local"></label><button class="secondary" type="button" id="traffic-apply">Apply window</button><button class="secondary" type="button" id="traffic-clear">Clear</button><span class="traffic-window-note" id="traffic-window-note">Live window</span>
           </div>
           <div id="traffic-filter-state" hidden=""></div>
           <div class="traffic-summary" id="traffic-summary">
             Loading request history…
           </div>
           <div class="traffic-risk-legend" aria-label="Traffic risk legend">
-            <span><i class="total"></i>Total requests</span><span><i class="medium"></i>Medium requests</span><span><i class="critical"></i>Critical requests</span>
+            <span><i class="total"></i>Total requests</span><span><i class="low"></i>Low requests</span><span><i class="medium"></i>Medium requests</span><span><i class="critical"></i>Critical requests</span>
           </div>
           <div class="traffic-chart" id="traffic-chart">
             <div class="state">
@@ -187,14 +189,12 @@
                   <th class="sortable hide-mobile" data-sort="status_4xx">4xx</th>
                   <th class="sortable hide-mobile" data-sort="unique_paths">Paths</th>
                   <th>Signals</th>
-                  <th>AI anomaly</th>
-                  <th class="sortable" data-sort="threat_signal_score">Threat signal</th>
                   <th>Triage</th>
                 </tr>
               </thead>
               <tbody id="rows">
                 <tr>
-                  <td colspan="10">
+                  <td colspan="8">
                     <div class="state">
                       <strong>Loading observations…</strong>Reading aggregated intelligence from the Hub.
                     </div>
@@ -250,7 +250,11 @@
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/static/time.js"></script>
-  <script src="/static/dashboard.js"></script>
+  <script src="/static/sidebar.js"></script>
+    <!-- The Sentinel Hub dashboard is an analyst surface, not the monitored app. -->
+    <script>window.BEHAVIOR_TRACKING={enabled:false,sessionTimeoutMs:1800000};</script>
+    <script src="/static/behavior-tracker.js"></script>
+    <script src="/static/dashboard.js?v=20260921-geo-location"></script>
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="/static/map.js"></script>
 </body>

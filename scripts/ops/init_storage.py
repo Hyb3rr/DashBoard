@@ -15,6 +15,7 @@ def main() -> None:
     from app.db import migrations
     from app.db import postgres
     from app.db.market_repository import MarketRepository
+    from scripts.ops import clickhouse_migrations
 
     try:
         with postgres.transaction() as conn:
@@ -28,6 +29,7 @@ def main() -> None:
         with postgres.transaction() as conn:
             migrations.apply_after_base_schema(conn)
         MarketRepository().upsert_catalog(catalog_rows())
+        clickhouse_migrations.apply_configured()
         clickhouse.ensure_schema()
         print("Storage schema and market catalog ready")
     finally:

@@ -22,6 +22,7 @@ data/*
 !data/ai/
 data/ai/*
 !data/ai/.gitignore
+runtime/
 *.log
 *.mmdb
 
@@ -33,3 +34,9 @@ data/ai/*
 *.zip
 *.docx
 attachments/generated/
+attachments/reference/
+
+
+AGENTS.md
+.codex-runs/
+.ai/

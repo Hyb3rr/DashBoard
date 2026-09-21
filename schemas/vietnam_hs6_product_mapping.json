@@ -1,0 +1,24 @@
+{
+  "classification": "HS 2017/Combined HS H6 as returned by Comtrade",
+  "classification_search_code": "HS",
+  "source": "https://comtradeapi.un.org/files/v1/app/reference/HS.json",
+  "mapping_version": "vn-market-products-hs6-v1",
+  "products": [
+    {"product_id":"laser_plasma_cutting","hs6":["845610","845611","845612","845640","845650","845690"]},
+    {"product_id":"machining_centre_metal","hs6":["845710"]},
+    {"product_id":"lathe","hs6":["845811","845819","845891","845899"]},
+    {"product_id":"drilling_milling_metal","hs6":["845910","845921","845929","845931","845939","845940","845941","845949","845951","845959","845961","845969","845970"]},
+    {"product_id":"grinding_honing","hs6":["846011","846012","846019","846021","846022","846023","846024","846029","846031","846039","846040","846090"]},
+    {"product_id":"planing_gear_cutting","hs6":["846110","846120","846130","846140","846150","846190"]},
+    {"product_id":"press_brake_forming","hs6":["846210","846211","846219","846221","846222","846223","846224","846225","846226","846229","846231","846232","846233","846239","846241","846242","846249","846251","846259","846261","846262","846263","846269","846290","846291","846299"]},
+    {"product_id":"other_metal_forming","hs6":["846310","846320","846330","846390"]},
+    {"product_id":"cnc_router","hs6":["846520"]},
+    {"product_id":"panel_saw","hs6":["846591"]},
+    {"product_id":"planer_moulder","hs6":["846592"]},
+    {"product_id":"sanding_machine","hs6":["846593"]},
+    {"product_id":"drilling_mortising","hs6":["846595"]},
+    {"product_id":"edge_bander","hs6":["846599"],"mapping_type":"proxy","mapping_rationale":"No dedicated HS6; 846599 is other woodworking machinery."}
+  ],
+  "unmapped_catalog_code": {"product_id":"none","reason":"All 14 current sellable product groups have an explicit HS6 mapping; edge bander is explicitly marked as a proxy."},
+  "limitations": ["HS6 descriptions are customs classifications, not machine capacity or end-user demand.", "Do not sum a parent heading with its child HS6 rows.", "Classification revision must be stored with every observation; this mapping is not a cross-revision concordance."]
+}

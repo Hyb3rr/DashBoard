@@ -15,6 +15,8 @@ from typing import Any
 from .postgres import transaction
 from ..core.net_utils import candidate_networks
 
+GEO_RESOLUTION_RULESET = "geo-v5"
+
 
 def _candidates(ip: str) -> list[str]:
     address = ipaddress.ip_address(ip)
@@ -46,22 +48,38 @@ def _haversine(lat1, lon1, lat2, lon2):
 
 
 def _resolve_city(candidates, country_code):
+    def known(value):
+        return value is not None and str(value).strip().lower() not in {"", "unknown", "0", "n/a", "null"}
+
     def pick(name):
+        return next((c for c in candidates if name in str(c.get("source", "")).lower()
+                     and str(c.get("country_code", "")).upper() == country_code
+                     and known(c.get("city"))
+                     and c.get("latitude") is not None and c.get("longitude") is not None), None)
+    def coordinate_pick(name):
         return next((c for c in candidates if name in str(c.get("source", "")).lower()
                      and str(c.get("country_code", "")).upper() == country_code
                      and c.get("latitude") is not None and c.get("longitude") is not None), None)
     primary, fallback = pick("maxmind"), pick("dbip")
-    if not primary and not fallback:
+    primary_coordinates, fallback_coordinates = coordinate_pick("maxmind"), coordinate_pick("dbip")
+    if not primary and not fallback and not primary_coordinates and not fallback_coordinates:
         return {"city": None, "latitude": None, "longitude": None, "city_source": "none",
-                "city_disputed": False, "city_confidence": 0, "city_distance_km": None}
+                "city_disputed": False, "coordinate_conflict": False, "city_status": "unresolved",
+                "city_confidence": 0, "city_distance_km": None, "coordinate_granularity": "unknown"}
     chosen = primary or fallback
-    distance = _haversine(primary["latitude"], primary["longitude"], fallback["latitude"], fallback["longitude"]) if primary and fallback else None
-    disputed = distance is not None and distance > float(os.getenv("GEO_CITY_CONFLICT_KM", "50"))
-    confidence = int(chosen.get("source_confidence") or 0)
-    return {"city": chosen.get("city"), "latitude": chosen.get("latitude"), "longitude": chosen.get("longitude"),
-            "city_source": "maxmind" if primary else "dbip", "city_disputed": disputed,
+    coordinate_distance = _haversine(primary_coordinates["latitude"], primary_coordinates["longitude"], fallback_coordinates["latitude"], fallback_coordinates["longitude"]) if primary_coordinates and fallback_coordinates else None
+    coordinate_conflict = coordinate_distance is not None and coordinate_distance > float(os.getenv("GEO_CITY_CONFLICT_KM", "50"))
+    disputed = coordinate_conflict or (primary and fallback and str(primary.get("city")).strip().lower() != str(fallback.get("city")).strip().lower())
+    if disputed:
+        chosen = None
+    confidence = int(chosen.get("source_confidence") or 0) if chosen else 0
+    return {"city": chosen.get("city") if chosen else None, "latitude": chosen.get("latitude") if chosen else None,
+            "longitude": chosen.get("longitude") if chosen else None,
+            "city_source": "maxmind" if chosen is primary else "dbip" if chosen else "none", "city_disputed": disputed,
+            "coordinate_conflict": coordinate_conflict, "city_status": "disputed" if disputed else "resolved" if chosen else "unresolved",
             "city_confidence": max(20, confidence - 25) if disputed else confidence,
-            "city_distance_km": round(distance, 1) if distance is not None else None}
+            "city_distance_km": round(coordinate_distance, 1) if coordinate_distance is not None else None,
+            "coordinate_granularity": "city" if chosen else "unknown"}
 
 
 def _country_group(operational: list[dict]) -> tuple[str, list[dict]]:
@@ -79,7 +97,7 @@ def resolve_network_location(ip: str, vendor: dict | None = None, force_refresh:
     address = ipaddress.ip_address(ip)
     candidates = _candidates(str(address))
     with transaction() as conn:
-        cached = conn.execute("SELECT * FROM geo_resolutions WHERE ip=%s AND (expires_at IS NULL OR expires_at>=now())", (str(address),)).fetchone()
+        cached = conn.execute("SELECT * FROM geo_resolutions WHERE ip=%s AND ruleset_version=%s AND (expires_at IS NULL OR expires_at>=now())", (str(address), GEO_RESOLUTION_RULESET)).fetchone()
         if cached and not force_refresh:
             return _resolution(cached)
         prefixes = conn.execute("SELECT * FROM geo_prefixes WHERE active=TRUE AND network=ANY(%s::cidr[])", (candidates,)).fetchall()

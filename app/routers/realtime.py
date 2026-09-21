@@ -13,7 +13,7 @@ router = APIRouter()
 
 @router.get("/api/collector/status")
 def collector_status():
-    payload = collector.status()
+    payload = collector.shared_status()
     payload["ai_state_backend"] = "postgresql_live_only"
     return payload
 
@@ -56,6 +56,9 @@ async def realtime_stream():
     async def generate():
         iterator = bus.subscribe().__aiter__()
         try:
+            # Flush the SSE response immediately so EventSource can establish
+            # the connection without waiting for the first 15-second heartbeat.
+            yield ": connected\n\n"
             while True:
                 try:
                     event, payload = await asyncio.wait_for(iterator.__anext__(), timeout=15)

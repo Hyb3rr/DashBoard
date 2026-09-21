@@ -18,6 +18,12 @@ from app.services.profiles import refresh_due_profiles
 from scripts.ops.tor_refresh import refresh_tor_exit_list
 from scripts.market.worldbank_update import update_world_bank
 from scripts.market.comtrade_update import refresh as refresh_comtrade_mirror
+from scripts.market.country_sources import refresh_country_sources
+from scripts.market.country_product_prior import refresh as refresh_country_prior
+from app.services.industrial_demand import refresh as refresh_industrial_demand
+from app.services.city_overall_snapshot import publish_vietnam_snapshot
+from app.services.country_demand import CountryDemandService
+from app.services.retention_cleanup import run_once as run_retention_cleanup
 from scripts.geo.geography_foundation import refresh_all as refresh_geography
 from scripts.geo.osm_h3_pilot import refresh_osm_pilot
 from scripts.geo.local_evidence_refresh import refresh_local_evidence
@@ -100,8 +106,85 @@ def run_scheduler(state_path: str | Path = STATE_PATH, lock_path: str | Path = L
                 except Exception as exc:
                     result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)}
                 report["comtrade_mirror"] = result
+                if result.get("furniture_exports", {}).get("updated", 0):
+                    try:
+                        result["country_prior"] = refresh_country_prior()
+                    except Exception as exc:
+                        result["country_prior"] = {"status": "failed", "error": type(exc).__name__}
                 item["status"] = result.get("status", "failed")
                 if result.get("status") == "updated":
+                    item["last_success_at"] = now.isoformat()
+        if os.getenv("MARKET_SOURCES_REFRESH", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            item = state.setdefault("market_sources", {})
+            item.setdefault("interval_days", float(os.getenv("MARKET_SOURCES_REFRESH_DAYS", "30")))
+            if _due(item, now):
+                item["last_checked_at"] = now.isoformat()
+                try:
+                    source_result = refresh_country_sources(DATA_DIR / "market_sources", now=now)
+                    result = {"sources": source_result}
+                    if source_result.get("status") in {"updated", "partial"}:
+                        result["country_prior"] = refresh_country_prior()
+                        result["status"] = result["country_prior"].get("status", "updated")
+                    else:
+                        result["status"] = source_result.get("status", "failed")
+                except Exception as exc:
+                    result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)[:240]}
+                report["market_sources"] = result
+                item["status"] = result.get("status", "failed")
+                if result.get("status") in {"updated", "partial", "completed"}:
+                    item["last_success_at"] = now.isoformat()
+        if os.getenv("INDUSTRIAL_DEMAND_REFRESH", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            item = state.setdefault("industrial_demand", {})
+            item.setdefault("interval_days", float(os.getenv("INDUSTRIAL_DEMAND_REFRESH_DAYS", "30")))
+            if _due(item, now):
+                item["last_checked_at"] = now.isoformat()
+                try:
+                    result = refresh_industrial_demand(MarketRepository(), country_code="VN", now=now)
+                except Exception as exc:
+                    result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)[:240]}
+                report["industrial_demand"] = result
+                item["status"] = result.get("status", "failed")
+                if result.get("status") == "published":
+                    item["last_success_at"] = now.isoformat()
+        if os.getenv("CITY_OVERALL_REFRESH", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            item = state.setdefault("city_overall", {})
+            item.setdefault("interval_days", 1)
+            if _due(item, now):
+                item["last_checked_at"] = now.isoformat()
+                try:
+                    result = publish_vietnam_snapshot(MarketRepository(), now=now)
+                except Exception as exc:
+                    result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)[:240]}
+                report["city_overall"] = result
+                item["status"] = result.get("status", "failed")
+                if result.get("status") == "published":
+                    item["last_success_at"] = now.isoformat()
+        if os.getenv("COUNTRY_DEMAND_REFRESH", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            item = state.setdefault("country_demand", {})
+            item.setdefault("interval_days", 1)
+            if _due(item, now):
+                item["last_checked_at"] = now.isoformat()
+                period_results = {}
+                demand_service = CountryDemandService()
+                demand_repository = MarketRepository()
+                for period in ("7d", "30d", "90d"):
+                    try:
+                        period_results[period] = demand_service.refresh(demand_repository, now=now, period=period)
+                    except Exception as exc:
+                        period_results[period] = {
+                            "status": "failed",
+                            "error": type(exc).__name__,
+                            "message": str(exc)[:240],
+                        }
+                published = [result for result in period_results.values() if result.get("status") == "published"]
+                failed = [result for result in period_results.values() if result.get("status") == "failed"]
+                result = {
+                    "status": "failed" if failed and not published else ("published" if published else "no_data"),
+                    "periods": period_results,
+                }
+                report["country_demand"] = result
+                item["status"] = result.get("status", "failed")
+                if published:
                     item["last_success_at"] = now.isoformat()
         if os.getenv("GEOGRAPHY_REFRESH", "false").strip().lower() in {"1", "true", "yes", "on"}:
             item = state.setdefault("geography", {})
@@ -152,6 +235,11 @@ def run_scheduler(state_path: str | Path = STATE_PATH, lock_path: str | Path = L
                 report["intel"] = run_due_sources(now)
             except Exception as exc:
                 report["intel"] = {"status": "failed", "error": type(exc).__name__}
+        if os.getenv("RETENTION_CLEANUP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                report["retention"] = run_retention_cleanup(now=now)
+            except Exception as exc:
+                report["retention"] = {"status": "failed", "error": type(exc).__name__, "message": str(exc)[:240]}
         state["last_run_at"] = now.isoformat()
         temporary = state_path.with_name(f".{state_path.name}.tmp")
         temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")

@@ -1,5 +1,5 @@
 
-const initialTheme=localStorage.getItem('sentinel-theme')||'dark';document.documentElement.dataset.theme=initialTheme;
+const initialTheme=localStorage.getItem('sentinel-theme')||'dark';document.documentElement.dataset.theme=initialTheme;const requestedIp=new URLSearchParams(window.location.search).get('ip');
 let ips=[],ipSummary=null,sortField='last_seen',sortDir='desc',lastFocus=null;
 let ipPage=1,ipPageSize=50,ipTotalPages=1,ipCursor=0,deltaBusy=false,realtimeFlushTimer=null,realtimeFlushRunning=false,realtimeFlushPending=false,collectorState='unknown';
 let ipsReady=false;
@@ -20,15 +20,16 @@ const registrationOf=x=>networkLocation(x).registration&&typeof networkLocation(
 const locationDisputed=x=>Boolean(networkLocation(x).disputed??x?.location_disputed);
 const allocationPattern=x=>networkLocation(x).allocation_pattern||'unknown';
 const allocationLabel=value=>({cross_region_allocation:'cross-region allocation',consistent:'registration aligned',registration_estimate_only:'RIR estimate only',registration_unavailable:'RIR unavailable',no_operational_evidence:'no operational evidence',unknown:'allocation unknown'})[value]||String(value||'unknown').replaceAll('_',' ');
+const countryNameFromCode=code=>{try{return code&&code!=='—'?new Intl.DisplayNames(['en'],{type:'region'}).of(String(code).toUpperCase()):''}catch(_){return ''}};
+const topCountryCandidate=location=>{const candidates=location?.canonical_resolution?.candidates?.country;return Array.isArray(candidates)&&candidates[0]?.value?String(candidates[0].value).toUpperCase():''};
 function locationCell(x){
-  const loc=networkLocation(x),reg=registrationOf(x),country=loc.country||x.country||'Unknown',code=loc.country_code||x.country_code||'—',disputed=locationDisputed(x),pattern=allocationPattern(x);
-  const city=loc.city||x.city||loc.geo?.city?.value||'';
-  const regCode=reg?.country_code||'—',regSource=reg?.source||'RIR';
-  const regContext=reg?`<span class="geo-chip registration" title="Registration/ownership context; not an operational location vote">RIR ${esc(regCode)}</span>`:'';
-  const countryConflict=Boolean(loc.country_conflict),cityConflict=Boolean(loc.city_conflict);
-  const disputeChip=disputed||countryConflict||cityConflict?`<span class="geo-chip disputed" title="${countryConflict?'Country conflict':cityConflict?'City conflict':'Operational location sources disagree'}">${countryConflict?'country conflict':cityConflict?'city conflict':'geo dispute'}</span>`:'';
-  const allocation=reg&&pattern==='cross_region_allocation'?`<span class="allocation" title="Operational Geo differs from RIR registration; this alone is not a dispute">${esc(allocationLabel(pattern))}</span>`:'';
-  return `<div class="location-cell"><div class="location-primary"><strong title="${esc(country)}">${esc(country)}</strong>${disputeChip}</div><span class="secondary-text">${city?`${esc(city)} · `:''}${esc(code)}</span>${reg?`<div class="location-context">${regContext}<span>${esc(regSource)}</span>${allocation}</div>`:''}</div>`;
+  const loc=networkLocation(x),canonical=loc.canonical_resolution||{},resolved=canonical.resolved||{},statuses=canonical.status||{},reg=registrationOf(x),topCountry=topCountryCandidate(loc),code=resolved.country_code||loc.country_code||x.country_code||topCountry||'—';
+  const rawCountry=loc.country||x.country, country=countryNameFromCode(code)||((rawCountry&&String(rawCountry).toLowerCase()!=='unknown')?rawCountry:'Unknown'),pattern=allocationPattern(x);
+  const city=resolved.city||loc.city||x.city||loc.geo?.city?.value||'';
+  const statusChip=(label,status)=>status&&status!=='resolved'?`<span class="geo-chip ${status==='disputed'?'disputed':'probable'}" title="${esc(label)} status">${esc(label)} ${esc(status)}</span>`:'';
+  const ranked=[['country',statuses.country,3],['city',statuses.city,2],['coordinates',statuses.coordinates,1]].filter(([,status])=>status&&status!=='resolved').sort((a,b)=>b[2]-a[2]);
+  const topTag=ranked.length?statusChip(ranked[0][0],ranked[0][1]):'';
+  return `<div class="location-cell"><div class="location-primary"><strong title="${esc(country)}">${esc(country)}</strong>${topTag}</div><span class="secondary-text">${city?`${esc(city)} · `:''}${esc(code)}</span></div>`;
 }
 function geoSourceRows(location){
   const breakdown=location?.confidence_breakdown||{},sources=Array.isArray(breakdown.sources)?breakdown.sources:[];
@@ -36,31 +37,42 @@ function geoSourceRows(location){
   return sources.map(item=>{const registration=item.scope==='registration';return `<div class="geo-source-row ${registration?'registration':''}"><span>${esc(item.source||'unknown')} · ${esc(item.country_code||'—')} · ${esc(item.scope||'network')}${registration?' · excluded from operational vote':''}</span><strong>${item.confidence==null?'—':`${num(item.confidence)}%`}</strong></div>`}).join('');
 }
 function geoSummary(d){
-  const loc=networkLocation(d),reg=registrationOf(d),disputed=locationDisputed(d),pattern=allocationPattern(d),country=loc.country||d.country||'Unknown',code=loc.country_code||d.country_code||'—',scope=loc.scope||d.location_scope||'unknown';
-  const city=loc.city||d.city||'',lat=loc.latitude??d.latitude,lon=loc.longitude??d.longitude;
+  const loc=networkLocation(d),canonical=loc.canonical_resolution||{},resolved=canonical.resolved||{},statuses=canonical.status||{},reg=registrationOf(d),disputed=locationDisputed(d),pattern=allocationPattern(d),topCountry=topCountryCandidate(loc),code=resolved.country_code||loc.country_code||d.country_code||topCountry||'—',rawCountry=loc.country||d.country,country=countryNameFromCode(code)||((rawCountry&&String(rawCountry).toLowerCase()!=='unknown')?rawCountry:'Unknown'),scope=loc.scope||d.location_scope||'unknown';
+  const city=resolved.city||loc.city||d.city||'',lat=canonical.status?.coordinates==='resolved'?resolved.latitude:null,lon=canonical.status?.coordinates==='resolved'?resolved.longitude:null;
   const coordStr=lat!=null&&lon!=null?`${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}`:'—';
   const mapUrl=lat!=null&&lon!=null?`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}&zoom=10`:null;
-  let note='Operational Geo is resolved from location-capable sources. RIR/WHOIS registration is shown separately and does not vote against operational Geo.';
+  let note='Operational country, city, and coordinates are resolved independently. RIR/WHOIS registration is shown separately and does not vote against operational Geo.';
   let tone='';
-  if(loc.country_conflict){note=`Country conflict ${String(loc.country_conflict_severity||'').toUpperCase()}. SAPICS user-country is primary; other datasets disagree.`;tone='warning'}
+  if(loc.country_conflict&&loc.location_status==='resolved_with_conflict'){note=`Country source disagreement ${String(loc.country_conflict_severity||'').toUpperCase()}. Operational country is the majority result.`}
+  else if(loc.country_conflict){note=`Country conflict ${String(loc.country_conflict_severity||'').toUpperCase()}. No clear operational majority.`;tone='warning'}
   else if(loc.city_conflict){note=`City conflict ${String(loc.city_conflict_severity||'').toUpperCase()}. Coordinate distance: ${loc.geo?.city?.distance_km??'—'} km.`;tone='warning'}
   else if(disputed){note='Operational location sources disagree closely enough to mark this result disputed. RIR/WHOIS registration is still excluded from that dispute decision.';tone='warning'}
   else if(pattern==='cross_region_allocation'&&reg){note=`Operational Geo ${code} differs from RIR registration ${reg.country_code||'—'}. This is a cross-region allocation pattern and is not itself a geo dispute.`}
   else if(pattern==='registration_estimate_only'){note='No operational location evidence is available, so the resolver is using RIR registration only as a weak fallback estimate.';tone='warning'}
   const regText=reg?`${reg.country||reg.country_code||'Unknown'} (${reg.country_code||'—'}) · ${reg.source||'RIR'}`:'Unavailable';
+  const statusBadge=(label,status)=>`<span class="geo-chip ${status==='disputed'?'disputed':status==='probable'?'probable':status==='unknown'?'unknown':'resolved'}">${esc(label)} ${esc(status||'unknown')}</span>`;
+  const statusRow=`<div class="geo-summary-item geo-status-summary"><span>Independent resolution status</span><strong>${statusBadge('country',statuses.country)} ${statusBadge('city',statuses.city)} ${statusBadge('coordinates',statuses.coordinates)}</strong></div>`;
   const cityRow=city?`<div class="geo-summary-item"><span>City</span><strong>${esc(city)}</strong></div>`:'';
   const coordRow=`<div class="geo-summary-item"><span>Coordinates</span><strong>${mapUrl?`<a href="${mapUrl}" target="_blank" rel="noopener" style="color:var(--radar);text-decoration:none">${coordStr} ↗</a>`:coordStr}</strong></div>`;
   const ip2=loc.ip2region,ip2Text=ip2&&(ip2.city||ip2.region||ip2.isp)?`${ip2.city||'Unknown'}${ip2.region?` · ${ip2.region}`:''}${ip2.isp?` · ${ip2.isp}`:''}`:null;
-  return `<div class="geo-summary"><div class="geo-summary-grid">${cityRow}${coordRow}<div class="geo-summary-item"><span>Operational country</span><strong>${esc(country)} (${esc(code)})</strong></div>${ip2Text?`<div class="geo-summary-item"><span>ip2region context</span><strong>${esc(ip2Text)}</strong></div>`:''}<div class="geo-summary-item"><span>RIR registration</span><strong>${esc(regText)}</strong></div><div class="geo-summary-item"><span>Allocation pattern</span><strong>${esc(allocationLabel(pattern))}</strong></div><div class="geo-summary-item"><span>Location scope</span><strong>${esc(scope)}</strong></div><div class="geo-summary-item"><span>Operational sources</span><strong>${esc((loc.sources||[]).join(', ')||'none')}</strong></div></div><div class="geo-callout ${tone}">${esc(note)}</div><div class="geo-source-list">${geoSourceRows(loc)}</div></div>`;
+  return `<div class="geo-summary"><div class="geo-summary-grid">${statusRow}${cityRow}${coordRow}<div class="geo-summary-item"><span>Operational country</span><strong>${esc(country)} (${esc(code)})</strong></div>${ip2Text?`<div class="geo-summary-item"><span>ip2region context</span><strong>${esc(ip2Text)}</strong></div>`:''}<div class="geo-summary-item"><span>RIR registration</span><strong>${esc(regText)}</strong></div><div class="geo-summary-item"><span>Allocation pattern</span><strong>${esc(allocationLabel(pattern))}</strong></div><div class="geo-summary-item"><span>Location scope</span><strong>${esc(scope)}</strong></div><div class="geo-summary-item"><span>Operational sources</span><strong>${esc((loc.sources||[]).join(', ')||'none')}</strong></div></div><div class="geo-callout ${tone}">${esc(note)}</div><div class="geo-source-list">${geoSourceRows(loc)}</div></div>`;
 }
+let lastClassificationRenderKey='';
 function renderClassificationAnalytics(){
-  const counts=ipSummary?.classification||{critical:0,medium:0,low:0,good:0,unknown:0};
+  const allCounts=ipSummary?.classification||{critical:0,medium:0,low:0,good:0,unknown:0};
   const items=[['critical','Critical','var(--critical)'],['medium','Medium','var(--watch)'],['low','Low','var(--low)'],['good','Good','var(--stable)'],['unknown','Unclassified','var(--tertiary)']];
+  const activeClassification=$('classification')?.value||'';
+  const counts=activeClassification?Object.fromEntries(items.map(([key])=>[key,key===activeClassification?Number(allCounts[key]||0):0])):allCounts;
   const total=items.reduce((sum,[key])=>sum+Number(counts[key]||0),0),radius=42,circumference=2*Math.PI*radius;
   let offset=0;
   const arcs=items.map(([key,label,color])=>{const value=Number(counts[key]||0),length=total?value/total*circumference:0,arc=`<circle cx="50" cy="50" r="${radius}" fill="none" stroke="${color}" stroke-width="12" stroke-dasharray="${length} ${circumference-length}" stroke-dashoffset="-${offset}" transform="rotate(-90 50 50)"></circle>`;offset+=length;return arc}).join('');
-  const legend=items.map(([key,label])=>`<span><i class="donut-dot ${key}"></i><b>${label}</b><em>${num(counts[key]||0)}</em></span>`).join('');
+  const renderKey=`${items.map(([key])=>Number(counts[key]||0)).join(',')}|${activeClassification}`;
+  if(renderKey===lastClassificationRenderKey)return;
+  lastClassificationRenderKey=renderKey;
+  const legend=items.map(([key,label])=>`<div class="donut-entry${activeClassification===key?' active':''}"><i class="donut-dot ${key}"></i><b>${label}</b><em>${num(counts[key]||0)}</em><span class="donut-actions"><button type="button" class="donut-action" data-classification-filter="${key}"${activeClassification===key?' aria-pressed="true"':''}>Filter</button><button type="button" class="donut-action clear" data-classification-clear="${key}"${activeClassification!==key?' disabled':''}>Clear</button></span></div>`).join('');
   $('classification-donut').innerHTML=`<div class="donut-visual"><svg viewBox="0 0 100 100" role="img" aria-label="Classification breakdown">${total?`<circle cx="50" cy="50" r="${radius}" fill="none" stroke="var(--raised)" stroke-width="12"></circle>${arcs}`:'<circle cx="50" cy="50" r="42" fill="none" stroke="var(--raised)" stroke-width="12"></circle>'}</svg><strong>${num(total)}</strong><small>IPs</small></div><div class="donut-legend">${legend}</div>`;
+  $('classification-donut').querySelectorAll('[data-classification-filter]').forEach(button=>button.addEventListener('click',()=>{const value=button.dataset.classificationFilter;$('classification').value=value;setClassificationTrafficFilter(value);ipPage=1;loadIpSnapshot(true);loadTraffic(true)}));
+  $('classification-donut').querySelectorAll('[data-classification-clear]').forEach(button=>button.addEventListener('click',()=>{if(button.disabled)return;$('classification').value='';setClassificationTrafficFilter('');ipPage=1;loadIpSnapshot(true);loadTraffic(true)}));
 }
 function renderAnalytics(){
   if(ipsReady)renderClassificationAnalytics();
@@ -69,15 +81,33 @@ function trafficTime(value){return window.formatVnTime(value)}
 function trafficClock(value){return window.formatVnTime(value)}
 function seenTime(value){return window.formatVnTime(value)}
 const TRAFFIC_WINDOW_KEY='hub:v3:traffic-window';let trafficRange='1d',trafficStart='',trafficEnd='',trafficFilterType='',trafficFilterValue='',trafficExclude=false;
-function localIso(value){return value?new Date(value).toISOString():''}
-function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
+const mapRangeToTrafficRange=range=>range==='24h'?'1d':range;
+const trafficRangeToMapRange=range=>range==='1d'?'24h':range;
+const timeRangeLabels={'30m':'Last 30 minutes','1h':'Last 1 hour','6h':'Last 6 hours','12h':'Last 12 hours','1d':'Last 24 hours','3d':'Last 3 days','7d':'Last 7 days','30d':'Last 30 days'};
+function localIso(value){if(!value)return '';const normalized=String(value).trim().replace(' ','T');const d=new Date(normalized);return Number.isNaN(d.getTime())?'':d.toISOString()}
+function localInputValue(iso){const d=new Date(iso);if(Number.isNaN(d.getTime()))return '';const pad=v=>String(v).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`}
 function saveTrafficWindow(){try{sessionStorage.setItem(TRAFFIC_WINDOW_KEY,JSON.stringify({range:trafficRange,start:trafficStart,end:trafficEnd,filterType:trafficFilterType,filterValue:trafficFilterValue,exclude:trafficExclude}))}catch(_){} }
 function restoreTrafficWindow(){try{const saved=JSON.parse(sessionStorage.getItem(TRAFFIC_WINDOW_KEY)||'null');if(saved){trafficRange=saved.range||trafficRange;trafficStart=saved.start||'';trafficEnd=saved.end||'';trafficFilterType=saved.filterType||'';trafficFilterValue=saved.filterValue||'';trafficExclude=Boolean(saved.exclude)}}catch(_){} }
-function syncTrafficInputs(start,end){const startInput=$('traffic-start'),endInput=$('traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end);$('traffic-window-note').textContent=trafficStart||trafficEnd?'Custom window':'Live window'}
-function filterLabel(){return trafficFilterType==='country'?'Country':trafficFilterType==='path'?'Path':'IP'}
+function syncTimePickerUi(){const custom=Boolean(trafficStart||trafficEnd),label=$('time-picker-label'),summary=$('time-picker-summary'),note=$('traffic-window-note');if(label)label.textContent=custom?'Custom range':(timeRangeLabels[trafficRange]||'Last 24 hours');if(summary)summary.textContent=custom?'Custom range: choose a start and end time':'Select a preset or choose a custom start and end time';if(note)note.textContent=custom?'Custom window':'Live window';document.querySelectorAll('#time-picker-presets button').forEach(button=>button.classList.toggle('active',!custom&&mapRangeToTrafficRange(button.dataset.range)===trafficRange))}
+function syncTrafficInputs(start,end){const startInput=$('traffic-start'),endInput=$('traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end);syncTimePickerUi();window.syncDashboardCalendar?.()}
+function filterLabel(){return trafficFilterType==='country'?'Country':trafficFilterType==='path'?'Path':trafficFilterType==='classification'?'Classification':'IP'}
 function renderTrafficFilter(data){const state=$('traffic-filter-state'),filter=data.filter||null;if(!filter?.type){state.hidden=true;state.innerHTML='';return}state.hidden=false;state.innerHTML=`<strong>${filterLabel()} ${filter.exclude?'≠':'='}</strong><span title="${esc(filter.value)}">${esc(filter.value)}</span><button class="secondary" type="button" id="traffic-filter-clear">Clear filter</button>`;state.querySelector('button').addEventListener('click',clearTrafficFilter)}
 function applyTrafficFilter(type,value,exclude){trafficFilterType=type;trafficFilterValue=value;trafficExclude=Boolean(exclude);saveTrafficWindow();loadTraffic(true)}
-function clearTrafficFilter(){trafficFilterType='';trafficFilterValue='';trafficExclude=false;saveTrafficWindow();loadTraffic(true)}
+function clearTrafficFilter(){
+  const wasClassification=trafficFilterType==='classification';
+  trafficFilterType='';trafficFilterValue='';trafficExclude=false;
+  if(wasClassification&&$('classification')){
+    $('classification').value='';
+    document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.remove('selected'));
+    renderClassificationAnalytics();
+  }
+  saveTrafficWindow();loadTraffic(true);
+}
+function setClassificationTrafficFilter(value){
+  if(value){trafficFilterType='classification';trafficFilterValue=value;trafficExclude=false}
+  else if(trafficFilterType==='classification'){trafficFilterType='';trafficFilterValue='';trafficExclude=false}
+  saveTrafficWindow();
+}
 function renderTraffic(data){
   let series=(data.series||[]).filter(x=>x.timestamp),chart=$('traffic-chart');
   $('traffic-bucket').textContent=data.bucket||'request buckets';
@@ -92,14 +122,14 @@ function renderTraffic(data){
     const max=Math.max(1,...series.map(x=>Number(x.requests||0)));
     const xFor=t=>padL+Math.max(0,Math.min(1,(new Date(t).getTime()-windowStart)/rangeMs))*innerW;
     const yFor=n=>padT+innerH-(Number(n||0)/max)*innerH;
-    const pointValues=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(x.requests).toFixed(1)}`);const mediumPoints=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(riskAt(x.timestamp).medium_requests).toFixed(1)}`);const criticalPoints=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(riskAt(x.timestamp).critical_requests).toFixed(1)}`);const lastPoint=series[series.length-1];if(new Date(lastPoint.timestamp).getTime()<windowEnd){pointValues.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`);mediumPoints.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`);criticalPoints.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`)}const points=pointValues.join(' '),mediumLine=mediumPoints.join(' '),criticalLine=criticalPoints.join(' ');
+    const pointValues=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(x.requests).toFixed(1)}`);const lowPoints=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(riskAt(x.timestamp).low_requests).toFixed(1)}`);const mediumPoints=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(riskAt(x.timestamp).medium_requests).toFixed(1)}`);const criticalPoints=series.map(x=>`${xFor(x.timestamp).toFixed(1)},${yFor(riskAt(x.timestamp).critical_requests).toFixed(1)}`);const lastPoint=series[series.length-1];if(new Date(lastPoint.timestamp).getTime()<windowEnd){pointValues.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`);lowPoints.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`);mediumPoints.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`);criticalPoints.push(`${xFor(windowEnd).toFixed(1)},${yFor(0).toFixed(1)}`)}const points=pointValues.join(' '),lowLine=lowPoints.join(' '),mediumLine=mediumPoints.join(' '),criticalLine=criticalPoints.join(' ');
     const area=`${padL},${padT+innerH} ${points} ${xFor(windowEnd)},${padT+innerH}`;
     const grid=[0,.25,.5,.75,1].map(r=>{const y=padT+innerH-r*innerH;return `<line class="traffic-grid" x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}"></line><text class="traffic-axis" x="${padL-9}" y="${y+3}" text-anchor="end">${num(Math.round(max*r))}</text>`}).join('');
     const axis=[{x:padL,t:windowStart},{x:padL+innerW/2,t:windowStart+rangeMs/2},{x:w-padR,t:windowEnd}].map((a,i)=>`<text class="traffic-axis" x="${a.x}" y="${h-8}" text-anchor="${i===0?'start':i===2?'end':'middle'}">${i===2&&!trafficEnd?'Now · ':''}${trafficClock(a.t)}</text>`).join('');
     const hitWidth=Math.max(8,Math.min(34,innerW/Math.max(series.length,1)));
     const hits=series.map((x,i)=>`<rect class="traffic-hit" data-index="${i}" x="${Math.max(padL,xFor(x.timestamp)-hitWidth/2)}" y="${padT}" width="${hitWidth}" height="${innerH}" fill="transparent"></rect>`).join('');
-    chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<line class="traffic-now-line" x1="${w-padR}" y1="${padT}" x2="${w-padR}" y2="${padT+innerH}"></line><polygon class="traffic-area" points="${area}"></polygon><polyline class="traffic-line" points="${points}"></polyline><polyline class="traffic-line traffic-line-medium" points="${mediumLine}"></polyline><polyline class="traffic-line traffic-line-critical" points="${criticalLine}"></polyline><line id="traffic-guide-line" class="traffic-guide-line" style="display:none"></line><circle id="traffic-guide-dot" class="traffic-guide-dot" style="display:none"></circle>${axis}${hits}</svg><div class="traffic-tooltip" id="traffic-tooltip"></div>`;
-    const tooltip=$('traffic-tooltip');chart.querySelectorAll('.traffic-hit').forEach(hit=>{hit.addEventListener('mouseenter',event=>{const item=series[Number(event.currentTarget.dataset.index)],risk=riskAt(item.timestamp),rect=chart.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;const cx=xFor(item.timestamp),cy=yFor(item.requests),req=Number(item.requests||0),isPeak=req>=max&&max>0;const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine&&guideDot){guideLine.setAttribute('x1',cx.toFixed(1));guideLine.setAttribute('y1',padT);guideLine.setAttribute('x2',cx.toFixed(1));guideLine.setAttribute('y2',padT+innerH);guideLine.classList.toggle('at-peak',isPeak);guideLine.style.display='block';guideDot.setAttribute('cx',cx.toFixed(1));guideDot.setAttribute('cy',cy.toFixed(1));guideDot.setAttribute('r',isPeak?6:4.5);guideDot.classList.toggle('at-peak',isPeak);guideDot.style.display='block'};tooltip.innerHTML=`<div class="time">${trafficTime(item.timestamp)}${isPeak?' <span style="color:var(--critical);font-weight:700">· PEAK</span>':''}</div><div class="value"><span>Total</span><strong>${num(item.requests||0)}</strong></div><div class="value"><span style="color:var(--watch)">Medium</span><strong>${num(risk.medium_requests||0)}</strong></div><div class="value"><span style="color:var(--critical)">Critical</span><strong>${num(risk.critical_requests||0)}</strong></div>`;tooltip.style.left=`${Math.max(8,Math.min(rect.width-165,x+12))}px`;tooltip.style.top=`${Math.max(8,y-95)}px`;tooltip.classList.add('show')});hit.addEventListener('mouseleave',()=>{tooltip.classList.remove('show');const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine)guideLine.style.display='none';if(guideDot)guideDot.style.display='none'})});
+    chart.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<line class="traffic-now-line" x1="${w-padR}" y1="${padT}" x2="${w-padR}" y2="${padT+innerH}"></line><polygon class="traffic-area" points="${area}"></polygon><polyline class="traffic-line" points="${points}"></polyline><polyline class="traffic-line traffic-line-low" points="${lowLine}"></polyline><polyline class="traffic-line traffic-line-medium" points="${mediumLine}"></polyline><polyline class="traffic-line traffic-line-critical" points="${criticalLine}"></polyline><line id="traffic-guide-line" class="traffic-guide-line" style="display:none"></line><circle id="traffic-guide-dot" class="traffic-guide-dot" style="display:none"></circle>${axis}${hits}</svg><div class="traffic-tooltip" id="traffic-tooltip"></div>`;
+    const tooltip=$('traffic-tooltip');chart.querySelectorAll('.traffic-hit').forEach(hit=>{hit.addEventListener('mouseenter',event=>{const item=series[Number(event.currentTarget.dataset.index)],risk=riskAt(item.timestamp),rect=chart.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;const cx=xFor(item.timestamp),cy=yFor(item.requests),req=Number(item.requests||0),isPeak=req>=max&&max>0;const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine&&guideDot){guideLine.setAttribute('x1',cx.toFixed(1));guideLine.setAttribute('y1',padT);guideLine.setAttribute('x2',cx.toFixed(1));guideLine.setAttribute('y2',padT+innerH);guideLine.classList.toggle('at-peak',isPeak);guideLine.style.display='block';guideDot.setAttribute('cx',cx.toFixed(1));guideDot.setAttribute('cy',cy.toFixed(1));guideDot.setAttribute('r',isPeak?6:4.5);guideDot.classList.toggle('at-peak',isPeak);guideDot.style.display='block'};tooltip.innerHTML=`<div class="time">${trafficTime(item.timestamp)}${isPeak?' <span style="color:var(--critical);font-weight:700">· PEAK</span>':''}</div><div class="value"><span>Total</span><strong>${num(item.requests||0)}</strong></div><div class="value"><span style="color:var(--low)">Low</span><strong>${num(risk.low_requests||0)}</strong></div><div class="value"><span style="color:var(--watch)">Medium</span><strong>${num(risk.medium_requests||0)}</strong></div><div class="value"><span style="color:var(--critical)">Critical</span><strong>${num(risk.critical_requests||0)}</strong></div>`;tooltip.style.left=`${Math.max(8,Math.min(rect.width-165,x+12))}px`;tooltip.style.top=`${Math.max(8,y-110)}px`;tooltip.classList.add('show')});hit.addEventListener('mouseleave',()=>{tooltip.classList.remove('show');const guideLine=chart.querySelector('#traffic-guide-line'),guideDot=chart.querySelector('#traffic-guide-dot');if(guideLine)guideLine.style.display='none';if(guideDot)guideDot.style.display='none'})});
   }
   const actions=(type,value)=>value?`<span class="row-actions"><button type="button" data-traffic-action="filter" data-filter-type="${type}" data-filter-value="${esc(value)}">Filter</button><button type="button" data-traffic-action="exclude" data-filter-type="${type}" data-filter-value="${esc(value)}">Exclude</button></span>`:'';
   const renderRows=(items,displayFn,type,valueFn=displayFn)=>{const maxValue=Math.max(1,...items.map(x=>Number(x.requests||0)));return items.length?items.map(x=>{const display=displayFn(x),value=valueFn(x),req=Number(x.requests||0),pct=Math.max(3,(req/maxValue)*100);return `<div class="traffic-row"><span class="name" title="${esc(display)}">${esc(display)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="count">${num(x.requests)}</span>${actions(type,value)}</div>`}).join(''):'<div class="state">No data.</div>'};
@@ -117,8 +147,98 @@ async function loadTraffic(force=false){
     const data=await response.json();syncTrafficInputs(data.start,data.end);saveTrafficWindow();renderTraffic(data);await loadIpSummary(data.start,data.end);
   }catch(error){$('traffic-chart').innerHTML=`<div class="state"><strong>Traffic analytics unavailable.</strong>${esc(error.message||'Request failed')}</div>`}
 }
-function applyTrafficWindow(){trafficStart=$('traffic-start').value;trafficEnd=$('traffic-end').value;if(trafficStart&&trafficEnd&&new Date(trafficEnd)<=new Date(trafficStart)){notify('End must be after start');return}saveTrafficWindow();loadTraffic(true)}
-function clearTrafficWindow(){trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';trafficRange='1d';document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item.dataset.range===trafficRange));saveTrafficWindow();loadTraffic(true)}
+let countryDemandPeriod='30d';
+let countryDemandCountries=[];
+const countryDemandScope=()=>document.querySelector('#country-demand-scope');
+function renderCountryDemandScope(countries){
+  const select=countryDemandScope();if(!select)return;
+  const current=select.value||'all';
+  select.innerHTML='<option value="all">All countries</option>'+countries.map(row=>`<option value="${esc(row.country_code||'')}">${esc(row.country_name||row.country_code||'Unknown')}</option>`).join('');
+  select.value=countries.some(row=>String(row.country_code||'')===current)?current:'all';
+}
+function renderCountryDemandCities(code,cities){
+  const table=$('country-demand-table');
+  if(!cities.length){table.classList.add('state');table.innerHTML='<div class="state"><strong>No city opportunity data yet.</strong><span>This country has no published city-level market summary.</span></div>';return;}
+  table.classList.remove('state');
+  table.innerHTML=`<table class="country-demand-table"><thead><tr><th>City</th><th>Score</th><th>Percentile</th><th>Track</th><th>Raw score</th></tr></thead><tbody>${cities.map(row=>`<tr><td><strong>${esc(row.city_name||row.city_id||'Unknown')}</strong><small>${esc(row.area_type||'city')}</small></td><td class="opportunity-score">${row.city_calibrated_score==null?'—':esc(Number(row.city_calibrated_score).toFixed(1))}</td><td>${row.city_percentile==null?'—':esc(Number(row.city_percentile).toFixed(1))}</td><td>${esc(String(row.track||'unknown').replaceAll('_',' '))}</td><td>${row.city_raw_score==null?'—':esc(Number(row.city_raw_score).toFixed(1))}</td></tr>`).join('')}</tbody></table>`;
+}
+// The VN selector uses the overall province/city evidence read model. Keep
+// the legacy track summary path for countries without that read model.
+async function loadCountryDemandCities(code){
+  const table=$('country-demand-table');table.classList.add('state');table.innerHTML='<div class="state">Loading city opportunities…</div>';
+  try{
+    const [regionResponse,mapResponse]=await Promise.all([fetch(apiUrl(`/api/regions/${encodeURIComponent(code)}`),{cache:'no-store'}),fetch(apiUrl(`/api/map/country/${encodeURIComponent(code)}?range=30d`),{cache:'no-store'})]);
+    if(!regionResponse.ok)throw new Error(`HTTP ${regionResponse.status}`);
+    const data=await regionResponse.json(),map=mapResponse.ok?await mapResponse.json():{cities:[]};
+    const profileRows=(data.province_profile?.provinces||[]).map(row=>{const score=row.city_overall_opportunity||{};return {city_id:row.geo_unit_id,city_name:row.province_name,market_score:score.score??null,data_coverage:score.evidence_coverage==null?null:Number(score.evidence_coverage)/100}});
+    const signals=profileRows.length?profileRows:(data.city_opportunities||[]).map(row=>({city_id:row.city_id,city_name:row.city_name||row.city_id,market_score:row.city_calibrated_score,data_coverage:null}));
+    const traffic=new Map((map.cities||[]).filter(row=>row.city_id).map(row=>[String(row.city_id),row]));
+    // Market rows come only from the canonical region/city read model. Map
+    // locality names are traffic context and must never create market rows.
+    const merged=[...signals];
+    if(!merged.length){table.innerHTML='<div class="state"><strong>No city opportunity data yet.</strong><span>This country has no published city-level market summary.</span></div>';return}
+    merged.sort((a,b)=>(b.market_score??-1)-(a.market_score??-1)||String(a.city_name).localeCompare(String(b.city_name)));table.classList.remove('state');table.innerHTML=`<table class="country-demand-table"><thead><tr><th>City</th><th>Market opportunity</th><th>Observed users</th><th>Requests · 30d</th><th>Coverage</th></tr></thead><tbody>${merged.map(row=>{const t=traffic.get(String(row.city_id))?.threat||{};return `<tr><td><strong>${esc(row.city_name)}</strong><small>city overall evidence</small></td><td class="opportunity-score">${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td><td>${t.observed_ips==null?'0':num(t.observed_ips)}</td><td>${t.requests==null?'0':num(t.requests)}</td><td>${row.data_coverage==null?'—':esc(`${(Number(row.data_coverage)*100).toFixed(0)}%`)}</td></tr>`}).join('')}</tbody></table>`
+  }catch(error){table.innerHTML=`<div class="state"><strong>City opportunities unavailable.</strong><span>${esc(error.message||'Request failed')}</span></div>`}
+}
+async function loadCountryDemandSignals(){
+  const table=$('country-demand-table');
+  if(!table)return;
+  table.innerHTML='<div class="state">Loading potential markets…</div>';
+  try{
+    const response=await fetch(apiUrl(`/api/country-opportunities?period=${encodeURIComponent(countryDemandPeriod)}`),{cache:'no-store'});
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    const data=await response.json();
+    const countries=data.countries||[];
+    countryDemandCountries=countries;
+    renderCountryDemandScope(countries);
+    if(!countries.length){
+      table.classList.add('state');
+      table.innerHTML='<div class="state"><strong>No observed country traffic yet.</strong><span>Potential markets appear after the next batch refresh.</span></div>';
+      return;
+    }
+    const labels={PRIORITIZE:'Prioritize',EMERGING:'Emerging',INVESTIGATE:'Investigate',WATCH:'Watch'};
+    const evidence={NONE:'None',VERY_LOW:'Very low',LOW:'Low',MEDIUM:'Medium',HIGH:'High'};
+    table.classList.remove('state');
+    table.innerHTML=`<table class="country-demand-table"><thead><tr><th>Country</th><th>Opportunity</th><th>Status</th><th>Demand</th><th>Confidence</th><th>Traffic · ${countryDemandPeriod}</th><th>Market</th></tr></thead><tbody>${countries.map(row=>{
+      const status=row.opportunity_status||row.opportunity_state||'WATCH';
+      return `<tr tabindex="0" data-country-demand='${esc(encodeURIComponent(JSON.stringify(row)))}'><td><strong>${esc(row.country_name||row.country_code)}</strong></td><td class="opportunity-score">${row.opportunity_score==null?'—':esc(Number(row.opportunity_score).toFixed(1))}</td><td><span class="opportunity-state state-${String(status).toLowerCase()}">${esc(labels[status]||'Watch')}</span></td><td>${row.country_demand_score==null?'—':esc(Number(row.country_demand_score).toFixed(1))}</td><td>${row.demand_confidence==null?'—':esc(`${(Number(row.demand_confidence)*100).toFixed(0)}%`)}</td><td>${num(row[`traffic_${countryDemandPeriod}`])}</td><td>${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td></tr>`;
+    }).join('')}</tbody></table>`;
+    table.querySelectorAll('[data-country-demand]').forEach(row=>{
+      const open=()=>openCountryDemand(JSON.parse(decodeURIComponent(row.dataset.countryDemand)));
+      row.addEventListener('click',open);
+      row.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open()}});
+    });
+  }catch(error){
+    table.classList.add('state');
+    table.innerHTML=`<div class="state"><strong>Potential markets unavailable.</strong><span>${esc(error.message||'Request failed')}</span></div>`;
+  }
+}
+countryDemandScope()?.addEventListener('change',event=>{const code=event.target.value;if(code==='all')loadCountryDemandSignals();else loadCountryDemandCities(code)});
+function openCountryDemand(c){
+  const drawer=$('country-demand-drawer');
+  if(!drawer)return;
+  drawer.hidden=false;
+  drawer.setAttribute('aria-modal','false');
+  drawer.dataset.open='true';
+  const labels={PRIORITIZE:'Prioritize',EMERGING:'Emerging',INVESTIGATE:'Investigate',WATCH:'Watch'};
+  const status=labels[c.opportunity_status||c.opportunity_state]||'Watch',trend=c.trend_pct==null?'No trend data':`${Number(c.trend_pct)>0?'+':''}${Number(c.trend_pct).toFixed(1)}% vs previous period`,coverage=c.evidence_coverage==null?'—':`${(Number(c.evidence_coverage)*100).toFixed(0)}%`,confidence=c.demand_confidence==null?'—':`${(Number(c.demand_confidence)*100).toFixed(0)}%`,next=c.evidence_level==='NONE'||c.evidence_level==='VERY_LOW'?'Collect more qualified traffic evidence':status==='Prioritize'?'Move to sales validation':'Review city-level opportunity evidence';
+  const factors=[['Market score',c.market_score],['Demand strength',c.country_demand_score],['Demand momentum',c.momentum_score??c.momentum_pct]].filter(([,value])=>value!=null).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,3);
+  drawer.innerHTML=`<div class="country-demand-drawer-head"><div><small>COUNTRY DEMAND</small><strong>${esc(c.country_name||c.country_code)}</strong></div><button type="button" aria-label="Close details">×</button></div><div class="opportunity-drawer-state"><b>${esc(status)}</b><span>${esc(c.evidence_level||'NONE')} evidence · ${esc(trend)}</span></div><section class="drawer-section"><h3>Why this country ranks here</h3><p>${esc(c.opportunity_reason||c.explanation||'No explanation available.')}</p><div class="drawer-factors">${factors.map(([name,value])=>`<div><span>${esc(name)}</span><strong>${Number(value).toFixed(1)}</strong></div>`).join('')}</div></section><section class="drawer-section"><h3>Evidence quality</h3><dl><div><dt>Coverage</dt><dd>${coverage}</dd></div><div><dt>Demand confidence</dt><dd>${confidence}</dd></div><div><dt>Qualified sessions</dt><dd>${c.weighted_qualified_sessions==null?'—':Number(c.weighted_qualified_sessions).toFixed(1)}</dd></div><div><dt>Adjusted demand</dt><dd>${c.adjusted_demand_score==null?'—':Number(c.adjusted_demand_score).toFixed(1)}</dd></div><div><dt>Updated window</dt><dd>${esc(countryDemandPeriod)}</dd></div></dl></section><section class="drawer-section drawer-next"><h3>Recommended next step</h3><p>${esc(next)}</p></section>`;
+  const close=()=>{drawer.hidden=true;delete drawer.dataset.open};
+  drawer.querySelector('button').addEventListener('click',close);
+  drawer.addEventListener('click',event=>{if(event.target===drawer)close()},{once:true});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!drawer.hidden)close()},{once:true});
+}
+function applyTrafficWindow(){trafficStart=$('traffic-start').value.trim();trafficEnd=$('traffic-end').value.trim();const valid=value=>/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)&&!Number.isNaN(new Date(value.replace(' ','T')).getTime());if(!valid(trafficStart)||!valid(trafficEnd)){notify('Use format YYYY-MM-DD HH:mm');return false}if(new Date(trafficEnd.replace(' ','T'))<=new Date(trafficStart.replace(' ','T'))){notify('End must be after start');return false}syncTimePickerUi();saveTrafficWindow();window.dispatchEvent(new CustomEvent('dashboard-time-window-change'));loadTraffic(true);window.reloadDashboardMap?.();return true}
+function clearTrafficWindow(){trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';trafficRange='1d';syncTimePickerUi();saveTrafficWindow();loadTraffic(true);window.reloadDashboardMap?.()}
+function setDashboardMapRange(range){trafficRange=mapRangeToTrafficRange(range);trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';syncTimePickerUi();saveTrafficWindow();loadTraffic(true)}
+function getDashboardMapRange(){return trafficStart||trafficEnd?'custom':trafficRangeToMapRange(trafficRange)}
+function getDashboardTimeWindow(){return {range:getDashboardMapRange(),start:trafficStart,end:trafficEnd}}
+window.getDashboardMapRange=getDashboardMapRange;
+window.getDashboardTimeWindow=getDashboardTimeWindow;
+window.setDashboardMapRange=setDashboardMapRange;
+window.applyDashboardTimeWindow=applyTrafficWindow;
+window.syncDashboardTimePicker=syncTimePickerUi;
 let toastTimer=null;
 let toastClickTarget=null;
 function notify(message,type='info',duration=null,targetIp=null){
@@ -143,7 +263,7 @@ function notify(message,type='info',duration=null,targetIp=null){
   toastTimer=setTimeout(()=>{toast.classList.remove('show');toastTimer=null;toastClickTarget=null},stayTime);
 }
 
-function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('sentinel-theme',theme);$('theme-toggle').textContent=theme==='dark'?'Light mode':'Dark mode'}
+function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('sentinel-theme',theme);$('theme-toggle').textContent=theme==='dark'?'Light mode':'Dark mode';window.dispatchEvent(new CustomEvent('sentinel-theme-change',{detail:{theme}}))}
 function formatStatusWithDisposition(label, disposition){
   const base=classificationLabel(label||'unknown');
   const disp=(typeof disposition==='object'?disposition?.state:disposition)||'';
@@ -157,14 +277,14 @@ function summary(){
   const data=ipSummary||{total_ips:0,classification:{critical:0,medium:0,low:0,good:0,unknown:0},privacy:{total:0},priority_items:[]};
 }
 
-function updateHeaders(){document.querySelectorAll('th.sortable').forEach(th=>{const base=th.textContent.replace(/[ ↓↑]$/,'');th.textContent=base+(sortField===th.dataset.sort?(sortDir==='desc'?' ↓':' ↑'):'');th.classList.toggle('active',th.dataset.sort===sortField)})}
+function updateHeaders(){document.querySelectorAll('th.sortable').forEach(th=>{th.dataset.sortDirection=sortField===th.dataset.sort?sortDir:'';th.setAttribute('aria-sort',sortField===th.dataset.sort?(sortDir==='desc'?'descending':'ascending'):'none');th.classList.toggle('active',th.dataset.sort===sortField)})}
 function render(){
   const filtered=ips; $('visible-count').textContent=`${num(ipSummary?.total_ips||filtered.length)} total · page ${ipPage}/${ipTotalPages}`;updateHeaders();
   $('rows').innerHTML=filtered.length?filtered.map(x=>{
   const label=classification(x),level=label,score=signalScore(x),ai=x.ai_profile||{},aiKnown=Object.keys(ai).length>0,aiScore=Number(ai.ai_anomaly_score||0),aiTone=aiScore>=70?'alert':aiScore?'':'none',aiWindows=Number(ai.anomalous_windows||0),aiLabel=!aiKnown?'not scored':aiScore?`${aiWindows} anomalous window${aiWindows===1?'':'s'}`:(ai.score_reason||'not flagged'),disp=x.disposition?.state||x.disposition||'new',rowClass=disp==='resolved'?'row-resolved':`row-${label}`,displayStatus=formatStatusWithDisposition(label,disp);
     const intelTags=(x.intel_tags||[]).map(tag=>`<span class="flag on">${esc(tag.replace('intel:','').replaceAll('_',' '))}</span> `).join('');
-    return `<tr tabindex="0" data-ip="${esc(x.ip)}" class="${esc(rowClass)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text">${esc(label)}${disp.toLowerCase()!=='new'?` <span class="disposition-inline ${esc(disp.toLowerCase())}">(${esc(disp.toLowerCase())})</span>`:''}</span></td><td class="mono last-seen" title="${esc(x.last_seen?seenTime(x.last_seen):'—')}">${esc(seenTime(x.last_seen))}</td><td>${locationCell(x)}</td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${isTrue(x.is_tor)?'<span class="flag on">tor</span> ':''}${isTrue(x.is_vpn)?'<span class="flag on">vpn</span> ':''}${isTrue(x.is_proxy)?'<span class="flag on">proxy</span> ':''}${isTrue(x.is_hosting)?'<span class="flag">host</span>':''}${intelTags}${![x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].some(isTrue)&&!intelTags?'<span class="flag">unknown</span>':''}</td><td class="ai-cell"><span class="ai-score ${aiTone}">${aiKnown?`${aiScore}/100`:'—'}</span><span class="ai-note">${esc(aiLabel)}${aiKnown&&ai.confidence_level?` · ${esc(ai.confidence_level)}`:''}</span></td><td class="risk-cell"><div class="risk-top"><span class="risk-level ${level}">${esc(displayStatus)}</span><span class="mono">${num(score)}/100</span></div><div class="signal ${level}"><span style="width:${Math.min(100,Math.max(0,score))}%"></span></div></td><td><span class="disp-badge ${esc(disp)}">${esc(disp)}</span></td></tr>`
-  }).join(''):'<tr><td colspan="10"><div class="state"><strong>No matching identities</strong>Adjust the search or intelligence filters.</div></td></tr>';
+    return `<tr tabindex="0" data-ip="${esc(x.ip)}" class="${esc(rowClass)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text">${esc(label)}${disp.toLowerCase()!=='new'?` <span class="disposition-inline ${esc(disp.toLowerCase())}">(${esc(disp.toLowerCase())})</span>`:''}</span></td><td class="mono last-seen" title="${esc(x.last_seen?seenTime(x.last_seen):'—')}">${esc(seenTime(x.last_seen))}</td><td>${locationCell(x)}</td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${isTrue(x.is_tor)?'<span class="flag on">tor</span> ':''}${isTrue(x.is_vpn)?'<span class="flag on">vpn</span> ':''}${isTrue(x.is_proxy)?'<span class="flag on">proxy</span> ':''}${isTrue(x.is_hosting)?'<span class="flag">host</span>':''}${intelTags}${![x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].some(isTrue)&&!intelTags?'<span class="flag">unknown</span>':''}</td><td><span class="disp-badge ${esc(disp)}">${esc(disp)}</span></td></tr>`
+  }).join(''):'<tr><td colspan="8"><div class="state"><strong>No matching identities</strong>Adjust the search or intelligence filters.</div></td></tr>';
 
 
 
@@ -176,7 +296,7 @@ function snapshotKey(){return IP_SNAPSHOT_KEY}
 function pageQuery(){const params=new URLSearchParams({page:String(ipPage),page_size:String(ipPageSize),sort:sortField,direction:sortDir});const q=$('search').value.trim();if(q)params.set('q',q);if($('privacy').value)params.set('privacy',$('privacy').value);if($('classification').value)params.set('classification',$('classification').value);if($('disposition').value)params.set('disposition',$('disposition').value);return params}
 async function loadIpSummary(start='',end=''){try{const params=new URLSearchParams();if(start)params.set('start',start);if(end)params.set('end',end);const query=params.toString();const response=await fetch(apiUrl(`/api/ips/summary${query?`?${query}`:''}`),{cache:'no-store'});if(!response.ok)throw new Error();ipSummary=await response.json();summary();renderAnalytics()}catch(_){} }
 function recordRealtimeLatency(items){const renderedAt=Date.now(),event=window.__ipRealtimeLastEvent||{},samples=(items||[]).map(item=>{const p=item.pipeline||{},received=Date.parse(p.received_at||'');if(!Number.isFinite(received))return null;const total=Math.max(0,renderedAt-received),backend=Number(p.backend_ready_ms),published=Date.parse(event.published_at||''),delivered=Number(event.received_at),profiled=Boolean(p.profile_ready_at);return {ip:item.ip,segment:profiled?'profiled':'profile-pending',end_to_end_ms:total,backend_ready_ms:Number.isFinite(backend)?backend:null,publish_to_sse_ms:Number.isFinite(published)&&Number.isFinite(delivered)?Math.max(0,delivered-published):null,delivery_render_ms:Number.isFinite(delivered)?Math.max(0,renderedAt-delivered):null,rendered_at:new Date(renderedAt).toISOString()}}).filter(Boolean);if(!samples.length)return;const history=[...(Array.isArray(window.__ipRealtimeMetrics)?window.__ipRealtimeMetrics:[]),...samples].slice(-200),percentile=(list,p)=>{const ordered=list.map(x=>x.end_to_end_ms).sort((a,b)=>a-b);return ordered.length?ordered[Math.min(ordered.length-1,Math.ceil(ordered.length*p)-1)]:null},profiled=history.filter(x=>x.segment==='profiled'),pending=history.filter(x=>x.segment==='profile-pending'),latest=samples[samples.length-1];window.__ipRealtimeMetrics=history;$('ip-realtime-latency').textContent=`realtime p95 ${num(percentile(history,.95))} ms · profile ${num(percentile(profiled,.95))} · pending ${num(percentile(pending,.95))}`;$('ip-realtime-latency').title=`Latest ${num(latest.end_to_end_ms)} ms · backend ${num(latest.backend_ready_ms)} ms · publish/SSE ${num(latest.publish_to_sse_ms)} ms · render ${num(latest.delivery_render_ms)} ms · ${latest.segment} · ${latest.ip} · ${history.length} samples`}
-async function loadIpSnapshot(force=false,realtimeItems=[]){try{const response=await fetch(apiUrl(`/api/ips/page?${pageQuery()}`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipPage=Number(data.page||ipPage);ipTotalPages=Math.max(1,Number(data.total_pages||1));ipCursor=Number(data.change_cursor||ipCursor);ipsReady=true;summary();render();recordRealtimeLatency(realtimeItems);renderAnalytics();await loadIpSummary()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="10"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}}
+async function loadIpSnapshot(force=false,realtimeItems=[]){try{const response=await fetch(apiUrl(`/api/ips/page?${pageQuery()}`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipPage=Number(data.page||ipPage);ipTotalPages=Math.max(1,Number(data.total_pages||1));ipCursor=Number(data.change_cursor||ipCursor);ipsReady=true;summary();render();recordRealtimeLatency(realtimeItems);renderAnalytics();await loadIpSummary()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="8"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}}
 function applyIpChanges(items){const known=new Set(ips.map(item=>item.ip));if(items.some(item=>!known.has(item.ip)))return false;const changes=new Map(items.map(item=>[item.ip,item]));ips=ips.map(item=>changes.get(item.ip)||item);render();recordRealtimeLatency(items);loadIpSummary();return true}
 async function syncIpDelta(){if(deltaBusy)return false;deltaBusy=true;try{let after=ipCursor,more=true,transitions=[],changedItems=[];while(more){const response=await fetch(apiUrl(`/api/ips/updates?after=${encodeURIComponent(after)}&limit=500`),{cache:'no-store'});if(!response.ok)throw new Error();const data=await response.json();if(data.reset_required){await loadIpSnapshot(true);return true}transitions.push(...(data.transitions||[]));changedItems.push(...(data.items||[]));after=Number(data.cursor||after);more=Boolean(data.has_more);ipCursor=after}if(transitions.length)showRiskTransitions(transitions);if(!changedItems.length)return false;if(!applyIpChanges(changedItems))await loadIpSnapshot(true,changedItems);return true}catch(_){return false}finally{deltaBusy=false}}
 function showRiskTransitions(transitions){
@@ -194,7 +314,6 @@ function showRiskTransitions(transitions){
 }
 
 function scheduleRealtimeFlush(delay=1000){if(collectorState==='backlog')return;if(realtimeFlushTimer)return;realtimeFlushTimer=setTimeout(async()=>{realtimeFlushTimer=null;if(realtimeFlushRunning){realtimeFlushPending=true;return}realtimeFlushRunning=true;try{if(await syncIpDelta())await loadTraffic(true)}finally{realtimeFlushRunning=false;if(realtimeFlushPending){realtimeFlushPending=false;scheduleRealtimeFlush(0)}}},delay)}
-function startDurableRealtimeSync(){if(durableRealtimeTimer)return;durableRealtimeTimer=setInterval(()=>{if(collectorState==='live')scheduleRealtimeFlush(0)},1000)}
 function scheduleTrafficRefresh(){if(trafficTimer)return;trafficTimer=window.setTimeout(()=>{trafficTimer=null;loadTraffic(true)},1000)}
 function setCollectorStatus(data){const state=data.status||'unknown',previous=collectorState;collectorState=state;$('collector-state').textContent=state==='backlog'?'Replaying log…':state.charAt(0).toUpperCase()+state.slice(1);$('collector-dot').style.background=state==='live'?'var(--stable)':state==='retrying'||state==='config_error'?'var(--hostile)':'var(--watch)';if(state==='live'&&previous==='backlog')scheduleRealtimeFlush()}
 function startFallbackPolling(){if(fallbackPollTimer)return;fallbackPollTimer=setInterval(()=>scheduleRealtimeFlush(),5000)}
@@ -302,7 +421,7 @@ async function detail(ip){
   }
 }
 
-const viewMeta={overview:{kicker:'Intelligence / Overview',title:'Threat Signal'},threats:{kicker:'Intelligence / Network identities',title:'IP Intelligence',subtitle:'Inspect network identities by behavior, reputation, AI anomaly and region context.'}};
+const viewMeta={overview:{kicker:'Intelligence / Overview',title:'Threat Signal'},threats:{kicker:'Intelligence / Network identities',title:'IP Intelligence'}};
 function applyView(){
   const requested=location.hash.replace(/^#/,'')||'overview',view=viewMeta[requested]?requested:'overview',meta=viewMeta[view];
   document.querySelectorAll('[data-view-panel]').forEach(panel=>{panel.hidden=panel.dataset.viewPanel!==view});
@@ -311,17 +430,21 @@ function applyView(){
 }
 window.addEventListener('hashchange',applyView);
 applyView();
-restoreTrafficWindow();document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item.dataset.range===trafficRange));
+restoreTrafficWindow();
+if(trafficFilterType==='classification'&&$('classification'))$('classification').value=trafficFilterValue;
+syncTimePickerUi();
 ['Any abuse','Abuse recent','Abuse historical','Abuse persistent'].forEach((label,index)=>{const value=['intel:any_abuse','intel:abuse_recent','intel:abuse_historical','intel:abuse_persistent'][index],select=$('privacy');if(select&&!select.querySelector(`option[value="${value}"]`)){const option=document.createElement('option');option.value=value;option.textContent=label;select.appendChild(option)}});
- $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);let searchTimer=null;['privacy','classification','disposition'].forEach(id=>$(id).addEventListener('input',()=>{ipPage=1;loadIpSnapshot(true)}));$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ipPage=1;loadIpSnapshot(true)},300)});$('classification').addEventListener('input',()=>{document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===$('classification').value));});document.querySelectorAll('#traffic-range button').forEach(button=>button.addEventListener('click',()=>{trafficRange=button.dataset.range;trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';document.querySelectorAll('#traffic-range button').forEach(item=>item.classList.toggle('active',item===button));saveTrafficWindow();loadTraffic(true)}));
-$('traffic-apply').addEventListener('click',applyTrafficWindow);$('traffic-clear').addEventListener('click',clearTrafficWindow);
+ $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);let searchTimer=null;['privacy','disposition'].forEach(id=>$(id).addEventListener('input',()=>{ipPage=1;loadIpSnapshot(true)}));$('classification').addEventListener('input',()=>{const value=$('classification').value;setClassificationTrafficFilter(value);document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===value));ipPage=1;loadIpSnapshot(true);loadTraffic(true)});$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ipPage=1;loadIpSnapshot(true)},300)});
  ['top-ips','top-paths'].forEach(id=>$(id).addEventListener('click',event=>{const action=event.target.closest('[data-traffic-action]');if(!action)return;event.preventDefault();event.stopPropagation();applyTrafficFilter(action.dataset.filterType,action.dataset.filterValue,action.dataset.trafficAction==='exclude')}));
-document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{if(sortField===th.dataset.sort)sortDir=sortDir==='desc'?'asc':'desc';else{sortField=th.dataset.sort;sortDir='desc'}ipPage=1;loadIpSnapshot(true)}));
+ document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{if(sortField===th.dataset.sort)sortDir=sortDir==='desc'?'asc':'desc';else{sortField=th.dataset.sort;sortDir='desc'}loadIpSnapshot(true)}));
 $('ip-prev').addEventListener('click',()=>{if(ipPage>1){ipPage--;loadIpSnapshot(true)}});$('ip-next').addEventListener('click',()=>{if(ipPage<ipTotalPages){ipPage++;loadIpSnapshot(true)}});
 document.querySelectorAll('.risk-tab').forEach(tab=>tab.addEventListener('click',()=>{const value=tab.dataset.classification;$('classification').value=value;document.querySelectorAll('.risk-tab').forEach(item=>item.classList.toggle('selected',item===tab));render()}));
 const ipHref=ip=>`/ip/${encodeURIComponent(ip)}?mode=live`;
 $('rows').addEventListener('click',event=>{const row=event.target.closest('tr[data-ip]');if(row)window.location.href=ipHref(row.dataset.ip)});$('rows').addEventListener('keydown',event=>{const row=event.target.closest('tr[data-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.ip)}});
  $('top-ips').addEventListener('click',event=>{if(event.target.closest('[data-traffic-action]'))return;const row=event.target.closest('[data-traffic-ip]');if(row)window.location.href=ipHref(row.dataset.trafficIp)});$('top-ips').addEventListener('keydown',event=>{const row=event.target.closest('[data-traffic-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.trafficIp)}});
+document.querySelectorAll('[data-country-period]').forEach(button=>button.addEventListener('click',()=>{countryDemandPeriod=button.dataset.countryPeriod;document.querySelectorAll('[data-country-period]').forEach(item=>item.classList.toggle('active',item===button));loadCountryDemandSignals()}));
+loadCountryDemandSignals();
+
 const openIp=ip=>{window.location.href=ipHref(ip)};
 let latestHealth=null;
 async function fetchHealthStatus(notifyUser=false){
@@ -449,5 +572,5 @@ $('toast')?.addEventListener('click',()=>{
     window.location.href=`/ip/${encodeURIComponent(toastClickTarget)}?mode=live`;
   }
 });
-loadIpSnapshot();loadTraffic();startRealtime();startDurableRealtimeSync();fetchHealthStatus();
+if(requestedIp)$('search').value=requestedIp;loadIpSnapshot();loadTraffic();startRealtime();fetchHealthStatus();
 setInterval(fetchHealthStatus,10000);

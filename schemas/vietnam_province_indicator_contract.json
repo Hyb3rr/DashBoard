@@ -1,0 +1,71 @@
+{
+  "schema_version": "vn-province-indicator-contract-1",
+  "scope": "Province profile evidence for Vietnam's 34 current administrative units",
+  "rules": {
+    "no_composite_score": true,
+    "unknown_is_null": true,
+    "zero_requires_source_observation": true,
+    "source_geography_must_be_preserved": true,
+    "source_period_must_be_preserved": true,
+    "no_industry_x_province_inference": true
+  },
+  "record_required_fields": [
+    "geo_unit_id", "province_name", "indicator_id", "value", "unit", "reference_period",
+    "source_name", "source_url", "retrieved_at", "geography_basis", "raw_value",
+    "transformation_method", "confidence", "limitation"
+  ],
+  "indicators": [
+    {
+      "indicator_id": "manufacturing_activity",
+      "display_name": "Manufacturing activity",
+      "measure": "industrial_production_index_or_reported_current_manufacturing_growth",
+      "allowed_units": ["index", "% growth"],
+      "source_priority": ["nso_current_socioeconomic_reports", "nso_pxweb_iip"],
+      "aggregation": "never sum; historical merged-province value is null unless the source publishes the current unit",
+      "absence_reason": "No direct observation for current province, or source geography cannot be mapped without invalid index aggregation"
+    },
+    {
+      "indicator_id": "relevant_enterprises",
+      "display_name": "Relevant enterprises",
+      "measure": "enterprise_count",
+      "allowed_units": ["enterprises"],
+      "source_priority": ["nso_pxweb_enterprise"],
+      "aggregation": "sum only for complete additive counts with the same definition and period",
+      "absence_reason": "Source does not publish the required province/sector cross-tab"
+    },
+    {
+      "indicator_id": "investment_momentum",
+      "display_name": "Investment momentum",
+      "measure": "province-level FDI flow or registered capital",
+      "allowed_units": ["USD million", "projects"],
+      "source_priority": ["fia_mof_fdi"],
+      "aggregation": "keep flow, cumulative stock and project count as separate indicators; never fill omitted province with zero",
+      "absence_reason": "Province omitted from source table or attachment unavailable"
+    },
+    {
+      "indicator_id": "industrial_parks",
+      "display_name": "Industrial parks",
+      "measure": "official park count, area, occupancy or tenants",
+      "allowed_units": ["parks", "ha", "%", "tenants", "currency"],
+      "source_priority": ["official_industrial_park_sources"],
+      "aggregation": "do not add ratios; counts/areas require explicit current-boundary coverage",
+      "absence_reason": "No official aggregate or source period/boundary is not verifiable"
+    },
+    {
+      "indicator_id": "local_business_evidence",
+      "display_name": "Local business evidence",
+      "measure": "mapped OSM discovery entities",
+      "allowed_units": ["observed entities"],
+      "source_priority": ["osm_discovery"],
+      "aggregation": "report as discovery evidence with method and retrieval time; never label as official establishments",
+      "absence_reason": "No mapped entity or query coverage unavailable"
+    }
+  ],
+  "presentation": {
+    "missing_label": "Unknown",
+    "missing_explanation": "No direct observation",
+    "show_source_and_period": true,
+    "show_limitation": true,
+    "never_show": ["Province Potential Score", "confidence score invented from missingness", "zero for an omitted province"]
+  }
+}

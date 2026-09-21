@@ -15,7 +15,7 @@ def test_map_page_and_assets_are_served():
     assert 'id="map-basemap"' in page.text
     assert 'data-mode="opportunity"' in page.text
     assert 'data-mode="combined"' not in page.text
-    assert 'id="back-world"' in page.text
+    assert 'id="back-world"' not in page.text
     assert "/static/map.js" in page.text
     assert "maplibre-gl@4.7.1" in page.text
     assert client.get("/static/map.js").status_code == 200
@@ -31,14 +31,30 @@ def test_dashboard_embeds_full_width_map_before_overview():
     assert page.text.index('class="dashboard-map-card"') < page.text.index('id="threats"')
     assert 'id="map-basemap"' in page.text
     assert '/static/map.js' in page.text
+    assert 'id="dashboard-time-picker"' in page.text
+    assert 'id="time-picker-trigger"' in page.text
+    assert 'id="time-picker-popover"' in page.text
+    assert 'id="calendar-days"' in page.text
+    assert 'id="calendar-prev"' in page.text
+    assert 'id="calendar-next"' in page.text
+    assert 'placeholder="YYYY-MM-DD HH:mm"' in page.text
+    assert 'type="datetime-local"' not in page.text
+    assert 'data-range="30m"' in page.text
+    assert 'data-range="30d"' in page.text
+    assert 'id="traffic-start"' in page.text
+    assert 'id="time-picker-apply"' in page.text
+    assert 'Choose a start and end, then apply' in page.text
+    assert 'id="traffic-end"' in page.text
+    assert 'id="traffic-apply"' not in page.text
+    assert 'id="traffic-clear"' not in page.text
+    assert 'Choose a start and end, then apply' in page.text
+    assert 'id="traffic-range"' not in page.text
 
 
 def test_map_ui_keeps_threat_semantics_explicit():
     javascript = (ROOT / "app" / "web" / "static" / "map.js").read_text(encoding="utf-8")
-    assert "/api/map/world?range=" in javascript
-    assert "/api/map/country/" in javascript
-    assert "mapState.view==='country'" in javascript
-    assert "backWorld" in javascript
+    assert "/api/map/world?" in javascript
+    assert "/api/map/world?" in javascript
     assert "flagged_ips" in javascript
     assert "threat_score" not in javascript
     assert "requests" in javascript
@@ -47,6 +63,7 @@ def test_map_ui_keeps_threat_semantics_explicit():
     assert "positron-gl-style" in javascript
     assert "applyMapTheme" in javascript
     assert "fitBounds" in javascript
+    assert "zoom:1.25,minZoom:1.25" in javascript
     assert "countries.geojson" in javascript
     assert "countryAnchors" in javascript
     assert "mode==='opportunity'" in javascript
@@ -55,6 +72,9 @@ def test_map_ui_keeps_threat_semantics_explicit():
     assert "function severityCounts" in javascript
     assert "function ensureSeverityRings" in javascript
     assert "intel-low-ring" in javascript
+    assert "medium:['+'" in javascript
+    assert "low:['+'" in javascript
+    assert "['>', ['get','low'],0],'#55d6e8'" in javascript
     assert "critical:counts.critical" in javascript
     assert "medium:counts.medium" in javascript
     assert "low:counts.low" in javascript
@@ -62,6 +82,19 @@ def test_map_ui_keeps_threat_semantics_explicit():
     assert "map-tooltip').hidden=true" in javascript
     assert "mode==='combined'" not in javascript
     assert 'html[data-theme="light"] .map-stage .map-tooltip' in (ROOT / "app" / "web" / "static" / "map.css").read_text(encoding="utf-8")
+    dashboard_javascript = (ROOT / "app" / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
+    assert "window.getDashboardTimeWindow" in dashboard_javascript
+    assert "window.setDashboardMapRange" in dashboard_javascript
+    assert "window.reloadDashboardMap" in dashboard_javascript
+    assert "dashboard-time-window-change" in dashboard_javascript
+    assert "time-picker-apply" in javascript
+    assert "applyButton?.click()" in javascript
+    assert "event.stopPropagation();const [year,month,day]" in javascript
+    assert "if(startInput.value&&endInput.value)window.applyDashboardTimeWindow?.()" not in javascript
+    assert "mapTimeParams" in javascript
+    assert "mapRequestSequence" in javascript
+    assert "start" in javascript
+    assert "end" in javascript
     assert "maplibre-gl" in (ROOT / "app" / "web" / "templates" / "map.html").read_text(encoding="utf-8")
     assert 'class="legend-dot low"' in (ROOT / "app" / "web" / "templates" / "map.html").read_text(encoding="utf-8")
 
@@ -73,8 +106,11 @@ def test_map_ui_uses_maplibre_geojson_layers_instead_of_custom_webgl_renderer():
     assert "id:'intel-cluster-circles'" in javascript
     assert "id:'intel-cluster-labels'" in javascript
     assert "mapAnchor" in javascript
+    assert "item?.marker_scope!=='country_aggregate'" in javascript
+    assert "mapState.countryAnchors[wanted]" in javascript
+    assert "map$('map-empty').hidden=!zoomVisible||features.length>0" in javascript
+    assert "function bindIntelClick" not in javascript
     assert "iso_3166_1" in javascript
-    assert "flyTo" in javascript
     assert "fitBounds" in javascript
     assert "createBuffer" not in javascript
     assert "WORLD_BASEMAP" not in javascript

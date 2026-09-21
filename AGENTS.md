@@ -578,6 +578,14 @@ Wait for explicit `go` before modifying anything.
 
 Read-only inspection does not require approval.
 
+### UI Preview Gate
+
+For every requested dashboard or interface change, show the user a short
+before/after layout illustration in plain text before editing UI files. Wait
+for explicit approval after the illustration. The illustration must describe
+where controls appear in the same row, on hover, focus, or active state when
+that behavior matters.
+
 Allowed read-only actions include:
 
 - reading/searching source
@@ -1065,3 +1073,25 @@ SSE Dashboard
 ```
 
 Build new functionality around this architecture unless measurements prove it insufficient.
+
+---
+
+## Project Context Files
+
+Before starting any non-trivial task, read the project context files in this
+order:
+
+1. `.ai/PROJECT.md` — whole-project architecture, data ownership, product
+   surfaces and cross-cutting invariants.
+2. `.ai/state/CURRENT.md` — current workstreams, completed work, open findings
+   and known risks.
+3. Relevant files under `.ai/decisions/`, `.ai/plans/` and `.ai/reviews/` —
+   accepted architectural decisions, approved phase scope and prior review
+   findings.
+
+Use these files to establish context before proposing or implementing a
+change. `AGENTS.md` remains the authoritative policy when a project-context
+file conflicts with it. Do not treat a task-specific plan as permission to
+ignore unrelated project invariants. After a material architectural or
+user-visible change, update the relevant context/state or plan artifact in the
+same approved phase.
