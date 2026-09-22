@@ -1,0 +1,153 @@
+/* Shared Sentinel Hub navigation shell. Page-specific tokens cannot theme it. */
+:root {
+  --sidebar-bg: #0b171c;
+  --sidebar-surface: #102229;
+  --sidebar-text: #e6f1f2;
+  --sidebar-muted: #9db2b7;
+  --sidebar-tertiary: #6f858b;
+  --sidebar-border: rgba(214,243,247,.1);
+  --sidebar-accent: #48c8d8;
+  --sidebar-font: "Avenir Next", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+html[data-theme="light"] {
+  --sidebar-bg: #ffffff;
+  --sidebar-surface: #e1ebee;
+  --sidebar-text: #15252b;
+  --sidebar-muted: #49616a;
+  --sidebar-tertiary: #71848b;
+  --sidebar-border: rgba(22,54,64,.14);
+  --sidebar-accent: #087f91;
+}
+.shell {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+.shell.sidebar-collapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+.shell.sidebar-collapsed > aside[data-sidebar] {
+  padding-inline: 10px;
+}
+.shell.sidebar-collapsed > aside[data-sidebar] .brand {
+  display: none;
+}
+.shell.sidebar-collapsed > aside[data-sidebar] nav a {
+  font-size: 0;
+}
+.shell.sidebar-collapsed > aside[data-sidebar] nav a > span {
+  font-size: 16px;
+}
+.shell > aside[data-sidebar] {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding: 18px 10px;
+  border-right: 1px solid var(--sidebar-border);
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
+  font: 13px/1.45 var(--sidebar-font);
+  z-index: 5;
+}
+.shell > aside[data-sidebar] .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px 20px;
+}
+.shell > aside[data-sidebar] .brand-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--sidebar-accent);
+  border-radius: 5px;
+  color: var(--sidebar-accent);
+  font-weight: 800;
+}
+.shell > aside[data-sidebar] .brand strong {
+  display: block;
+  font-size: 13px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.shell > aside[data-sidebar] .brand small {
+  color: var(--sidebar-tertiary);
+}
+.shell > aside[data-sidebar] nav {
+  display: grid;
+  gap: 4px;
+}
+.shell > aside[data-sidebar] .sidebar-health {
+  position: absolute;
+  right: 10px;
+  bottom: 16px;
+  left: 10px;
+  padding: 10px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px;
+  background: var(--sidebar-surface);
+  cursor: pointer;
+}
+.shell > aside[data-sidebar] .sidebar-health .health-head { display: grid; gap: 6px; }
+.shell > aside[data-sidebar] .sidebar-health .eyebrow { color: var(--sidebar-tertiary); font-size: 10px; letter-spacing: .12em; }
+.shell > aside[data-sidebar] .sidebar-health .online { color: var(--sidebar-muted); font-size: 11px; }
+.shell > aside[data-sidebar] .sidebar-health .health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 8px; }
+.shell > aside[data-sidebar] .sidebar-health .health-chip { padding: 4px 6px; border: 1px solid var(--sidebar-border); border-radius: 999px; color: var(--sidebar-muted); font: 600 10px ui-monospace, monospace; }
+.shell > aside[data-sidebar] .sidebar-health .dot-sm { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--sidebar-accent); }
+.shell.sidebar-collapsed > aside[data-sidebar] .sidebar-health { display: none; }
+.shell > aside[data-sidebar] .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--sidebar-muted);
+  text-decoration: none;
+  font-weight: 600;
+}
+.shell > aside[data-sidebar] .nav-item:hover,
+.shell > aside[data-sidebar] .nav-item.active {
+  color: var(--sidebar-text);
+  background: var(--sidebar-surface);
+}
+.shell > aside[data-sidebar] .nav-item.active {
+  box-shadow: inset 3px 0 var(--sidebar-accent);
+}
+.shell > aside[data-sidebar] .nav-icon {
+  flex: 0 0 18px;
+  text-align: center;
+}
+.shell > aside[data-sidebar] .sidebar-toggle {
+  position: absolute;
+  top: 20px;
+  right: 14px;
+  z-index: 3;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  cursor: pointer;
+  font: 20px/1 var(--sidebar-font);
+}
+.shell > aside[data-sidebar] .sidebar-toggle:hover,
+.shell > aside[data-sidebar] .sidebar-toggle:focus-visible {
+  background: var(--sidebar-surface);
+  color: var(--sidebar-text);
+}
+.shell.sidebar-collapsed > aside[data-sidebar] .sidebar-toggle {
+  position: static;
+  display: block;
+  margin: 0 auto;
+  font-size: 20px;
+}
+.shell.sidebar-collapsed > aside[data-sidebar] .sidebar-toggle::before {
+  content: '›';
+  font-size: 20px;
+  line-height: 1;
+}
+@media (max-width: 900px) {
+  .shell > aside[data-sidebar] { display: none; }
+}

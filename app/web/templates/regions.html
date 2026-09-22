@@ -7,25 +7,14 @@
   <style>
   :root{color-scheme:dark;--void:#071014;--console:#0b171c;--raised:#102229;--ink:#e6f1f2;--secondary:#9db2b7;--tertiary:#6f858b;--line:rgba(214,243,247,.1);--cyan:#48c8d8;--green:#55d19a;--r:7px}html[data-theme="light"]{color-scheme:light;--void:#f3f7f8;--console:#fff;--raised:#eaf1f3;--ink:#15252b;--secondary:#49616a;--tertiary:#71848b;--line:rgba(22,54,64,.14);--cyan:#087f91;--green:#087c55}*{box-sizing:border-box}body{margin:0;background:var(--void);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}.shell{display:grid;grid-template-columns:232px 1fr;min-height:100vh}aside{padding:20px 14px;border-right:1px solid var(--line)}.brand{display:flex;align-items:center;gap:10px;padding:0 8px 24px}.brand-mark{display:grid;width:32px;height:32px;place-items:center;border:1px solid var(--cyan);border-radius:5px;color:var(--cyan);font-weight:800}.brand small,.meta,.eyebrow{display:block;color:var(--tertiary)}nav{display:grid;gap:4px}.nav{min-height:40px;padding:10px;border-radius:5px;color:var(--secondary);text-decoration:none}.nav:hover,.nav.active{background:var(--raised);color:var(--ink)}main{max-width:1280px;width:100%;padding:40px 48px}.top{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-bottom:28px}h1{margin:4px 0 6px;font-size:30px;letter-spacing:-.03em}p{margin:0;color:var(--secondary)}.eyebrow{text-transform:uppercase;letter-spacing:.12em;font:700 11px ui-monospace,monospace}.controls{display:flex;gap:8px}.search,.sort,.button{min-height:40px;border:1px solid var(--line);border-radius:5px;background:var(--console);color:var(--ink)}.search{width:280px;padding:0 12px}.sort{padding:0 10px}.button{padding:0 12px;cursor:pointer}.button:hover{background:var(--raised)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.card{min-height:210px;padding:20px;border:1px solid var(--line);border-radius:var(--r);background:var(--console);color:inherit;text-decoration:none;transition:transform 140ms cubic-bezier(.23,1,.32,1),background 140ms}.card:hover{transform:translateY(-2px);background:var(--raised)}.card:focus-visible,.search:focus-visible,.sort:focus-visible,.button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}.card-head{display:flex;justify-content:space-between;gap:12px}.country{margin:7px 0 0;font-size:19px}.score{color:var(--cyan);font:650 28px/1 ui-monospace,monospace;font-variant-numeric:tabular-nums}.score small{display:block;margin-top:7px;color:var(--tertiary);font:600 10px ui-sans-serif,system-ui}.signals{display:grid;gap:9px;margin-top:25px}.signal{display:flex;justify-content:space-between;gap:12px;padding-top:9px;border-top:1px solid var(--line);color:var(--secondary);font-size:12px}.signal strong{color:var(--ink);font-weight:600}.state{grid-column:1/-1;padding:48px;border:1px solid var(--line);border-radius:var(--r);background:var(--console);color:var(--secondary);text-align:center}.state strong{display:block;margin-bottom:5px;color:var(--ink)}@media(max-width:920px){.shell{display:block}aside{display:none}main{padding:24px}.grid{grid-template-columns:1fr 1fr}}@media(max-width:620px){main{padding:18px}.top{align-items:stretch;flex-direction:column}.controls,.search{width:100%}.grid{grid-template-columns:1fr}}@media(prefers-reduced-motion:reduce){.card{transition:none}.card:hover{transform:none}}
   </style>
+  <link rel="stylesheet" href="/static/sidebar.css">
   <script src="/static/hub-cache.js"></script>
   <script src="/static/time.js"></script>
 <style>main{max-width:none}</style>
 </head>
 <body>
   <div class="shell">
-    <aside>
-      <div class="brand">
-        <div class="brand-mark">
-          S
-        </div>
-        <div>
-          <strong>Sentinel Hub</strong><small>remote monitor</small>
-        </div>
-      </div>
-      <nav>
-        <a class="nav" href="/"><span>⌁</span> Overview</a><a class="nav" href="/#threats"><span>◎</span> IP Intelligence</a><a class="nav" href="/alerts"><span>!</span> Alerts</a><a class="nav" href="/raw-logs"><span>≋</span> Raw Log Tail</a><a class="nav active" href="/regions"><span>◇</span> Region profiles</a>
-      </nav>
-    </aside>
+<aside data-sidebar data-page="regions"></aside>
     <main>
       <header class="top">
         <div>
@@ -62,6 +51,6 @@
   const formatRegionScores=()=>document.querySelectorAll('.score,.signal strong').forEach(node=>{const text=node.firstChild;if(text&&text.nodeType===3)text.nodeValue=formatRegionNumber(text.nodeValue.trim())});
   new MutationObserver(formatRegionScores).observe(document.querySelector('#grid'),{childList:true,subtree:true});
   </script>
-  <script src="/static/sidebar.js"></script>
+  <script src="/static/sidebar.js?v=20260922-sidebar-health"></script>
 </body>
 </html>

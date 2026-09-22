@@ -20,6 +20,7 @@ from .core.request_context import request_id
 from .core import metrics
 from .services.classification_watcher import run_classification_watcher
 from .services.coverage import run_coverage_consumer
+from .services.enrichment_queue import run_enrichment_worker
 from .services.ai_runtime import ai_runtime
 from .services.realtime_listener import PostgresRealtimeListener
 from .collectors.websocket_collector import bus, collector
@@ -47,6 +48,8 @@ async def lifespan(_app: FastAPI):
     ai_started = False
     watcher = None
     coverage = None
+    enrichment = None
+    enrichment_stop = asyncio.Event()
     if APP_ROLE in {"all", "collector"}:
         await collector.start()
         collector_task = collector
@@ -58,13 +61,15 @@ async def lifespan(_app: FastAPI):
     if APP_ROLE in {"all", "worker"}:
         watcher = asyncio.create_task(run_classification_watcher())
         coverage = asyncio.create_task(run_coverage_consumer())
+        enrichment = asyncio.create_task(run_enrichment_worker(enrichment_stop))
     try:
         yield
     finally:
-        for task in (watcher, coverage):
+        enrichment_stop.set()
+        for task in (watcher, coverage, enrichment):
             if task is not None:
                 task.cancel()
-        tasks = [task for task in (watcher, coverage) if task is not None]
+        tasks = [task for task in (watcher, coverage, enrichment) if task is not None]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         try:

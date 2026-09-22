@@ -5,25 +5,14 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sentinel Hub</title>
   <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/sidebar.css">
   <link rel="stylesheet" href="/static/map.css">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <script src="/static/hub-cache.js"></script>
 </head>
 <body>
   <div class="shell">
-    <aside>
-      <div class="brand">
-        <div class="brand-mark">
-          S
-        </div>
-        <div>
-          <strong>Sentinel Hub</strong><small>remote monitor</small>
-        </div>
-      </div>
-      <nav aria-label="Main navigation">
-        <a class="nav-item" data-view="overview" href="#overview"><span class="nav-icon">⌁</span>Overview</a> <a class="nav-item" data-view="threats" href="#threats"><span class="nav-icon">◎</span>IP Intelligence</a> <a class="nav-item" href="/alerts"><span class="nav-icon">!</span>Alerts</a> <a class="nav-item" href="/raw-logs"><span class="nav-icon">≋</span>Raw Log Tail</a> <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
-      </nav>
-    </aside>
+<aside data-sidebar data-page="dashboard"></aside>
     <main>
       <header class="topbar">
         <div>
@@ -44,7 +33,6 @@
             <div class="country-demand-periods" role="group" aria-label="Country demand period"><button type="button" data-country-period="7d">7d</button><button type="button" class="active" data-country-period="30d">30d</button><button type="button" data-country-period="90d">90d</button></div>
           </div>
           <div class="country-demand-table-wrap"><div id="country-demand-table" class="state">Loading country signals…</div></div>
-          <aside id="country-demand-drawer" class="country-demand-drawer" hidden aria-label="Country demand details"></aside>
         </section>
         <section class="dashboard-map-card" aria-label="Global intelligence map">
           <div class="dashboard-map-head">
@@ -82,18 +70,6 @@
                 </div>
               </div>
             </section>
-          </div>
-          <div class="site-state overview-health" id="health-widget" role="button" tabindex="0" title="Click to view infrastructure health diagnostics">
-            <div class="health-head">
-              <div class="eyebrow">System Health</div>
-              <div class="online"><span class="dot" id="collector-dot"></span><span id="collector-state">Checking…</span></div>
-            </div>
-            <div class="health-grid">
-              <div class="health-chip" id="chip-pg"><span class="dot-sm"></span>PG</div>
-              <div class="health-chip" id="chip-ch"><span class="dot-sm"></span>CH</div>
-              <div class="health-chip" id="chip-rules"><span class="dot-sm"></span>Rules</div>
-              <div class="health-chip" id="chip-stream"><span class="dot-sm"></span>Stream</div>
-            </div>
           </div>
         </section>
         <section class="traffic-panel" aria-label="Traffic timeline">
@@ -250,7 +226,7 @@
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/static/time.js"></script>
-  <script src="/static/sidebar.js"></script>
+  <script src="/static/sidebar.js?v=20260922-sidebar-health"></script>
     <!-- The Sentinel Hub dashboard is an analyst surface, not the monitored app. -->
     <script>window.BEHAVIOR_TRACKING={enabled:false,sessionTimeoutMs:1800000};</script>
     <script src="/static/behavior-tracker.js"></script>

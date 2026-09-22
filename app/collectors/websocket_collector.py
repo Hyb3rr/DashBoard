@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import inspect
@@ -14,9 +13,11 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..config import settings
+from .config import CollectorConfig
 from ..db import clickhouse as clickhouse_store
 from ..db import postgres as postgres_store
 from ..core import metrics
+from ..services.realtime_bus import RealtimeBus, _RealtimeSubscription
 from ..db.repositories import CheckpointRepository
 from ..db.repositories import CheckpointCommitRejected
 from ..core.logs import PARSER_VERSION, parse_apache_combined_diagnostic
@@ -36,40 +37,6 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass(frozen=True)
-class CollectorConfig:
-    enabled: bool
-    url: str
-    token: str
-    log_key: str
-    source_id: str
-    batch_size: int
-    flush_ms: int
-    ai_interval_seconds: int = 300
-
-    @classmethod
-    def from_env(cls) -> "CollectorConfig":
-        enabled = os.getenv("LOG_WS_ENABLED", "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        return cls(
-            enabled=enabled,
-            url=os.getenv("LOG_WS_URL", "").strip(),
-            token=os.getenv("LOG_WS_TOKEN", "").strip(),
-            log_key=os.getenv("LOG_WS_LOG_KEY", "access").strip() or "access",
-            source_id=os.getenv("LOG_WS_SOURCE_ID", "azure-access").strip()
-            or "azure-access",
-            batch_size=_env_int("LOG_WS_BATCH_SIZE", 200, 1),
-            flush_ms=_env_int("LOG_WS_FLUSH_MS", 1000, 50),
-            ai_interval_seconds=_env_int("AI_RUNTIME_INTERVAL_SECONDS", 300, 1),
-        )
-
-    @property
-    def valid(self) -> bool:
-        return bool(self.url and self.token and self.log_key and self.source_id)
 
 
 class _StorageStop:
@@ -77,57 +44,6 @@ class _StorageStop:
 
 
 _STORAGE_STOP = _StorageStop()
-
-
-class RealtimeBus:
-    """Small process-local fanout bus used by the SSE endpoint."""
-
-    def __init__(self) -> None:
-        self._subscriptions: set[_RealtimeSubscription] = set()
-        self._lock = asyncio.Lock()
-
-    async def publish(self, event: str, payload: dict[str, Any]) -> None:
-        async with self._lock:
-            for subscription in tuple(self._subscriptions):
-                if event == "ip_changes" and subscription.ip_changes_pending:
-                    # Cursor notifications are wake-ups, not durable events.
-                    # Keep only the newest cursor while a client is consuming.
-                    subscription.latest_ip_changes = payload
-                    continue
-                try:
-                    subscription.queue.put_nowait((event, payload))
-                except asyncio.QueueFull:
-                    metrics.increment("realtime_bus_dropped_events")
-                    continue
-                if event == "ip_changes":
-                    subscription.ip_changes_pending = True
-
-    async def subscribe(self):
-        subscription = _RealtimeSubscription()
-        async with self._lock:
-            self._subscriptions.add(subscription)
-        try:
-            while True:
-                event, payload = await subscription.queue.get()
-                yield event, payload
-                if event == "ip_changes":
-                    async with self._lock:
-                        if subscription.latest_ip_changes is None:
-                            subscription.ip_changes_pending = False
-                        else:
-                            latest = subscription.latest_ip_changes
-                            subscription.latest_ip_changes = None
-                            subscription.queue.put_nowait(("ip_changes", latest))
-        finally:
-            async with self._lock:
-                self._subscriptions.discard(subscription)
-
-
-class _RealtimeSubscription:
-    def __init__(self) -> None:
-        self.queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=100)
-        self.ip_changes_pending = False
-        self.latest_ip_changes: dict[str, Any] | None = None
 
 
 bus = RealtimeBus()
@@ -168,6 +84,7 @@ class WebSocketCollector:
         self._flush_task: asyncio.Task | None = None
         self._storage_task: asyncio.Task | None = None
         self._enrichment_task: asyncio.Task | None = None
+        self._governor_task: asyncio.Task | None = None
         self._privacy_task: asyncio.Task | None = None
         self._rare_path_task: asyncio.Task | None = None
         self._enrichment_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
@@ -218,6 +135,7 @@ class WebSocketCollector:
         self._enrichment_task = asyncio.create_task(
             self.enrichment_loop(), name="websocket-enrichment"
         )
+        self._governor_task = asyncio.create_task(self._governor_loop(), name="workload-governor")
         self._privacy_task = asyncio.create_task(self.privacy_loop(), name="websocket-privacy-refresh")
         await early_alerts.start()
         if self.config.enabled and self.config.valid:
@@ -236,6 +154,7 @@ class WebSocketCollector:
                 self._task,
                 self._flush_task,
                 self._enrichment_task,
+                self._governor_task,
                 self._privacy_task,
                 self._rare_path_task,
             )
@@ -255,7 +174,7 @@ class WebSocketCollector:
             self._discard_uncommitted_storage()
         await self._raw_archive.stop()
         self._clickhouse_writer.close()
-        self._task = self._flush_task = self._storage_task = self._enrichment_task = self._privacy_task = self._rare_path_task = None
+        self._task = self._flush_task = self._storage_task = self._enrichment_task = self._governor_task = self._privacy_task = self._rare_path_task = None
         await early_alerts.stop()
         self.state = "stopped"
         await self._publish_status()
@@ -266,9 +185,7 @@ class WebSocketCollector:
         oldest_age_ms = 0.0
         if self._storage_oldest_started is not None:
             oldest_age_ms = (time.monotonic() - self._storage_oldest_started) * 1000
-        state = self._governor.update(
-            self._storage_queue.qsize(), oldest_age_ms, early_alerts.status()["queue_depth"]
-        )
+        state = self._governor.state()
         metrics.gauge("storage.queue_depth", self._storage_queue.qsize())
         metrics.gauge("storage.oldest_age_ms", oldest_age_ms)
         metrics.gauge("collector.reconnect_attempt", self.reconnect_attempt)
@@ -313,6 +230,19 @@ class WebSocketCollector:
             },
             "ai_runtime": ai_runtime.status(),
         }
+
+    async def _governor_loop(self) -> None:
+        while not self._stop.is_set():
+            oldest_age_ms = 0.0
+            if self._storage_oldest_started is not None:
+                oldest_age_ms = (time.monotonic() - self._storage_oldest_started) * 1000
+            self._governor.update(
+                self._storage_queue.qsize(), oldest_age_ms, early_alerts.status()["queue_depth"]
+            )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
     def shared_status(self) -> dict[str, Any]:
         """Use persisted control-plane state when this process is API-only."""

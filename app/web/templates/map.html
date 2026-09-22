@@ -5,21 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Global Intelligence Map · Sentinel Hub</title>
   <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/sidebar.css">
   <link rel="stylesheet" href="/static/map.css">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 </head>
 <body>
   <div class="shell map-shell">
-    <aside>
-      <div class="brand"><div class="brand-mark">S</div><div><strong>Sentinel Hub</strong><small>remote monitor</small></div></div>
-      <nav aria-label="Main navigation">
-        <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
-        <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
-        <a class="nav-item active" href="/map" aria-current="page"><span class="nav-icon">◌</span>Global map</a>
-        <a class="nav-item" href="/raw-logs"><span class="nav-icon">≋</span>Raw Log Tail</a>
-        <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
-      </nav>
-    </aside>
+<aside data-sidebar data-page="map"></aside>
     <main>
       <header class="topbar map-topbar">
         <div><div class="eyebrow">Intelligence / Global map</div><h1>Opportunity × Threat</h1></div>
@@ -65,5 +57,6 @@
   </div>
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="/static/map.js"></script>
+  <script src="/static/sidebar.js?v=20260922-sidebar-health"></script>
 </body>
 </html>

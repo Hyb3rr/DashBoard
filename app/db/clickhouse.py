@@ -370,17 +370,11 @@ def traffic(
             params["filter_value"] = filter_value
         elif filter_type == "country":
             ips = allowed_ips or []
-            if exclude:
-                conditions.append("src_ip NOT IN {allowed_ips:Array(IPv6)}")
-            else:
-                conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
+            conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
             params["allowed_ips"] = ips
         elif filter_type == "classification":
             ips = allowed_ips or []
-            if exclude:
-                conditions.append("src_ip NOT IN {allowed_ips:Array(IPv6)}")
-            else:
-                conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
+            conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
             params["allowed_ips"] = ips
         where = " AND ".join(conditions)
         base = f"FROM http_events FINAL WHERE {where}"

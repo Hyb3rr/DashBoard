@@ -1,24 +1,20 @@
 (function () {
   const STORAGE_KEY = 'sentinel-sidebar-collapsed';
   const shell = document.querySelector('.shell');
-  const aside = shell?.querySelector(':scope > aside');
+  const aside = shell?.querySelector(':scope > aside[data-sidebar]');
   if (!shell || !aside) return;
 
-  const style = document.createElement('style');
-  style.textContent = `
-    .shell.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-    .shell.sidebar-collapsed > aside { padding-inline: 10px; }
-    .shell.sidebar-collapsed > aside .brand { display: none; }
-    .shell.sidebar-collapsed > aside nav a { font-size: 0; }
-    .shell.sidebar-collapsed > aside nav a > span { font-size: 16px; }
-    .brand { position: relative; }
-    .shell > aside { position: sticky; top: 0; height: 100vh; }
-    .sidebar-toggle { position: absolute; top: 20px; right: 14px; z-index: 3; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line, rgba(214,243,247,.1)); border-radius: 5px; background: transparent; color: var(--secondary, #9db2b7); cursor: pointer; font: 20px/1 ui-sans-serif,system-ui,sans-serif; }
-    .sidebar-toggle:hover, .sidebar-toggle:focus-visible { background: var(--raised, #102229); color: var(--ink, #e6f1f2); }
-    .shell.sidebar-collapsed .sidebar-toggle { position: static; display: block; margin: 0 auto; font-size: 20px; }
-    .shell.sidebar-collapsed .sidebar-toggle::before { content: '›'; font-size: 20px; line-height: 1; }
-  `;
-  document.head.appendChild(style);
+  const page = aside.dataset.page || '';
+  const items = [
+    { key: 'overview', href: '/', icon: '⌁', label: 'Overview', view: 'overview' },
+    { key: 'ip-intelligence', href: '/#threats', icon: '◎', label: 'IP Intelligence', view: 'threats' },
+    { key: 'alerts', href: '/alerts', icon: '!', label: 'Alerts' },
+    { key: 'raw-logs', href: '/raw-logs', icon: '≋', label: 'Raw Log Tail' },
+  ];
+  const activeKey = page === 'dashboard'
+    ? (location.hash === '#threats' ? 'ip-intelligence' : 'overview')
+    : page === 'region-detail' ? '' : page;
+  aside.innerHTML = `<div class="brand"><div class="brand-mark">S</div><div><strong>Sentinel Hub</strong><small>remote monitor</small></div></div><nav aria-label="Main navigation">${items.map(item => `<a class="nav-item${item.key === activeKey ? ' active' : ''}" data-view="${item.view || ''}" href="${item.href}"${item.key === activeKey ? ' aria-current="page"' : ''}><span class="nav-icon">${item.icon}</span>${item.label}</a>`).join('')}</nav>${page === 'dashboard' ? `<div class="sidebar-health" id="health-widget" role="button" tabindex="0" title="Click to view infrastructure health diagnostics"><div class="health-head"><div class="eyebrow">System Status</div><div class="online"><span class="dot" id="collector-dot"></span><span id="collector-state">Checking…</span></div></div><div class="health-grid"><div class="health-chip" id="chip-pg"><span class="dot-sm"></span>PG</div><div class="health-chip" id="chip-ch"><span class="dot-sm"></span>CH</div><div class="health-chip" id="chip-rules"><span class="dot-sm"></span>Rules</div><div class="health-chip" id="chip-stream"><span class="dot-sm"></span>Stream</div></div></div>` : ''}`;
 
   const button = document.createElement('button');
   button.type = 'button';

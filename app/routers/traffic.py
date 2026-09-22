@@ -24,7 +24,8 @@ def _parse_traffic_time(value: str | None) -> datetime | None:
 def _country_ips(country: str, exclude: bool) -> list[str] | None:
     try:
         with postgres_store.transaction() as conn:
-            rows = conn.execute("SELECT ip::text AS ip FROM ip_profiles WHERE country_code=%s", (country.upper(),)).fetchall()
+            operator = "!=" if exclude else "="
+            rows = conn.execute(f"SELECT ip::text AS ip FROM ip_profiles WHERE country_code {operator} %s OR country_code IS NULL", (country.upper(),)).fetchall()
         return [str(row["ip"]) for row in rows]
     except Exception as exc:
         raise HTTPException(503, f"PostgreSQL country state unavailable: {exc}") from exc

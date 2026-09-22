@@ -28,6 +28,8 @@ def test_ip_detail_removes_redundant_microcopy_but_keeps_primary_card_titles():
     assert "<h2>Network location</h2><small>" not in IP_DETAIL
     assert "<h2>Data freshness</h2><small>" not in IP_DETAIL
     assert "<h2>Assessment snapshot</h2>" in IP_DETAIL
+    assert "case explainer · non-authoritative" not in IP_DETAIL
+    assert "On-demand local reasoning. It supports investigation and never changes classification or risk." not in IP_DETAIL
 
 
 def test_map_and_dashboard_remove_redundant_header_subtitles():

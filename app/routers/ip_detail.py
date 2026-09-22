@@ -4,7 +4,7 @@ import ipaddress
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..services.dispositions import STATES
-from ..collectors.websocket_collector import collector
+from ..services.enrichment_queue import enqueue
 from ..db.repositories import AiRepository, DispositionRepository, StateRepository
 from .ip_state import _pg_item
 
@@ -30,8 +30,8 @@ async def ip_details(ip: str, refresh: bool = False):
         refresh or row.get("enrichment_status") != "complete"
     )
     if needs_enrichment:
-        collector.schedule_enrichment(address_text)
-    scores = AiRepository().scores([address_text])
+        await asyncio.to_thread(enqueue, address_text)
+    scores = await asyncio.to_thread(AiRepository().scores, [address_text])
     ai_profile = scores[0] if scores else None
     item = _pg_item(row, ai_profile) if ai_profile else _pg_item(row)
     return item

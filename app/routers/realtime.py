@@ -21,13 +21,15 @@ def collector_status():
 @router.post("/api/ips/refresh-unknown")
 async def refresh_unknown(limit: int = 500):
     limit = min(max(limit, 1), 5000)
-    with postgres_store.transaction() as pg_conn:
-        rows = pg_conn.execute("""SELECT host(o.ip) AS ip
-            FROM ip_observations_state o LEFT JOIN ip_profiles p ON p.ip=o.ip
-            WHERE p.ip IS NULL OR p.enrichment_status IS DISTINCT FROM 'complete'
-               OR p.country IS NULL OR p.country_code IS NULL
-            ORDER BY COALESCE(NULLIF(o.payload->>'requests','')::bigint,0) DESC, o.ip ASC
-            LIMIT %s""", (limit,)).fetchall()
+    def select_unknown():
+        with postgres_store.transaction() as pg_conn:
+            return pg_conn.execute("""SELECT host(o.ip) AS ip
+                FROM ip_observations_state o LEFT JOIN ip_profiles p ON p.ip=o.ip
+                WHERE p.ip IS NULL OR p.enrichment_status IS DISTINCT FROM 'complete'
+                   OR p.country IS NULL OR p.country_code IS NULL
+                ORDER BY COALESCE(NULLIF(o.payload->>'requests','')::bigint,0) DESC, o.ip ASC
+                LIMIT %s""", (limit,)).fetchall()
+    rows = await asyncio.to_thread(select_unknown)
     selected = [str(row["ip"]) for row in rows]
 
     async def generate_split():
@@ -54,20 +56,21 @@ async def refresh_unknown(limit: int = 500):
 @router.get("/api/stream")
 async def realtime_stream():
     async def generate():
-        iterator = bus.subscribe().__aiter__()
+        subscription = await bus.open_subscription()
         try:
             # Flush the SSE response immediately so EventSource can establish
             # the connection without waiting for the first 15-second heartbeat.
             yield ": connected\n\n"
             while True:
                 try:
-                    event, payload = await asyncio.wait_for(iterator.__anext__(), timeout=15)
+                    event, payload = await asyncio.wait_for(subscription.get(), timeout=15)
                     yield f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    await subscription.ack(event)
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
         except (asyncio.CancelledError, StopAsyncIteration):
             return
         finally:
-            await iterator.aclose()
+            await subscription.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

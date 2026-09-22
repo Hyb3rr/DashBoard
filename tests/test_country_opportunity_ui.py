@@ -27,6 +27,9 @@ def test_dashboard_uses_country_opportunity_read_model():
     assert "normalizeCity" not in javascript
     assert "citySignalsFromProductMarkets" not in javascript
     assert "opportunity_score" in javascript
+    assert "data-region-link" in javascript
+    assert "window.location.assign(row.dataset.regionLink)" in javascript
+    assert "/regions/${encodeURIComponent(code)}" in javascript
     assert "evidence_level" in javascript
     assert "traffic_${countryDemandPeriod}" in javascript
     assert "Market score" in javascript
@@ -64,3 +67,6 @@ def test_dashboard_uses_sse_events_and_fallback_polling_without_parallel_one_sec
     assert "startRealtime();startDurableRealtimeSync()" not in javascript
     assert "function startFallbackPolling(){if(fallbackPollTimer)return;fallbackPollTimer=setInterval(()=>scheduleRealtimeFlush(),5000)}" in javascript
     assert "eventSource.addEventListener('ip_changes'" in javascript
+    assert "const debounce=Math.max(750,Number(delay)||0)" in javascript
+    assert "let trafficRequest=null" in javascript
+    assert "if(trafficRequest)return trafficRequest" in javascript

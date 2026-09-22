@@ -18,6 +18,20 @@ from ..db import postgres
 TABLES = ("ip_minute_features", "ip_minute_path_seen")
 
 
+def trim_change_log(connection: Any, keep_rows: int = 50000) -> int:
+    """Bound the durable change feed independently of AI model availability."""
+    result = connection.execute(
+        """DELETE FROM ip_change_log
+           WHERE seq <= (SELECT CASE WHEN MAX(seq) > %s THEN MAX(seq) - %s ELSE 0 END
+                         FROM ip_change_log)""",
+        (keep_rows, keep_rows),
+    )
+    connection.commit()
+    deleted = max(0, int(result.rowcount or 0))
+    metrics.increment("retention.change_log_rows_deleted", deleted)
+    return deleted
+
+
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     try:
         return max(minimum, int(os.getenv(name, str(default))))
@@ -95,7 +109,10 @@ def run_once(*, now: datetime | None = None) -> dict[str, Any]:
         return {"status": "disabled", "deleted": {table: 0 for table in TABLES}, "total_deleted": 0}
     connection = postgres.connect()
     try:
-        return cleanup_derived_state(connection, now=now)
+        result = cleanup_derived_state(connection, now=now)
+        result["change_log_deleted"] = trim_change_log(connection)
+        result["total_deleted"] += result["change_log_deleted"]
+        return result
     except Exception:
         connection.rollback()
         raise

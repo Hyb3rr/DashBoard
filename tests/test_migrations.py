@@ -27,7 +27,7 @@ def test_critical_recurrence_obeys_thirty_minute_cooldown():
 def test_postgres_migrations_are_ordered_and_checksumed():
     migrations = discover()
 
-    assert [migration.version for migration in migrations] == list(range(36))
+    assert [migration.version for migration in migrations] == list(range(38))
     assert [migration.filename for migration in migrations] == [
         "000_schema_migrations.sql",
         "001_initial.sql",
@@ -65,6 +65,8 @@ def test_postgres_migrations_are_ordered_and_checksumed():
         "033_realtime_change_notify.sql",
         "034_prune_orphan_alert_state.sql",
         "035_align_inventory_alert_timestamps.sql",
+        "036_city_overall_runtime_read_grants.sql",
+        "037_enrichment_requests.sql",
         ]
     assert all(len(migration.checksum_sha256) == 64 for migration in migrations)
 

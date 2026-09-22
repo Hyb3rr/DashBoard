@@ -75,10 +75,12 @@ class _AggregateConnection:
     def execute(self, query, _params):
         if "FROM ip_minute_path_seen" in query:
             return _Result([{"ip": "203.0.113.1", "unique_paths": 1, "peak_requests_1m": 50}])
-        if "bucket_minute, requests" in query:
+        if "SUM(requests) OVER" in query:
             return _Result([
-                _minute("2026-08-31T00:03:00Z", 120) | {"ip": "203.0.113.1"},
-                _minute("2026-08-31T00:04:00+00:00", 50) | {"ip": "203.0.113.1"},
+                {"ip": "203.0.113.1", "peak_requests_1m": 120,
+                 "recent_peak_requests_1m": 120, "one_hour_peak_requests_1m": 120,
+                 "peak_requests_5m": 170, "recent_peak_requests_5m": 170,
+                 "one_hour_peak_requests_5m": 170},
             ])
         return _Result([{
             "ip": "203.0.113.1", "requests": 170, "status_2xx": 170,

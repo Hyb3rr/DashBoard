@@ -28,3 +28,12 @@ def test_province_profile_ui_has_two_scopes_and_no_osm_product_ranking():
     assert "Local Opportunities" not in template
     assert "No persisted area or city summary is available yet." not in template
     assert "lc3DemandGridRender" not in template
+
+
+def test_region_source_links_have_scheme_guard():
+    template = Path("app/web/templates/region_detail.html").read_text()
+    security = Path("app/web/static/region-detail-security.js").read_text()
+    assert "/static/region-detail-security.js" in template
+    assert "a.source-link" in security
+    assert "['http:', 'https:']" in security
+    assert "event.preventDefault()" in security

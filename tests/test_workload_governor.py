@@ -36,3 +36,10 @@ def test_oldest_event_age_can_trigger_pressure():
 
     assert governor.update(0, 100).mode == "PRESSURE"
     assert governor.update(0, 200).mode == "CRITICAL"
+
+
+def test_governor_state_is_readable_without_status_side_effects():
+    governor = WorkloadGovernor(pressure_depth=5, critical_depth=10)
+    governor.update(10)
+    assert governor.state().mode == "CRITICAL"
+    assert not governor.allow_enrichment()

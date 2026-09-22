@@ -2,17 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Raw Log Tail · Sentinel Hub</title><link rel="stylesheet" href="/static/dashboard.css">
+<title>Raw Log Tail · Sentinel Hub</title><link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/sidebar.css">
 </head>
-<body><div class="shell"><aside>
-  <div class="brand"><div class="brand-mark">S</div><div><strong>Sentinel Hub</strong><small>remote monitor</small></div></div>
-  <nav aria-label="Main navigation">
-    <a class="nav-item" href="/"><span class="nav-icon">⌁</span>Overview</a>
-    <a class="nav-item" href="/#threats"><span class="nav-icon">◎</span>IP Intelligence</a>
-    <a class="nav-item" href="/alerts"><span class="nav-icon">!</span>Alerts</a>
-    <a class="nav-item active" href="/raw-logs" aria-current="page"><span class="nav-icon">≋</span>Raw Log Tail</a>
-    <a class="nav-item" href="/regions"><span class="nav-icon">◇</span>Region profiles</a>
-  </nav></aside>
+<body><div class="shell"><aside data-sidebar data-page="raw-logs"></aside>
   <main><header class="topbar"><div><div class="eyebrow">Operations / Raw evidence</div><h1>Raw Log Tail</h1></div><div class="actions"><span class="raw-log-connection" id="raw-log-state"><i></i>Live</span><button id="theme-toggle" class="secondary" type="button">Light mode</button></div></header>
   <section class="raw-log-page" aria-label="Raw log tail"><section class="raw-log-controls"><div><strong>Incoming HTTP events</strong><span>Read-only stream · last 5 minutes · max 100 events</span></div><div class="raw-log-actions"><label>IP<input id="raw-log-ip" type="text" placeholder="All IPs"></label><label>Status<input id="raw-log-status" type="number" min="100" max="599" placeholder="All"></label><button id="raw-log-pause" class="secondary" type="button" aria-pressed="false">Pause</button><button id="raw-log-clear" class="secondary" type="button">Clear</button></div></section><section id="raw-log-list" class="raw-log-list" aria-live="polite"><div class="state">Connecting to raw event stream…</div></section></section></main>
-</div><script src="/static/sidebar.js"></script><script src="/static/raw-logs.js?v=20260921-raw-tail"></script></body></html>
+</div><script src="/static/sidebar.js?v=20260922-sidebar-health"></script><script src="/static/raw-logs.js?v=20260921-raw-tail"></script></body></html>

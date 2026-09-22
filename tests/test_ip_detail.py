@@ -14,7 +14,7 @@ def test_ip_detail_returns_snapshot_and_schedules_missing_enrichment(monkeypatch
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
-    monkeypatch.setattr(ip_detail.collector, "schedule_enrichment", lambda ip: scheduled.append(ip))
+    monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
     result = asyncio.run(ip_detail.ip_details("8.8.8.8"))
@@ -31,7 +31,7 @@ def test_non_public_ip_is_terminal_and_never_schedules_enrichment(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, ip: {"ip": ip, "enrichment_status": "complete", "network_location": {}})
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
-    monkeypatch.setattr(ip_detail.collector, "schedule_enrichment", lambda ip: scheduled.append(ip))
+    monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
     for ip in ("169.254.129.1", "10.0.0.1", "127.0.0.1"):
@@ -58,7 +58,7 @@ def test_ip_detail_refresh_never_runs_enrichment_inline(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
-    monkeypatch.setattr(ip_detail.collector, "schedule_enrichment", lambda ip: scheduled.append(ip))
+    monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
     result = asyncio.run(ip_detail.ip_details("8.8.8.8", refresh=True))
@@ -77,7 +77,7 @@ def test_complete_enrichment_without_ip2region_does_not_reschedule(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
-    monkeypatch.setattr(ip_detail.collector, "schedule_enrichment", lambda ip: scheduled.append(ip))
+    monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
     asyncio.run(ip_detail.ip_details("8.8.8.8"))
@@ -185,7 +185,7 @@ def test_ip_detail_ai_explain_is_manual_and_polls_validated_result():
     assert "setTimeout(()=>{aiPollTimer=null;pollAiJob()},3000)" in html
     assert "grounding validated" in html
     assert "automatic retry" in html
-    assert "classification or risk" in html
+    assert "case explainer · non-authoritative" not in html
     assert "renderAiExplainInPlace()" in html
     assert "next.hidden=current.hidden" in html
     assert "aiJobState=await res.json();" in html
@@ -194,6 +194,24 @@ def test_ip_detail_ai_explain_is_manual_and_polls_validated_result():
     assert "status_unavailable: ${error.message}`};renderAiExplainInPlace()" in html
     assert "Rare path · ${item.path}" in html
     assert "Evidence ID · ${esc(id||'unknown')}" not in html
+
+
+def test_rare_path_evidence_emphasizes_only_path_and_rarity():
+    html = (Path(__file__).parents[1] / "app" / "web" / "templates" / "ip_detail.html").read_text(encoding="utf-8")
+    assert 'class="rare-path-value"' in html
+    assert 'class="rare-path-score"' in html
+    assert 'class="rare-path-meta"' in html
+    assert "Supporting evidence only; rarity alone does not establish malicious intent." not in html
+    assert "item.explanation" not in html
+
+
+def test_detection_breakdown_keeps_signal_evidence_without_redundant_explanations():
+    html = (Path(__file__).parents[1] / "app" / "web" / "templates" / "ip_detail.html").read_text(encoding="utf-8")
+    assert '<div class="score-formula">' not in html
+    assert "${description}" not in html
+    assert '<div class="score-component-reason"' not in html
+    assert "replace(/\\b(4xx|5xx)\\b/gi,'<strong>$1</strong>')" in html
+    assert "sensitive path" in html
 
 
 def test_classification_labels_are_not_presented_as_severity_levels():

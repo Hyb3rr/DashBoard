@@ -153,6 +153,11 @@
   .evidence{display:grid;gap:8px}
   .evidence-item{padding:10px 12px;border:1px solid rgba(89,216,230,.18);border-left:3px solid var(--cyan);border-radius:4px;background:rgba(89,216,230,.08);color:var(--secondary);font-size:12px}
   .evidence-item.rare-path-evidence{border-color:rgba(148,163,184,.22);border-left-color:var(--tertiary);background:rgba(148,163,184,.10)}
+  .rare-path-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .rare-path-value,.rare-path-score{font-weight:700;color:var(--ink)}
+  .rare-path-value{min-width:0;overflow-wrap:anywhere}
+  .rare-path-score{flex:none;white-space:nowrap}
+  .rare-path-meta{margin-top:5px;color:var(--tertiary);font-size:11px}
   .evidence-item.a{border-left-color:var(--cyan)}
   .evidence-item.b{border-left-color:var(--yellow)}
   .evidence-item.c{border-left-color:var(--green)}
@@ -266,6 +271,7 @@
   .evidence-disclosure .evidence-item{margin-top:8px}
   .ai-explain-error{color:var(--red);font-size:11px}
   </style>
+  <link rel="stylesheet" href="/static/sidebar.css">
   <style>
   html[data-theme="light"]{
   color-scheme:light;
@@ -289,27 +295,7 @@
 </head>
 <body>
   <div class="shell">
-    <aside>
-      <div class="brand">
-        <div class="brand-mark">
-          S
-        </div>
-        <div>
-          <strong>Sentinel Hub</strong><small>remote monitor</small>
-        </div>
-      </div>
-      <nav>
-        <a class="nav-item" href="/">⌁ Overview</a> <a class="nav-item active" href="/#threats">◎ IP Intelligence</a> <a class="nav-item" href="/alerts">! Alerts</a> <a class="nav-item" href="/regions">◇ Region profiles</a>
-      </nav>
-      <div class="site-state">
-        <div class="eyebrow">
-          Hub state
-        </div>
-        <div class="online">
-          <span class="dot"></span>Read-only · Online
-        </div>
-      </div>
-    </aside>
+<aside data-sidebar data-page="ip-detail"></aside>
     <main id="app">
       <div class="state">
         <strong>Loading IP case…</strong>Correlating geo, network and observed behavior.
@@ -361,7 +347,7 @@
   return `<div class="investigate-links">${links.map(([label,href])=>`<a class="external-link" href="${href}" target="_blank" rel="noopener noreferrer">${label} <span>↗</span></a>`).join('')}</div>`
   }
   function rarePathEvidence(items){
-  const paths=Array.isArray(items)?items:[],render=item=>`<div class="evidence-item rare-path-evidence">${esc(item.path||'Unknown path')} · rarity ${esc(item.rarity_score??'—')}/100 · first seen ${item.first_seen?window.formatVnTime(item.first_seen):'unknown'}<br><small>${esc(item.explanation||'Rarity alone does not establish malicious intent.')}</small></div>`;
+  const paths=Array.isArray(items)?items:[],render=item=>`<div class="evidence-item rare-path-evidence"><div class="rare-path-head"><strong class="rare-path-value">${esc(item.path||'Unknown path')}</strong><strong class="rare-path-score">${esc(item.rarity_score??'—')}/100</strong></div><div class="rare-path-meta">first seen ${item.first_seen?window.formatVnTime(item.first_seen):'unknown'}</div></div>`;
   if(!paths.length)return '<div class="evidence-item rare-path-evidence">No rare path evidence available.</div>';
   const visible=paths.slice(0,8).map(render).join(''),remaining=paths.slice(8);
   return visible+(remaining.length?`<details class="evidence-disclosure"><summary>Show ${remaining.length} more rare paths</summary>${remaining.map(render).join('')}</details>`:'');
@@ -376,9 +362,11 @@
   ];
   const evidence=Array.isArray(c.evidence)?c.evidence:[],explanations=c.score_explanations||{};
   const signed=value=>value>0?`+${value}`:String(value);
-  const cards=parts.map(([code,name,value,max,description])=>{const matches=evidence.filter(item=>String(item).startsWith(`${code} —`));return `<article class="score-component"><div class="score-component-head"><span class="score-component-code">${code}</span><span class="score-component-points ${value<0?'negative':''}">${signed(value)} <small>/ ${max}</small></span></div><h3>${name}</h3><p>${description}</p><div class="score-component-reason"><strong>Why:</strong> ${esc(explanations[code]||'No calculation note available.')}</div><div class="score-component-evidence ${matches.length?'':'muted'}">${matches.length?matches.map(item=>esc(item)).join('<br>'):'No direct evidence'}</div></article>`}).join('');
-  const formula=parts.map(([code,,value])=>`${code} ${signed(value)}`).join('  ');
-  return `<section class="card score-explainer" data-investigation-section="detections"><div class="card-head"><div><h2>Detection breakdown</h2><small>Auditable rule groups behind the current score</small></div><span class="score-total">${num(c.score??0)} / 100<small>final threat score</small></span></div><div class="body"><div class="score-formula">${formula}  =  ${num(c.score??0)} final · range 0–100<br><span>${esc(explanations.final||'')}</span></div><div class="score-components">${cards}</div></div></section>`
+  const emphasize=item=>esc(String(item).replace(/^[ABCDE] —\s*/,''))
+    .replace(/\b(4xx|5xx)\b/gi,'<strong>$1</strong>')
+    .replace(/(sensitive path|sensitive probe|web content enumeration|hosting\/datacenter|Tor|proxy|VPN)/gi,'<strong>$1</strong>');
+  const cards=parts.map(([code,name,value,max])=>{const matches=evidence.filter(item=>String(item).startsWith(`${code} —`));return `<article class="score-component"><div class="score-component-head"><span class="score-component-code">${code}</span><span class="score-component-points ${value<0?'negative':''}">${signed(value)} <small>/ ${max}</small></span></div><h3>${name}</h3><div class="score-component-evidence ${matches.length?'':'muted'}">${matches.length?matches.map(emphasize).join('<br>'):'No direct evidence'}</div></article>`}).join('');
+  return `<section class="card score-explainer" data-investigation-section="detections"><div class="card-head"><div><h2>Detection breakdown</h2><small>Auditable rule groups behind the current score</small></div><span class="score-total">${num(c.score??0)} / 100<small>final threat score</small></span></div><div class="body"><div class="score-components">${cards}</div></div></section>`
   }
   let aiJobId=sessionStorage.getItem(`hub:ai-explain-job:${ip}`)||'',aiJobState=null,aiPollTimer=null,aiPollActive=false,aiEvidenceCatalog=new Map();
   function aiStatusLabel(state){return ({pending:'Pending',running:'Running',completed:'Grounding validated',failed:'Failed'})[state]||'Not requested'}
@@ -401,12 +389,12 @@
   function aiExplainPanel(){
     const state=aiJobState?.status||'idle',analysis=aiJobState?.analysis,validation=aiJobState?.validation;
     const status=state==='idle'?'Not requested':aiStatusLabel(state),cls=state==='idle'?'':state;
-    let content='<p class="ai-explain-intro">On-demand local reasoning. It supports investigation and never changes classification or risk.</p>';
+    let content='';
     if(state==='pending'||state==='running')content+='<div class="state">Analysis in progress. This may take up to a few minutes on local CPU.</div>';
     if(state==='failed')content+=`<p class="ai-explain-error">${esc(aiJobState.failure_code||'AI analysis unavailable. No automatic retry was performed.')}</p>`;
     if(state==='completed'&&analysis){content=`<div class="ai-explain-copy"><div class="ai-explain-block"><h3>Summary</h3><p>${esc(analysis.summary)}</p></div><div class="ai-explain-block"><h3>Primary evidence</h3>${aiEvidence(analysis.primary_evidence)}</div><div class="ai-explain-block"><h3>Supporting evidence</h3>${aiEvidence(analysis.supporting_evidence)}</div><div class="ai-explain-block"><h3>Alternative explanation</h3><p>${esc(analysis.alternative_explanation)}</p></div><div class="ai-explain-block"><h3>Model-stated uncertainty · not a confidence score</h3><p>${esc(analysis.uncertainty)}</p></div><div class="ai-explain-block"><h3>Recommended investigation</h3>${analysis.recommended_investigation?.length?`<ul class="ai-investigation">${analysis.recommended_investigation.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>`:'<p>No recommendation returned.</p>'}</div></div><div class="ai-validation">AI-generated analysis · grounding validated</div>`}
     const canRequest=state==='idle'||state==='failed';
-    return `<section class="card ai-explain-card" data-investigation-section="overview"><div class="card-head"><div><h2>AI Case Analysis</h2><small>case explainer · non-authoritative</small></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':'Explain with AI'}</button></div></div></section>`;
+    return `<section class="card ai-explain-card" data-investigation-section="overview"><div class="card-head"><div><h2>AI Case Analysis</h2></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':'Explain with AI'}</button></div></div></section>`;
   }
   function renderAiExplainInPlace(){
     const current=document.querySelector('.ai-explain-card');if(!current)return;
@@ -894,5 +882,6 @@
   }
   load();startDetailRealtime();
   </script>
+  <script src="/static/sidebar.js?v=20260922-sidebar-health"></script>
 </body>
 </html>
