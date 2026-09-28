@@ -6,6 +6,7 @@ from app.core.rules import BehaviorContext, load_rules, load_rules_json, run_rul
 
 
 def test_every_enabled_rule_has_fire_and_not_fire_fixture():
+    """Verify every enabled rule has deterministic firing and non-firing cases."""
     rules, _ = load_rules()
     fixture_dir = Path(__file__).parent / "fixtures" / "rules"
     for rule in rules:
@@ -22,6 +23,7 @@ def test_every_enabled_rule_has_fire_and_not_fire_fixture():
 
 
 def test_rule_window_is_enforced():
+    """Keep detections scoped to the time window declared by each rule."""
     rules, _ = load_rules()
     burst = next(rule for rule in rules if rule.id == "WEB-BURST-001")
     context = BehaviorContext(peak_requests_1m=100)
@@ -30,6 +32,7 @@ def test_rule_window_is_enforced():
 
 
 def test_json_loader_is_available_for_format_parity(tmp_path):
+    """Preserve support for loading canonical JSON rule fixtures."""
     payload = {
         "id": "TEST-JSON-001", "name": "json", "severity": "low", "points": 1,
         "rule_type": "anomaly", "mitre_technique": None, "window": "1h",
@@ -46,6 +49,7 @@ def test_json_loader_is_available_for_format_parity(tmp_path):
     ("requests", 1, {"operator": "contains"}),
 ])
 def test_loader_rejects_invalid_condition_types(tmp_path, field, value, extra):
+    """Reject condition leaves whose value type conflicts with the operator."""
     operator = extra.get("operator", "gt")
     (tmp_path / "invalid.json").write_text(json.dumps({
         "id": "TEST-INVALID", "name": "invalid", "severity": "low", "points": 1,
@@ -58,6 +62,7 @@ def test_loader_rejects_invalid_condition_types(tmp_path, field, value, extra):
 
 
 def test_loader_rejects_invalid_rule_type_and_anomaly_mitre(tmp_path):
+    """Reject unsupported rule types and invalid MITRE mapping combinations."""
     for value in ("typo", "anomaly"):
         mitre = "T1595.003" if value == "anomaly" else ""
         (tmp_path / "invalid.json").write_text(json.dumps({
@@ -68,3 +73,40 @@ def test_loader_rejects_invalid_rule_type_and_anomaly_mitre(tmp_path):
         }), encoding="utf-8")
         with pytest.raises(ValueError):
             load_rules(tmp_path)
+
+
+def test_disabled_rule_is_skipped_before_enabled_rule_validation():
+    """Preserve the contract that disabled rules do not enter runtime validation."""
+    from app.core.rules import _validate_rule
+
+    disabled = {
+        "id": "invalid id", "name": "disabled", "severity": "unsupported", "points": -1,
+        "rule_type": "unknown", "window": "forever", "condition": {}, "version": 0,
+        "enabled": False, "false_positive_notes": [],
+    }
+
+    assert _validate_rule(disabled, "disabled.json") is None
+
+
+@pytest.mark.parametrize("condition", [
+    {"all": [{"field": "requests", "operator": "gte", "value": 5}]},
+    {"not": {"field": "requests", "operator": "eq", "value": 0}},
+])
+def test_condition_validator_accepts_nested_logical_nodes(condition):
+    """Accept valid logical nodes and recursively validated condition leaves."""
+    from app.core.rules import _validate_condition
+
+    _validate_condition(condition, "fixture.json", 0)
+
+
+@pytest.mark.parametrize("condition", [
+    {"all": []},
+    {"all": [{"field": "requests", "operator": "eq", "value": 1}], "not": {}},
+    {"not": []},
+])
+def test_condition_validator_rejects_malformed_logical_nodes(condition):
+    """Reject empty, mixed, or incorrectly shaped logical condition nodes."""
+    from app.core.rules import _validate_condition
+
+    with pytest.raises(ValueError):
+        _validate_condition(condition, "fixture.json", 0)

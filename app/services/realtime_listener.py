@@ -20,6 +20,7 @@ class PostgresRealtimeListener:
     """
 
     def __init__(self, publish: Callable[[str, dict[str, Any]], Awaitable[None]]) -> None:
+        """Initialize listener state and the local event publisher callback."""
         self._publish = publish
         self._task: asyncio.Task[None] | None = None
         self._stop = threading.Event()
@@ -29,6 +30,7 @@ class PostgresRealtimeListener:
         self._last_error: str | None = None
 
     async def start(self) -> None:
+        """Start the PostgreSQL notification listener when database access is configured."""
         if self._task and not self._task.done():
             return
         if not os.getenv("POSTGRES_DSN"):
@@ -40,6 +42,7 @@ class PostgresRealtimeListener:
         self._task = asyncio.create_task(asyncio.to_thread(self._listen), name="postgres-realtime-listener")
 
     async def stop(self) -> None:
+        """Signal the listener thread to stop and wait for its task to finish."""
         self._stop.set()
         if self._task:
             await asyncio.gather(self._task, return_exceptions=True)
@@ -47,6 +50,7 @@ class PostgresRealtimeListener:
         self._status = "stopped"
 
     def status(self) -> dict[str, Any]:
+        """Return the listener state, failure count, and most recent error type."""
         task_state = "running" if self._task and not self._task.done() else self._status
         return {
             "status": task_state,
@@ -55,6 +59,7 @@ class PostgresRealtimeListener:
         }
 
     def _listen(self) -> None:
+        """Reconnect to PostgreSQL and forward durable change-feed wake-up cursors."""
         import psycopg
         backoff = 1.0
         while not self._stop.is_set():

@@ -27,15 +27,67 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const when = value => window.formatVnTime ? window.formatVnTime(value) : (value ? new Date(value).toLocaleString() : '—');
   const label = value => String(value || '').replace(/^./, ch => ch.toUpperCase());
+  const severityRank = {low: 1, medium: 2, critical: 3};
+
+  function selectCurrentCaseAlerts(items) {
+    const casesByIp = new Map();
+    items.forEach(item => {
+      const key = String(item.ip || '');
+      if (!key) return;
+      const current = casesByIp.get(key);
+      const rank = severityRank[item.severity] || 0;
+      const currentRank = severityRank[current?.severity] || 0;
+      const createdAt = Date.parse(item.created_at || '') || 0;
+      const currentCreatedAt = Date.parse(current?.created_at || '') || 0;
+      const isNewer = createdAt > currentCreatedAt ||
+        (createdAt === currentCreatedAt && Number(item.id) > Number(current?.id));
+      if (!current || rank > currentRank || (rank === currentRank && isNewer)) {
+        casesByIp.set(key, item);
+      }
+    });
+    return [...casesByIp.values()];
+  }
+
+  function alertBehavior(item) {
+    const evidence = Array.isArray(item.evidence) ? item.evidence : [];
+    const signals = evidence.map(entry => {
+      if (typeof entry === 'string') return entry;
+      if (!entry || typeof entry !== 'object') return '';
+      const observed = entry.observed || {};
+      return [entry.type, entry.source, observed.rule_id, observed.rule_name, entry.description,
+        JSON.stringify(observed)].filter(Boolean).join(' ');
+    }).filter(Boolean);
+    const text = signals.join(' ').toLowerCase();
+    if (/sensitive|\.env|wp-config|web-sensitive/.test(text)) return 'Sensitive path probing';
+    if (/brute|wp.login|web-brute/.test(text)) return 'Brute-force login attempts';
+    if (/rare.path|rare_path/.test(text)) return 'Rare path activity';
+    if (/enumerat|path.scan|web-scan/.test(text)) return 'Path enumeration';
+    if (/request.burst|web-burst/.test(text)) return 'Request burst';
+    if (/repeated.client.errors|web-4xx/.test(text)) return 'Repeated client errors';
+    if (/bot.repeated.errors|web-bot/.test(text)) return 'Automated requests with repeated errors';
+    if (/sustained.request.rate|web-rate/.test(text)) return 'High request rate';
+    const networkSignals = [];
+    if (/\bproxy\b/.test(text)) networkSignals.push('Proxy');
+    if (/\bvpn\b/.test(text)) networkSignals.push('VPN');
+    if (/\btor\b/.test(text)) networkSignals.push('Tor exit');
+    if (/hosting|datacenter/.test(text)) networkSignals.push('Hosting/datacenter');
+    if (networkSignals.length) return `${networkSignals.join(' + ')} network`;
+    if (item.reason_type === 'critical_recurrence') return 'Critical activity repeated';
+    return 'Security risk signals';
+  }
 
   function alertCard(item) {
+    const behavior = alertBehavior(item);
+    const evidenceTitle = (Array.isArray(item.evidence) ? item.evidence : [])
+      .map(entry => typeof entry === 'string' ? entry : entry?.description || entry?.observed?.rule_name || '')
+      .filter(Boolean).join(' · ');
     return `
       <article class="alert-card ${esc(item.severity)} ${esc(item.status)}" data-alert-id="${esc(item.id)}" data-ip="${esc(item.ip)}" tabindex="0" role="link" aria-label="Open details for ${esc(item.ip)}">
         <div class="alert-card-head">
           <time datetime="${esc(item.created_at || '')}">${esc(when(item.created_at))}</time>
         </div>
         <div class="alert-card-body">
-          <div class="alert-card-content"><h3 title="${esc(item.ip)}">${esc(item.ip)}</h3><div class="alert-reason"><span>Reason</span><strong title="${esc(item.reason_type)}">${esc(item.reason_type)}</strong></div></div>
+          <div class="alert-card-content"><h3 title="${esc(item.ip)}">${esc(item.ip)}</h3><div class="alert-reason"><span>Detected behavior</span><strong title="${esc(evidenceTitle || behavior)}">${esc(behavior)}</strong></div></div>
         </div>
       </article>`;
   }
@@ -46,8 +98,10 @@
       const created = Date.parse(item.created_at || '');
       return Number.isFinite(created) && Date.now() - created <= cutoffHours * 60 * 60 * 1000;
     }) : items.filter(item => { const stamp = Date.parse(item.created_at || ''); return (!customStart || stamp >= Date.parse(customStart)) && (!customEnd || stamp <= Date.parse(customEnd)); });
+    const currentCases = selectCurrentCaseAlerts(visibleItems)
+      .filter(item => !status.value || item.status === status.value);
     const grouped = {low: [], medium: [], critical: []};
-    visibleItems.forEach(item => { if (grouped[item.severity]) grouped[item.severity].push(item); });
+    currentCases.forEach(item => { if (grouped[item.severity]) grouped[item.severity].push(item); });
     Object.entries(grouped).forEach(([level, levelItems]) => {
       const column = list.querySelector(`[data-alert-items="${level}"]`);
       const count = list.querySelector(`[data-alert-count="${level}"]`);
@@ -120,7 +174,6 @@
       renderedItems = [];
     }
     const query = new URLSearchParams({limit: '100'});
-    if (status.value) query.set('status', status.value);
     // The visible list is client-filtered by time; continue from the number
     // of raw items already fetched so the next page cannot reuse a stale or
     // malformed cursor after a live refresh.
@@ -136,7 +189,7 @@
       nextCursor = data.next_cursor || null;
       renderItems(merged);
       loadMoreButton.hidden = !nextCursor;
-      state.textContent = `${data.total || 0} alert${data.total === 1 ? '' : 's'} · updated just now`;
+      state.textContent = `${data.total || 0} alert event${data.total === 1 ? '' : 's'} · updated just now`;
     } catch (_) {
       if (generation !== loadGeneration) return;
       list.innerHTML = '<div class="state"><strong>Alerts unavailable</strong>PostgreSQL did not return the alert read model.</div>';

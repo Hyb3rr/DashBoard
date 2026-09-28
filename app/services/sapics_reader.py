@@ -28,6 +28,7 @@ FILES = {
 
 
 def _reader(name):
+    """Return a cached MMDB reader, reopening it when its file changes."""
     path = ROOT / FILES[name][0] / FILES[name][1]
     if not path.is_file():
         return None
@@ -43,6 +44,7 @@ def _reader(name):
 
 
 def _country(name, ip):
+    """Read a country claim from one MMDB source without propagating lookup errors."""
     reader = _reader(name)
     if not reader:
         return None
@@ -54,6 +56,7 @@ def _country(name, ip):
 
 
 def _city(name, ip):
+    """Read city, region, and coordinate evidence from the matching IP family database."""
     reader = _reader(f"{name}_{'v6' if ipaddress.ip_address(ip).version == 6 else 'v4'}")
     if not reader:
         return None
@@ -77,6 +80,7 @@ def _city(name, ip):
 
 
 def _asn(name, ip):
+    """Read autonomous-system identity from one MMDB source."""
     reader = _reader(name)
     if not reader:
         return None
@@ -89,6 +93,7 @@ def _asn(name, ip):
 
 
 def _distance(a, b):
+    """Calculate great-circle distance between two GeoIP coordinate records."""
     if not a or not b or a.get("latitude") is None or b.get("latitude") is None:
         return None
     r = 6371.0
@@ -99,6 +104,7 @@ def _distance(a, b):
 
 
 def _known(value) -> bool:
+    """Reject empty and common placeholder values as usable GeoIP evidence."""
     return value is not None and str(value).strip().lower() not in {"", "unknown", "0", "n/a", "null"}
 
 
@@ -127,49 +133,80 @@ def _normalize_city_candidate(source: str, value: dict | None) -> dict | None:
 
 
 def _valid_country(value) -> bool:
+    """Check that a country claim is a two-letter alphabetic code."""
     return _known(value) and len(str(value).strip()) == 2 and str(value).strip().isalpha()
 
 
+def _country_consensus(candidates: dict[str, str | None]) -> dict:
+    """Rank country claims by agreement and source priority, preserving conflict metadata."""
+    valid = {name: value for name, value in candidates.items() if _valid_country(value)}
+    groups: dict[str, list[str]] = {}
+    for source, value in valid.items():
+        groups.setdefault(str(value).upper(), []).append(source)
+
+    priority = ("user_country", "server_country", "geolite2_country", "dbip_country", "iptoasn_country")
+    ranked = sorted(
+        groups.items(),
+        key=lambda pair: (-len(pair[1]), min(priority.index(source) for source in pair[1])),
+    )
+    total = sum(len(sources) for _, sources in ranked)
+    winner_count = len(ranked[0][1]) if ranked else 0
+    conflict = len(ranked) > 1
+    majority = bool(winner_count and winner_count > total / 2)
+    severity = "none" if not conflict else "low" if winner_count / total >= .75 else "medium" if majority else "high"
+    status = "unresolved" if not ranked else "disputed" if conflict and not majority else "resolved_with_conflict" if conflict else "resolved"
+    return {
+        "value": ranked[0][0] if ranked else None,
+        "source": "sapics_consensus",
+        "conflict": conflict,
+        "status": status,
+        "conflict_severity": severity,
+        "agreement": {code: len(sources) for code, sources in ranked},
+        "candidates": candidates,
+        "user_country": valid.get("user_country"),
+    }
+
+
+def _city_consensus(candidates: dict[str, dict | None]) -> dict:
+    """Select trusted city evidence and summarize vendor name and coordinate conflicts."""
+    available = {name: value for name, value in candidates.items() if value}
+    known = {name: value for name, value in available.items() if _known(value.get("city"))}
+    city = known.get("geolite2_city") or known.get("dbip_city")
+    distance = _distance(candidates["geolite2_city"], candidates["dbip_city"])
+    coordinate_conflict = bool(distance is not None and distance > 25)
+    names_conflict = len({str(value["city"]).strip().lower() for value in known.values()}) > 1
+    conflict = coordinate_conflict or names_conflict
+    severity = "high" if distance is not None and distance > 100 else "medium" if conflict else "none"
+    selected = city if city and not conflict else {}
+    status = "disputed" if conflict else "resolved" if selected else "unresolved"
+    return {
+        "value": selected.get("city"),
+        "source": selected.get("source", "none"),
+        "state": selected.get("state"),
+        "latitude": selected.get("latitude"),
+        "longitude": selected.get("longitude"),
+        "timezone": selected.get("timezone"),
+        "coordinate_granularity": selected.get("coordinate_granularity", "unknown"),
+        "conflict": conflict,
+        "coordinate_conflict": coordinate_conflict,
+        "status": status,
+        "conflict_severity": severity,
+        "distance_km": round(distance, 1) if distance else None,
+        "candidates": candidates,
+    }
+
+
 def lookup(ip: str) -> dict:
+    """Collect country, city, and ASN candidates and report their conflicts."""
     ipaddress.ip_address(ip)
     countries = {name: _country(name, ip) for name in ("user_country", "server_country", "geolite2_country", "dbip_country", "iptoasn_country")}
     cities = {name: _normalize_city_candidate(name, _city(name, ip)) for name in ("geolite2_city", "dbip_city")}
     asns = {name: _asn(name, ip) for name in ("origin_asn", "geolite2_asn", "dbip_asn", "iptoasn_asn")}
-    valid_countries = {name: value for name, value in countries.items() if _valid_country(value)}
-    user = valid_countries.get("user_country")
-    country_groups = {}
-    for source, value in valid_countries.items():
-        country_groups.setdefault(str(value).upper(), []).append(source)
-    source_priority = ("user_country", "server_country", "geolite2_country", "dbip_country", "iptoasn_country")
-    ranked_countries = sorted(country_groups.items(), key=lambda pair: (-len(pair[1]), min(source_priority.index(source) for source in pair[1])))
-    country_choice = ranked_countries[0][0] if ranked_countries else None
-    city_candidates = {name: value for name, value in cities.items() if value}
-    known_city_candidates = {name: value for name, value in city_candidates.items() if _known(value.get("city"))}
-    city = known_city_candidates.get("geolite2_city") or known_city_candidates.get("dbip_city")
-    city_distance = _distance(cities["geolite2_city"], cities["dbip_city"])
-    coordinate_conflict = city_distance is not None and city_distance > 25
-    city_conflict = coordinate_conflict or (len({str(value.get("city")).strip().lower() for value in known_city_candidates.values()}) > 1)
-    city_severity = "high" if city_distance and city_distance > 100 else "medium" if city_conflict else "none"
-    country_conflict = len(ranked_countries) > 1
-    total_country_sources = sum(len(sources) for _, sources in ranked_countries)
-    winner_count = len(ranked_countries[0][1]) if ranked_countries else 0
-    clear_majority = bool(winner_count and winner_count > total_country_sources / 2)
-    country_severity = "none" if not country_conflict else "low" if winner_count / total_country_sources >= .75 else "medium" if clear_majority else "high"
-    country_status = "unresolved" if not country_choice else "disputed" if country_conflict and not clear_majority else "resolved_with_conflict" if country_conflict else "resolved"
+    country = _country_consensus(countries)
+    city = _city_consensus(cities)
     origin = asns["origin_asn"]
-    canonical_city = city if city and not city_conflict else None
-    return {"country": {"value": country_choice, "source": "sapics_consensus", "conflict": country_conflict,
-                         "status": country_status, "conflict_severity": country_severity,
-                         "agreement": {code: len(sources) for code, sources in ranked_countries},
-                         "candidates": countries},
-            "city": {"value": canonical_city.get("city") if canonical_city else None, "source": canonical_city.get("source") if canonical_city else "none",
-                     "state": canonical_city.get("state") if canonical_city else None, "latitude": canonical_city.get("latitude") if canonical_city else None,
-                     "longitude": canonical_city.get("longitude") if canonical_city else None, "timezone": canonical_city.get("timezone") if canonical_city else None,
-                     "coordinate_granularity": canonical_city.get("coordinate_granularity", "unknown") if canonical_city else "unknown",
-                     "conflict": city_conflict, "coordinate_conflict": coordinate_conflict,
-                     "status": "disputed" if city_conflict else "resolved" if canonical_city else "unresolved",
-                     "conflict_severity": city_severity, "distance_km": round(city_distance, 1) if city_distance else None,
-                     "candidates": cities},
-            "infrastructure": {"server_country": countries["server_country"], "cross_region": bool(user and countries["server_country"] and user != countries["server_country"])},
+    return {"country": {key: value for key, value in country.items() if key != "user_country"},
+            "city": city,
+            "infrastructure": {"server_country": countries["server_country"], "cross_region": bool(country["user_country"] and countries["server_country"] and country["user_country"] != countries["server_country"])},
             "asn": {"number": origin.get("number") if origin else None, "organization": origin.get("organization") if origin else None,
                     "source": "origin_asn", "candidates": asns}}

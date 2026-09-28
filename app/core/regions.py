@@ -45,6 +45,7 @@ def _legacy_conflict_type(description: str | None) -> str:
 
 
 def _normalise_severity(value: Any, indicator_type: str) -> str | None:
+    """Normalize numeric or named conflict severity into a standard level."""
     if isinstance(value, str):
         level = value.strip().lower()
         if level in SEVERITY_LEVELS:
@@ -111,6 +112,7 @@ def normalise_conflict_indicator(item: Any) -> dict | None:
 
 
 def normalise_conflict_indicators(items: Any) -> list[dict]:
+    """Normalize one or more conflict indicators while dropping invalid entries."""
     if items is None:
         return []
     if not isinstance(items, list):

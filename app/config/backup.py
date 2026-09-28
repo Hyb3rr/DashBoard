@@ -19,6 +19,7 @@ class BackupSettings:
     endpoint: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate backup part sizing and derive the default Azure endpoint."""
         if self.part_size <= 0:
             raise ValueError("backup part size must be positive")
         if self.endpoint is None:
@@ -26,6 +27,7 @@ class BackupSettings:
 
     @classmethod
     def from_env(cls) -> "BackupSettings":
+        """Build validated Azure backup settings from environment variables."""
         names = ("BACKUP_AZURE_ACCOUNT", "BACKUP_AZURE_CONTAINER")
         values = {name: os.getenv(name, "").strip() for name in names}
         missing = [name for name, value in values.items() if not value]

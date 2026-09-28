@@ -23,6 +23,7 @@ _CANONICAL_TIE_FIELDS = (
 
 
 def _payload_identity(event: dict[str, Any]) -> str:
+    """Return the supplied payload hash or derive a stable legacy event identity."""
     payload_hash = event.get("payload_hash")
     if payload_hash:
         return str(payload_hash)
@@ -34,6 +35,7 @@ def _payload_identity(event: dict[str, Any]) -> str:
 
 
 def _canonical_key(event: dict[str, Any], payload_hash: str) -> tuple[str, str, str, tuple[str, ...]]:
+    """Build a deterministic tie-break key for duplicate event deliveries."""
     ingested_at = event.get("ingested_at")
     event_time = event.get("event_time")
     return (
@@ -45,6 +47,7 @@ def _canonical_key(event: dict[str, Any], payload_hash: str) -> tuple[str, str, 
 
 
 def _canonicalize_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse replay duplicates and reject event IDs with conflicting payloads."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     anonymous: list[dict[str, Any]] = []
     for event in events:

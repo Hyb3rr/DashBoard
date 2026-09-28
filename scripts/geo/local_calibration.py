@@ -16,6 +16,7 @@ SAMPLE_FRACTION = 0.8
 
 
 def _percentile(values: list[float], ratio: float) -> float:
+    """Interpolate a percentile from an already ordered numeric sample."""
     ordered = sorted(values)
     position = (len(ordered) - 1) * ratio
     lower, upper = math.floor(position), math.ceil(position)
@@ -23,6 +24,7 @@ def _percentile(values: list[float], ratio: float) -> float:
 
 
 def _transform(values: list[float], method: str, fit_values: list[float] | None = None) -> list[float]:
+    """Apply one bounded calibration transform using the selected fit sample."""
     fit = sorted(fit_values or values)
     if method == "percentile":
         return [(sum(value <= current for value in fit) - 0.5) / len(fit) for current in values]
@@ -32,6 +34,7 @@ def _transform(values: list[float], method: str, fit_values: list[float] | None 
 
 
 def _rank(values: list[float]) -> list[float]:
+    """Assign average one-based ranks to values while preserving ties."""
     ordered = sorted(enumerate(values), key=lambda pair: pair[1])
     ranks = [0.0] * len(values)
     index = 0
@@ -47,6 +50,7 @@ def _rank(values: list[float]) -> list[float]:
 
 
 def _correlation(left: list[float], right: list[float]) -> float:
+    """Calculate Pearson correlation for two aligned rank vectors."""
     if len(left) < 2:
         return 1.0
     left_mean, right_mean = statistics.fmean(left), statistics.fmean(right)
@@ -56,6 +60,7 @@ def _correlation(left: list[float], right: list[float]) -> float:
 
 
 def _stability(values: list[float], method: str) -> dict[str, float]:
+    """Measure deterministic subsample stability and tail retention for a method."""
     full = _transform(values, method)
     rng = random.Random(SEED)
     correlations, median_shifts, p95_shifts = [], [], []
@@ -85,6 +90,7 @@ def _stability(values: list[float], method: str) -> dict[str, float]:
 
 
 def _select(metrics: dict[str, dict[str, float]]) -> str | None:
+    """Select the method by rank stability, tail distortion, and score shift."""
     if not metrics:
         return None
     # Deterministic ordering: stability first, then tail distortion, then shift.
@@ -94,31 +100,45 @@ def _select(metrics: dict[str, dict[str, float]]) -> str | None:
                                              METHODS.index(method)))
 
 
+def _calibrate_group(group: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Select a stable transform and build persistence rows for one market track."""
+    values = [float(row["raw_local_score"]) for row in group]
+    metrics = {method: _stability(values, method) for method in METHODS} if len(values) >= 20 else {}
+    selected = _select(metrics)
+    peer = _transform(values, "percentile") if selected else [None] * len(group)
+    calibrated = _transform(values, selected) if selected else [None] * len(group)
+    status = "selected" if selected else "insufficient_stability"
+    summary = {"count": len(group), "selected_method": selected, "metrics": metrics, "status": status}
+    updates = [
+        {
+            **row,
+            "calibrated_score": round(calibrated_score, 6) if calibrated_score is not None else None,
+            "peer_percentile": round(percentile, 6) if percentile is not None else None,
+            "calibration_method": selected,
+            "calibration_version": CALIBRATION_VERSION,
+            "calibration_status": status,
+        }
+        for row, calibrated_score, percentile in zip(group, calibrated, peer)
+    ]
+    return summary, updates
+
+
 def run_calibration(repo: Any) -> dict[str, Any]:
-    rows = repo.list_calibration_candidates()
+    """Calibrate candidates independently by track and persist their results."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in repo.list_calibration_candidates():
         groups[row["track"]].append(row)
     report: dict[str, Any] = {"calibration_version": CALIBRATION_VERSION, "groups": {}, "updated": 0}
     updates = []
     for track, group in sorted(groups.items()):
-        values = [float(row["raw_local_score"]) for row in group]
-        metrics = {method: _stability(values, method) for method in METHODS} if len(values) >= 20 else {}
-        selected = _select(metrics)
-        peer = _transform(values, "percentile") if selected else [None] * len(group)
-        calibrated = _transform(values, selected) if selected else [None] * len(group)
-        report["groups"][track] = {"count": len(group), "selected_method": selected, "metrics": metrics,
-                                   "status": "selected" if selected else "insufficient_stability"}
-        for row, calibrated_score, percentile in zip(group, calibrated, peer):
-            updates.append({**row, "calibrated_score": round(calibrated_score, 6) if calibrated_score is not None else None,
-                            "peer_percentile": round(percentile, 6) if percentile is not None else None,
-                            "calibration_method": selected, "calibration_version": CALIBRATION_VERSION,
-                            "calibration_status": "selected" if selected else "insufficient_stability"})
+        report["groups"][track], track_updates = _calibrate_group(group)
+        updates.extend(track_updates)
     report["updated"] = repo.update_local_calibration(updates)
     return report
 
 
 def main() -> int:
+    """Run track calibration and always close the shared PostgreSQL pool."""
     import json
     from ..db import postgres
     from ..db.market_repository import MarketRepository

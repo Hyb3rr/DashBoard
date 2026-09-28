@@ -22,6 +22,7 @@ LOCK_KEY = "ip-intelligence:ai-stage-2"
 
 
 def _interval_seconds() -> float:
+    """Read the AI worker interval with a one-second lower bound."""
     try:
         return max(1.0, float(os.getenv("AI_RUNTIME_INTERVAL_SECONDS", "300")))
     except (TypeError, ValueError):
@@ -29,6 +30,7 @@ def _interval_seconds() -> float:
 
 
 def _enabled() -> bool:
+    """Return whether the independent AI runtime is enabled by configuration."""
     return os.getenv("AI_RUNTIME_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -38,6 +40,7 @@ class AiRuntime:
         run_cycle: Callable[[], dict[str, Any]] | None = None,
         initial_delay_seconds: float | None = None,
     ) -> None:
+        """Initialize the periodic AI task and its optional startup delay."""
         self._run_cycle = run_cycle or self._run_cycle_sync
         self._initial_delay_seconds = initial_delay_seconds
         self._stop = asyncio.Event()
@@ -45,12 +48,14 @@ class AiRuntime:
         self._last_run: dict[str, Any] | None = None
 
     async def start(self) -> None:
+        """Start the AI task once when its runtime feature flag is enabled."""
         if not _enabled() or self._task:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self.run(), name="ai-stage-2-runtime")
 
     async def stop(self) -> None:
+        """Cancel and await the periodic AI task during application shutdown."""
         self._stop.set()
         if self._task:
             self._task.cancel()
@@ -58,6 +63,7 @@ class AiRuntime:
             self._task = None
 
     async def run(self) -> None:
+        """Run isolated AI cycles on schedule without stopping the API process."""
         first_delay = self._initial_delay_seconds
         if first_delay is None:
             first_delay = _interval_seconds()
@@ -80,6 +86,7 @@ class AiRuntime:
             first_delay = max(0.0, _interval_seconds() - elapsed)
 
     async def _wait_until_scheduled(self, delay: float) -> None:
+        """Wait for the schedule delay while allowing prompt shutdown."""
         if delay <= 0:
             return
         try:
@@ -88,6 +95,7 @@ class AiRuntime:
             return
 
     def status(self) -> dict[str, Any]:
+        """Return current runtime configuration and last-cycle state."""
         return {
             "enabled": _enabled(),
             "running": bool(self._task and not self._task.done()),
@@ -97,6 +105,7 @@ class AiRuntime:
 
     @staticmethod
     def _run_cycle_sync() -> dict[str, Any]:
+        """Run model training and scoring under a PostgreSQL advisory lock."""
         # Detector functions own their transaction boundaries and explicitly
         # commit model state and scores. Use one dedicated connection context,
         # not the repository transaction wrapper, to avoid nested commits.

@@ -1,6 +1,22 @@
 import json
+from types import SimpleNamespace
+from pathlib import Path
 
-from scripts.market.vietnam_province_enrichment import _number, OFFICIAL_PROVINCE_KCN_SOURCES, build_kcn_context, coverage_gate, parse_fdi_html, parse_fdi_stock_attachment, parse_fdi_stock_pdf_text, parse_hung_yen_kcn_html, parse_industrial_presence_attachment, parse_investvietnam_kcn_html, validate_industrial_presence_records
+from scripts.market.vietnam_province_enrichment import (
+    OFFICIAL_PROVINCE_KCN_SOURCES,
+    _number,
+    _publish_payloads,
+    _run_refresh,
+    build_kcn_context,
+    coverage_gate,
+    parse_fdi_html,
+    parse_fdi_stock_attachment,
+    parse_fdi_stock_pdf_text,
+    parse_hung_yen_kcn_html,
+    parse_industrial_presence_attachment,
+    parse_investvietnam_kcn_html,
+    validate_industrial_presence_records,
+)
 
 
 def test_kcn_context_has_all_34_units_and_missing_is_null():
@@ -99,3 +115,43 @@ def test_province_page_uses_average_occupancy_not_first_park_rate():
     raw = "<p>Châu Sơn đạt tỷ lệ lấp đầy 100%.</p><p>Tỷ lệ lấp đầy bình quân là 58,41%.</p>".encode()
     row = parse_investvietnam_kcn_html(raw, source, "now")
     assert row["occupancy_rate_pct"] == 58.41
+
+
+def test_refresh_keeps_existing_snapshots_when_any_source_batch_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "scripts.market.vietnam_province_enrichment._fetch_fdi_batch",
+        lambda _retrieved_at: ([], {"2025": {"status": "failed"}}, False),
+    )
+    monkeypatch.setattr(
+        "scripts.market.vietnam_province_enrichment._load_fdi_stock",
+        lambda _args, _retrieved_at: {},
+    )
+    monkeypatch.setattr(
+        "scripts.market.vietnam_province_enrichment._load_industrial_presence",
+        lambda _args, _retrieved_at: {},
+    )
+    monkeypatch.setattr(
+        "scripts.market.vietnam_province_enrichment._fetch_kcn_context",
+        lambda _retrieved_at: ([], None),
+    )
+    monkeypatch.setattr(
+        "scripts.market.vietnam_province_enrichment._publish_payloads",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("partial batch must not publish")),
+    )
+
+    result = _run_refresh(SimpleNamespace(output=tmp_path))
+
+    assert result["published"] is False
+    assert result["fetch_status"]["2025"]["status"] == "failed"
+    assert tmp_path.is_dir()
+
+
+def test_publish_payloads_writes_four_separate_json_read_models(tmp_path):
+    _publish_payloads(tmp_path, [{"period": "2025"}], {"2025": "loaded"},
+                      {"records": []}, {"records": []}, [{"geo_unit_id": "33"}])
+
+    paths = sorted(tmp_path.glob("*.json"))
+    assert len(paths) == 4
+    payloads = {path.name: json.loads(path.read_text(encoding="utf-8")) for path in paths}
+    assert payloads["province_fdi_context.json"]["fetch_status"] == {"2025": "loaded"}
+    assert payloads["province_industrial_park_context.json"]["records"] == [{"geo_unit_id": "33"}]

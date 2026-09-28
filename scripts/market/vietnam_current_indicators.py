@@ -48,6 +48,7 @@ SEED_ROWS = (
 
 
 def _key(value: str) -> str:
+    """Normalize a province label for alias-catalogue lookup."""
     value = str(value).replace("Đ", "D").replace("đ", "d")
     value = re.sub(r"[^a-z0-9]+", " ", value.lower())
     return " ".join(value.split())
@@ -60,6 +61,7 @@ ALIASES.update({_key("Tp. Hồ Chí Minh"): next(unit for unit in PROVINCES if u
 
 
 def _number(value: str | None) -> float | None:
+    """Parse decimal-comma values while preserving reported dashes as missing."""
     if value is None:
         return None
     text = html.unescape(str(value)).strip().replace("%", "")
@@ -74,22 +76,26 @@ def _number(value: str | None) -> float | None:
 
 class _TableParser(HTMLParser):
     def __init__(self) -> None:
+        """Initialize row and cell buffers for the lightweight HTML table parser."""
         super().__init__()
         self.rows: list[list[str]] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Start buffering a table row or cell when its tag opens."""
         if tag == "tr":
             self._row = []
         elif tag in {"td", "th"} and self._row is not None:
             self._cell = []
 
     def handle_data(self, data: str) -> None:
+        """Collect text content while a table cell is open."""
         if self._cell is not None:
             self._cell.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        """Finalize buffered cells and append completed table rows."""
         if tag in {"td", "th"} and self._cell is not None and self._row is not None:
             self._row.append(" ".join("".join(self._cell).split()))
             self._cell = None
@@ -99,6 +105,7 @@ class _TableParser(HTMLParser):
 
 
 def parse_table_rows(rows: list[list[str]], source_url: str = SOURCE_URL, retrieved_at: str | None = None) -> list[dict]:
+    """Map NQ 262 table rows into canonical province evidence records."""
     retrieved_at = retrieved_at or datetime.now(timezone.utc).isoformat()
     records = []
     for row in rows:
@@ -130,41 +137,100 @@ def parse_table_rows(rows: list[list[str]], source_url: str = SOURCE_URL, retrie
 
 
 def parse_html_table(raw: str, source_url: str = SOURCE_URL) -> list[dict]:
+    """Extract HTML table cells and parse them as current province records."""
     parser = _TableParser()
     parser.feed(raw)
     return parse_table_rows(parser.rows, source_url)
 
 
+def _coverage(records: list[dict]) -> dict[str, int]:
+    """Summarize observed province and numeric-field coverage."""
+    return {
+        "source_observations": len(records),
+        "province_rows": len(records),
+        "iip_numeric": sum(row["iip_yoy_pct"] is not None for row in records),
+        "fdi_numeric": sum(row["fdi_status"] == "published" for row in records),
+        "fdi_reported_without_numeric": sum(row["fdi_status"] == "reported_no_numeric_value" for row in records),
+        "fdi_missing": sum(row["fdi_status"] not in {"published", "reported_no_numeric_value"} for row in records),
+    }
+
+
+def _snapshot_payload(records: list[dict], source_url: str, retrieved_at: str, source_basis: str) -> dict:
+    """Build the shared VN snapshot envelope without changing record semantics."""
+    return {
+        "scope": "VN",
+        "reference_period": REFERENCE_PERIOD,
+        "source": {
+            "source_name": "Government of Vietnam · NQ 262/NQ-CP · Appendix I Table 2",
+            "source_url": source_url,
+            "retrieved_at": retrieved_at,
+            "source_basis": source_basis,
+        },
+        "records": records,
+        "coverage": _coverage(records),
+    }
+
+
 def seed_snapshot(source_url: str = SOURCE_URL, retrieved_at: str | None = None) -> dict:
+    """Build a reproducible snapshot from the checked 34-province transcription."""
     rows = [[str(i + 1), *row, "", "", "", "", "", "", ""] for i, row in enumerate(SEED_ROWS)]
     # Seed rows already contain the four source columns; pad to the table's FDI index.
     normalized = [[row[0], row[1], row[2], row[3], "", "", "", "", "", "", row[4], ""] for row in rows]
     records = parse_table_rows(normalized, source_url, retrieved_at)
-    return {"scope": "VN", "reference_period": REFERENCE_PERIOD, "source": {"source_name": "Government of Vietnam · NQ 262/NQ-CP · Appendix I Table 2", "source_url": source_url, "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(), "source_basis": "Checked transcription of the official 34-unit table; no OCR and no boundary aggregation"}, "records": records, "coverage": {"source_observations": len(records), "province_rows": len(records), "iip_numeric": sum(r["iip_yoy_pct"] is not None for r in records), "fdi_numeric": sum(r["fdi_status"] == "published" for r in records), "fdi_reported_without_numeric": sum(r["fdi_status"] == "reported_no_numeric_value" for r in records), "fdi_missing": sum(r["fdi_status"] not in {"published", "reported_no_numeric_value"} for r in records)}}
+    source_retrieved_at = retrieved_at or datetime.now(timezone.utc).isoformat()
+    return _snapshot_payload(
+        records,
+        source_url,
+        source_retrieved_at,
+        "Checked transcription of the official 34-unit table; no OCR and no boundary aggregation",
+    )
+
+
+def _parse_source_file(source: Path) -> list[dict]:
+    """Parse and validate one complete source file before snapshot publication."""
+    if not source.exists():
+        raise FileNotFoundError(source)
+    raw = source.read_text(encoding="utf-8-sig")
+    records = parse_html_table(raw, str(source)) if "<tr" in raw.lower() else []
+    if len(records) != len(PROVINCES):
+        raise ValueError(f"expected {len(PROVINCES)} current province rows, parsed {len(records)}; snapshot was not published")
+    return records
+
+
+def _write_snapshot(output: Path, payload: dict) -> None:
+    """Create the output directory and write the complete JSON snapshot."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def refresh(source: Path | None, output: Path) -> dict:
+    """Build and publish a complete current-indicator snapshot from source or seed."""
     retrieved_at = datetime.now(timezone.utc).isoformat()
     if source:
-        if not source.exists():
-            raise FileNotFoundError(source)
-        raw = source.read_text(encoding="utf-8-sig")
-        records = parse_html_table(raw, str(source)) if "<tr" in raw.lower() else []
-        if len(records) != len(PROVINCES):
-            raise ValueError(f"expected {len(PROVINCES)} current province rows, parsed {len(records)}; snapshot was not published")
-        payload = {"scope": "VN", "reference_period": REFERENCE_PERIOD, "source": {"source_name": "Government of Vietnam · NQ 262/NQ-CP · Appendix I Table 2", "source_url": str(source), "retrieved_at": retrieved_at, "source_basis": "Parsed HTML table; no OCR and no boundary aggregation"}, "records": records, "coverage": {"source_observations": len(records), "province_rows": len(records), "iip_numeric": sum(r["iip_yoy_pct"] is not None for r in records), "fdi_numeric": sum(r["fdi_status"] == "published" for r in records), "fdi_reported_without_numeric": sum(r["fdi_status"] == "reported_no_numeric_value" for r in records), "fdi_missing": sum(r["fdi_status"] not in {"published", "reported_no_numeric_value"} for r in records)}}
+        records = _parse_source_file(source)
+        payload = _snapshot_payload(
+            records,
+            str(source),
+            retrieved_at,
+            "Parsed HTML table; no OCR and no boundary aggregation",
+        )
     else:
         payload = seed_snapshot(SOURCE_URL, retrieved_at)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_snapshot(output, payload)
     return payload
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the source and output options for this offline refresh CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """Parse CLI options, refresh one snapshot, and print coverage diagnostics."""
+    args = build_parser().parse_args()
     payload = refresh(args.source, args.output)
     print(json.dumps(payload["coverage"], ensure_ascii=False))
 

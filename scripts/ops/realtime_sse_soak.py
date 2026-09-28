@@ -14,6 +14,7 @@ import httpx
 
 
 def publish_notifications(dsn: str, count: int) -> None:
+    """Publish a bounded sequence of PostgreSQL realtime wake-up signals."""
     import psycopg
 
     with psycopg.connect(dsn, autocommit=True) as connection:
@@ -33,6 +34,7 @@ class ClientResult:
 
 
 async def consume(client_id: int, url: str, duration: float, result: ClientResult) -> None:
+    """Consume one SSE stream and record connection and event observations."""
     started = time.perf_counter()
     try:
         timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
@@ -64,6 +66,7 @@ async def consume(client_id: int, url: str, duration: float, result: ClientResul
 
 
 async def main(args: argparse.Namespace) -> int:
+    """Run concurrent SSE clients and print their aggregate soak results."""
     results = [ClientResult() for _ in range(args.clients)]
     tasks = [
         asyncio.create_task(consume(i, args.url, args.duration, result))
@@ -98,6 +101,7 @@ async def main(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and validate bounded SSE soak parameters."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000/api/stream")
     parser.add_argument("--clients", type=int, default=25)

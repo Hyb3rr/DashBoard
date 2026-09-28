@@ -13,11 +13,7 @@ AREA_SUMMARY_VERSION = "phase6b-area-summary-v1"
 
 
 def build_area_summaries(rows: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Aggregate raw cell scores by active snapshot, area and track.
-
-    The mean is calculated only over scored cells.  Coverage remains a
-    separate signal and does not reduce the raw score.
-    """
+    """Aggregate scored cell means and independent coverage by area and track."""
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     unmapped = 0
     for row in rows:
@@ -59,6 +55,7 @@ def build_area_summaries(rows: Iterable[dict[str, Any]]) -> tuple[list[dict[str,
 
 
 def refresh_area_summaries(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Refresh per-area opportunity summaries from active cell evidence."""
     selected = [str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", ",".join(PRIORITY_COUNTRIES)).split(",")) if str(code).strip()]
     reports: dict[str, Any] = {}
     for country in selected:

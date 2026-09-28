@@ -16,10 +16,12 @@ ET.register_namespace("w", W)
 
 
 def tag(name: str) -> str:
+    """Return the WordprocessingML qualified tag for a name."""
     return f"{{{W}}}{name}"
 
 
 def run(text: str, *, bold=False, italic=False, size=24, color=None):
+    """Build a formatted WordprocessingML text run."""
     r = ET.Element(tag("r"))
     rp = ET.SubElement(r, tag("rPr"))
     if bold:
@@ -39,6 +41,7 @@ def run(text: str, *, bold=False, italic=False, size=24, color=None):
 
 def paragraph(text="", *, style=None, bold=False, italic=False, size=24,
               align=None, before=0, after=100, page_break=False, color=None):
+    """Build a paragraph with optional text and layout properties."""
     p = ET.Element(tag("p"))
     pp = ET.SubElement(p, tag("pPr"))
     if style:
@@ -54,12 +57,14 @@ def paragraph(text="", *, style=None, bold=False, italic=False, size=24,
 
 
 def bullet(text: str):
+    """Build a compact bullet paragraph for report content."""
     p = paragraph(style="List Bullet", after=60)
     p.append(run(text, size=23))
     return p
 
 
 def table(rows, widths=None):
+    """Build a WordprocessingML table from rows and optional column widths."""
     t = ET.Element(tag("tbl"))
     pr = ET.SubElement(t, tag("tblPr"))
     ET.SubElement(pr, tag("tblStyle"), {tag("val"): "Table Grid"})
@@ -80,6 +85,7 @@ def table(rows, widths=None):
 
 
 def page_break():
+    """Build a paragraph that inserts a page break."""
     p = paragraph()
     r = ET.SubElement(p, tag("r"))
     ET.SubElement(r, tag("br"), {tag("type"): "page"})
@@ -87,6 +93,7 @@ def page_break():
 
 
 def build_body(old_body):
+    """Assemble the report body while retaining section properties."""
     sect_pr = old_body.find(tag("sectPr"))
     body = ET.Element(tag("body"))
 
@@ -127,10 +134,21 @@ def build_body(old_body):
         paragraph("Bảng 4. Kết quả kiểm thử tự động", after=70),
     ])
 
-    def h1(text): body.append(paragraph(text, style="Heading1", bold=True, size=28, before=240, after=120, page_break=True))
-    def h2(text): body.append(paragraph(text, style="Heading2", bold=True, size=25, before=160, after=90))
-    def p(text): body.append(paragraph(text, size=23, after=100))
-    def b(text): body.append(bullet(text))
+    def h1(text):
+        """Append a page-starting top-level report heading."""
+        body.append(paragraph(text, style="Heading1", bold=True, size=28, before=240, after=120, page_break=True))
+
+    def h2(text):
+        """Append a second-level report heading."""
+        body.append(paragraph(text, style="Heading2", bold=True, size=25, before=160, after=90))
+
+    def p(text):
+        """Append a body paragraph to the report."""
+        body.append(paragraph(text, size=23, after=100))
+
+    def b(text):
+        """Append a bullet item to the report."""
+        body.append(bullet(text))
 
     h1("1. Tổng quan và mục tiêu")
     p("Trong các hệ thống web hiện đại, access log là nguồn dữ liệu quan trọng để quan sát hoạt động người dùng, phát hiện hành vi tự động hóa và nhận diện dấu hiệu tấn công. Tuy nhiên, log thường có tốc độ lớn, dữ liệu không đồng nhất và cần được xử lý gần thời gian thực. Đề tài IP Intelligence xây dựng một nền tảng thu thập, chuẩn hóa, lưu trữ và phân tích traffic web nhằm biến các dòng access log thành thông tin có thể hành động.")
@@ -273,6 +291,7 @@ def build_body(old_body):
 
 
 def main():
+    """Replace the source report body with the generated report content."""
     with ZipFile(SOURCE, "r") as zin:
         data = {name: zin.read(name) for name in zin.namelist()}
     root = ET.fromstring(data["word/document.xml"])

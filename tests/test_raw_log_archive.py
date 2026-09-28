@@ -16,6 +16,53 @@ def _read_zstd(path):
     return subprocess.run(["zstd", "-q", "-d", "-c", str(path)], check=True, capture_output=True).stdout
 
 
+@pytest.mark.asyncio
+async def test_upload_initialization_reports_missing_configuration(tmp_path, monkeypatch):
+    archive = RawLogArchive("source", tmp_path)
+    monkeypatch.setattr(
+        "app.services.raw_log_archive.BackupSettings.from_env",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing backup configuration")),
+    )
+    monkeypatch.setattr(
+        "app.services.raw_log_archive.azure_sdk_available",
+        lambda: (_ for _ in ()).throw(AssertionError("Azure availability must not be checked")),
+    )
+
+    dependencies = archive._initialize_uploader()
+
+    assert dependencies is None
+    assert archive.status()["upload_status"] == "UNAVAILABLE"
+    assert archive.status()["last_error"] == "missing backup configuration"
+
+
+@pytest.mark.asyncio
+async def test_upload_batch_stops_after_failure_and_preserves_spool(tmp_path, monkeypatch):
+    archive = RawLogArchive("source", tmp_path)
+    attempted = []
+    sleeps = []
+
+    def fail_upload(path, *_args):
+        attempted.append(path)
+        raise OSError("simulated remote failure")
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(archive, "_upload_sealed", fail_upload)
+    monkeypatch.setattr(archive, "_remove_uploaded_artifacts", lambda _path: pytest.fail("failed upload must retain local data"))
+    monkeypatch.setattr("app.services.raw_log_archive.asyncio.sleep", record_sleep)
+    paths = [tmp_path / "first.log.zst", tmp_path / "second.log.zst"]
+    settings = BackupSettings(account="example", container="archive")
+
+    await archive._upload_paths_once(paths, settings, object(), lambda *_args: None)
+
+    assert attempted == [paths[0]]
+    assert sleeps == [1]
+    assert archive.status()["upload_status"] == "ERROR"
+    assert archive.status()["upload_failures"] == 1
+    assert archive.status()["last_error"] == "OSError: simulated remote failure"
+
+
 class _UploadRecorder:
     def __init__(self, payload):
         self.payload = payload
@@ -219,7 +266,10 @@ async def test_collector_taps_before_detection_and_storage(monkeypatch, tmp_path
 
     collector._raw_archive = Tap()
     monkeypatch.setattr(collector._window_detector, "observe", lambda line: calls.append(("detect", line)) or [])
-    await collector.handle_message('{"type":"lines","items":["raw-line"]}', 0)
+    from app.collectors import batching
+    from app.collectors.websocket_collector import utc_now
+
+    await batching.handle_message(collector, '{"type":"lines","items":["raw-line"]}', 0, utc_now)
     assert calls == [("tap", ["raw-line"]), ("detect", "raw-line")]
 
 

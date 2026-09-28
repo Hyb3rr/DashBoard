@@ -9,10 +9,12 @@ from ..core.path_canonicalization import canonicalize_path
 
 
 def configured() -> bool:
+    """Report whether a ClickHouse host is configured for this process."""
     return bool(os.getenv("CLICKHOUSE_HOST"))
 
 
 def connect(database: str | None = None):
+    """Open a ClickHouse client using the active environment configuration."""
     try:
         import clickhouse_connect
     except ImportError as exc:  # pragma: no cover - optional deployment extra
@@ -159,6 +161,7 @@ def ensure_schema() -> None:
 
 
 def _insert_events_with_client(client: Any, payload: list[dict[str, Any]]) -> int:
+    """Serialize and insert one prepared HTTP-event batch through a client."""
     columns = [
         "event_time", "ingested_at", "dataset_id", "source_id", "source_offset",
         "event_id", "src_ip", "method", "path", "status", "bytes_sent",
@@ -193,14 +196,17 @@ class ClickHouseWriter:
     """Owned, reusable writer for the collector storage worker."""
 
     def __init__(self) -> None:
+        """Initialize the reusable client slot owned by the collector worker."""
         self._client: Any | None = None
 
     def _get_client(self) -> Any:
+        """Lazily create and reuse the collector's ClickHouse connection."""
         if self._client is None:
             self._client = connect()
         return self._client
 
     def insert_events(self, rows: Iterable[dict[str, Any]]) -> int:
+        """Insert one event batch and discard a client after any failure."""
         payload = list(rows)
         if not payload:
             return 0
@@ -215,12 +221,14 @@ class ClickHouseWriter:
             finish()
 
     def close(self) -> None:
+        """Close and clear the reusable ClickHouse client if it exists."""
         client, self._client = self._client, None
         if client is not None:
             client.close()
 
 
 def insert_events(rows: Iterable[dict[str, Any]]) -> int:
+    """Insert one event batch using a short-lived ClickHouse client."""
     payload = list(rows)
     if not payload:
         return 0
@@ -317,12 +325,14 @@ def country_demand_events(start: datetime, end: datetime, dataset_id: str = "liv
 
 
 def _rows(result) -> list[dict[str, Any]]:
+    """Convert a ClickHouse result block into dictionaries by column name."""
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
 
 def _display_ip(value: Any) -> str:
+    """Normalize ClickHouse IPv6 storage into its displayable IP form."""
     address = ipaddress.ip_address(str(value))
-    return str(address.ipv4_mapped or address)
+    return str(getattr(address, "ipv4_mapped", None) or address)
 
 
 def _iso_utc(value: Any) -> str:
@@ -332,6 +342,108 @@ def _iso_utc(value: Any) -> str:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return str(value)
+
+
+def _traffic_filter(start, end, dataset_id, filter_type, filter_value, exclude, allowed_ips):
+    """Build parameterized ClickHouse predicates for the selected traffic cohort."""
+    conditions = [
+        "event_time >= {start:DateTime64(3)}",
+        "event_time <= {end:DateTime64(3)}",
+        "dataset_id = {dataset_id:String}",
+    ]
+    parameters: dict[str, Any] = {
+        "start": start.astimezone(timezone.utc),
+        "end": end.astimezone(timezone.utc),
+        "dataset_id": dataset_id,
+    }
+    if filter_type == "ip":
+        conditions.append("src_ip != {filter_value:IPv6}" if exclude else "src_ip = {filter_value:IPv6}")
+        address = ipaddress.ip_address(filter_value)
+        parameters["filter_value"] = str(
+            ipaddress.IPv6Address(f"::ffff:{address}") if address.version == 4 else address
+        )
+    elif filter_type == "path":
+        conditions.append("path != {filter_value:String}" if exclude else "path = {filter_value:String}")
+        parameters["filter_value"] = filter_value
+    elif filter_type in {"country", "classification"}:
+        conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
+        parameters["allowed_ips"] = allowed_ips or []
+    return " AND ".join(conditions), parameters
+
+
+def _query_traffic_aggregates(client, base, bucket_seconds, parameters):
+    """Run the five bounded aggregate queries used by the traffic overview."""
+    series = client.query(
+        f"SELECT toStartOfInterval(event_time, INTERVAL {int(bucket_seconds)} SECOND) AS timestamp, count() AS requests, countIf(status >= 400) AS errors {base} GROUP BY timestamp ORDER BY timestamp",
+        parameters=parameters,
+    )
+    status = client.query(
+        f"SELECT countIf(status BETWEEN 200 AND 299) AS s2, countIf(status BETWEEN 300 AND 399) AS s3, countIf(status BETWEEN 400 AND 499) AS s4, countIf(status >= 500) AS s5, count() AS total, uniqExact(src_ip) AS unique_ip_count {base}",
+        parameters=parameters,
+    )
+    paths = client.query(
+        f"SELECT path, count() AS requests {base} GROUP BY path ORDER BY requests DESC, path ASC LIMIT 8",
+        parameters=parameters,
+    )
+    ips = client.query(
+        f"SELECT src_ip, count() AS requests {base} GROUP BY src_ip ORDER BY requests DESC, src_ip ASC LIMIT 8",
+        parameters=parameters,
+    )
+    country_ips = client.query(
+        f"SELECT src_ip, count() AS requests {base} GROUP BY src_ip",
+        parameters=parameters,
+    )
+    return tuple(_rows(result) for result in (series, status, paths, ips, country_ips))
+
+
+def _country_request_totals(country_rows):
+    """Resolve IP country profiles and sum requests into country buckets."""
+    from .postgres import countries_for_ips
+
+    profiles = countries_for_ips([row["ip"] for row in country_rows])
+    totals: dict[tuple[str, str], int] = {}
+    for row in country_rows:
+        profile = profiles.get(row["ip"], {})
+        key = (profile.get("country_code") or "", profile.get("country") or "Unknown")
+        totals[key] = totals.get(key, 0) + row["requests"]
+    return totals
+
+
+def _traffic_response(aggregates):
+    """Shape aggregate rows into the dashboard traffic response contract."""
+    series_rows, status_rows, path_rows, ip_rows, country_ip_rows = aggregates
+    series = [
+        {"timestamp": _iso_utc(row["timestamp"]), "requests": int(row["requests"]), "errors": int(row["errors"])}
+        for row in series_rows
+    ]
+    status = status_rows[0] if status_rows else {
+        "s2": 0, "s3": 0, "s4": 0, "s5": 0, "total": 0, "unique_ip_count": 0,
+    }
+    top_paths = [{"path": row["path"], "requests": int(row["requests"]), "ips": []} for row in path_rows]
+    top_ips = [{"ip": _display_ip(row["src_ip"]), "requests": int(row["requests"])} for row in ip_rows]
+    country_rows = [
+        {"ip": _display_ip(row["src_ip"]), "requests": int(row["requests"])}
+        for row in country_ip_rows
+    ]
+    country_totals = _country_request_totals(country_rows)
+    top_countries = [
+        {"country_code": code, "country": country, "requests": requests, "ips": []}
+        for (code, country), requests in sorted(country_totals.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ]
+    return {
+        "series": series,
+        "status_codes": {"2xx": int(status["s2"]), "3xx": int(status["s3"]), "4xx": int(status["s4"]), "5xx": int(status["s5"])},
+        "top_paths": top_paths,
+        "top_ips": top_ips,
+        "top_countries": top_countries,
+        "total_requests": int(status["total"]),
+        "error_requests": int(status["s4"] + status["s5"]),
+        "unique_ips": int(status.get("unique_ip_count") or 0),
+        "unique_countries": len(country_totals),
+        # Internal handoff: the API pairs this exact raw-event cohort with
+        # current PostgreSQL classification state before returning the DTO.
+        "_cohort_ips": [row["ip"] for row in country_rows],
+    }
 
 
 def traffic(
@@ -344,90 +456,15 @@ def traffic(
     exclude: bool = False,
     allowed_ips: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Aggregate the traffic overview inside ClickHouse.
-
-    Only aggregate result rows cross the application boundary; raw events
-    stay in ClickHouse.  `allowed_ips` is supplied by PostgreSQL for the
-    country filter because network identity state belongs to the state plane.
-    """
+    """Aggregate traffic in ClickHouse while keeping raw events and identity state in their owners."""
     client = connect()
     try:
-        conditions = [
-            "event_time >= {start:DateTime64(3)}",
-            "event_time <= {end:DateTime64(3)}",
-            "dataset_id = {dataset_id:String}",
-        ]
-        params: dict[str, Any] = {
-            "start": start.astimezone(timezone.utc),
-            "end": end.astimezone(timezone.utc),
-            "dataset_id": dataset_id,
-        }
-        if filter_type == "ip":
-            conditions.append("src_ip != {filter_value:IPv6}" if exclude else "src_ip = {filter_value:IPv6}")
-            params["filter_value"] = filter_value
-        elif filter_type == "path":
-            conditions.append("path != {filter_value:String}" if exclude else "path = {filter_value:String}")
-            params["filter_value"] = filter_value
-        elif filter_type == "country":
-            ips = allowed_ips or []
-            conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
-            params["allowed_ips"] = ips
-        elif filter_type == "classification":
-            ips = allowed_ips or []
-            conditions.append("src_ip IN {allowed_ips:Array(IPv6)}")
-            params["allowed_ips"] = ips
-        where = " AND ".join(conditions)
+        where, params = _traffic_filter(
+            start, end, dataset_id, filter_type, filter_value, exclude, allowed_ips
+        )
         base = f"FROM http_events FINAL WHERE {where}"
-        series_result = client.query(
-            f"SELECT toStartOfInterval(event_time, INTERVAL {int(bucket_seconds)} SECOND) AS timestamp, count() AS requests, countIf(status >= 400) AS errors {base} GROUP BY timestamp ORDER BY timestamp",
-            parameters=params,
-        )
-        status_result = client.query(
-            f"SELECT countIf(status BETWEEN 200 AND 299) AS s2, countIf(status BETWEEN 300 AND 399) AS s3, countIf(status BETWEEN 400 AND 499) AS s4, countIf(status >= 500) AS s5, count() AS total, uniqExact(src_ip) AS unique_ip_count {base}",
-            parameters=params,
-        )
-        path_result = client.query(
-            f"SELECT path, count() AS requests {base} GROUP BY path ORDER BY requests DESC, path ASC LIMIT 8",
-            parameters=params,
-        )
-        ip_result = client.query(
-            f"SELECT src_ip, count() AS requests {base} GROUP BY src_ip ORDER BY requests DESC, src_ip ASC LIMIT 8",
-            parameters=params,
-        )
-        country_ip_result = client.query(
-            f"SELECT src_ip, count() AS requests {base} GROUP BY src_ip",
-            parameters=params,
-        )
-        series = [
-            {"timestamp": _iso_utc(row["timestamp"]), "requests": int(row["requests"]), "errors": int(row["errors"])}
-            for row in _rows(series_result)
-        ]
-        status = _rows(status_result)[0] if _rows(status_result) else {"s2": 0, "s3": 0, "s4": 0, "s5": 0, "total": 0, "unique_ip_count": 0}
-        top_paths = [{"path": row["path"], "requests": int(row["requests"]), "ips": []} for row in _rows(path_result)]
-        top_ips = [{"ip": _display_ip(row["src_ip"]), "requests": int(row["requests"])} for row in _rows(ip_result)]
-        country_rows = [{"ip": _display_ip(row["src_ip"]), "requests": int(row["requests"])} for row in _rows(country_ip_result)]
-        from .postgres import countries_for_ips
-        profiles = countries_for_ips([row["ip"] for row in country_rows])
-        country_totals: dict[tuple[str, str], int] = {}
-        for row in country_rows:
-            profile = profiles.get(row["ip"], {})
-            key = (profile.get("country_code") or "", profile.get("country") or "Unknown")
-            country_totals[key] = country_totals.get(key, 0) + row["requests"]
-        top_countries = [
-            {"country_code": code, "country": country, "requests": requests, "ips": []}
-            for (code, country), requests in sorted(country_totals.items(), key=lambda item: (-item[1], item[0]))[:8]
-        ]
-        return {
-            "series": series,
-            "status_codes": {"2xx": int(status["s2"]), "3xx": int(status["s3"]), "4xx": int(status["s4"]), "5xx": int(status["s5"])},
-            "top_paths": top_paths,
-            "top_ips": top_ips,
-            "top_countries": top_countries,
-            "total_requests": int(status["total"]),
-            "error_requests": int(status["s4"] + status["s5"]),
-            "unique_ips": int(status.get("unique_ip_count") or 0),
-            "unique_countries": len(country_totals),
-        }
+        aggregates = _query_traffic_aggregates(client, base, bucket_seconds, params)
+        return _traffic_response(aggregates)
     finally:
         client.close()
 

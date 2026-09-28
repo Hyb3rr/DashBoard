@@ -19,6 +19,7 @@ _status = {"status": "stopped", "failures": 0, "last_error": None}
 
 
 def _now() -> datetime:
+    """Return the current timezone-aware UTC timestamp."""
     return datetime.now(timezone.utc)
 
 
@@ -81,6 +82,7 @@ _deliver_outbox_pg = _deliver_outbox
 
 
 async def run_classification_watcher(stop_event: asyncio.Event | None = None) -> None:
+    """Poll and deliver alert outbox entries with bounded retry backoff."""
     stop_event = stop_event or asyncio.Event()
     backoff = 1.0
     _status.update(status="running", last_error=None)
@@ -107,4 +109,5 @@ async def run_classification_watcher(stop_event: asyncio.Event | None = None) ->
 
 
 def status() -> dict:
+    """Return a copy of the classification watcher's current runtime status."""
     return dict(_status)

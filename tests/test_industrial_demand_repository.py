@@ -3,6 +3,7 @@ import json
 from uuid import uuid4
 
 from app.db import market_repository
+from app.db import market_demand_repository
 
 
 def test_latest_evidence_can_be_pinned_to_published_snapshot():
@@ -52,7 +53,7 @@ class Tx:
 
 def test_snapshot_creation_is_retry_safe(monkeypatch):
     conn = Connection()
-    monkeypatch.setattr(market_repository, "transaction", lambda: Tx(conn))
+    monkeypatch.setattr(market_demand_repository, "transaction", lambda: Tx(conn))
     snapshot_id = str(uuid4())
     repo = market_repository.MarketRepository()
     assert repo.create_industrial_demand_snapshot({
@@ -64,7 +65,7 @@ def test_snapshot_creation_is_retry_safe(monkeypatch):
 
 def test_evidence_upsert_is_batch_and_preserves_null(monkeypatch):
     conn = Connection()
-    monkeypatch.setattr(market_repository, "transaction", lambda: Tx(conn))
+    monkeypatch.setattr(market_demand_repository, "transaction", lambda: Tx(conn))
     repo = market_repository.MarketRepository()
     count = repo.upsert_industrial_demand_evidence([{
         "snapshot_id": str(uuid4()), "evidence_id": "demand_1", "country_code": "VN",
@@ -82,7 +83,7 @@ def test_evidence_upsert_is_batch_and_preserves_null(monkeypatch):
 
 def test_publish_only_transitions_pending(monkeypatch):
     conn = Connection()
-    monkeypatch.setattr(market_repository, "transaction", lambda: Tx(conn))
+    monkeypatch.setattr(market_demand_repository, "transaction", lambda: Tx(conn))
     assert market_repository.MarketRepository().publish_industrial_demand_snapshot(str(uuid4()), 3)
     sql, params = conn.calls[0]
     assert "status='pending'" in sql

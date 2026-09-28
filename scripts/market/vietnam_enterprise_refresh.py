@@ -32,12 +32,14 @@ TRACK_PREFIXES = {
 
 
 def _key(value: object) -> str:
+    """Normalize Vietnamese administrative names for API-reference matching."""
     text = str(value or "").replace("Đ", "D").replace("đ", "d")
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
 
 
 def _request_json(url: str, timeout: int = 30) -> dict:
+    """Fetch and decode one JSON response from the enterprise API."""
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "IPIntel-VN-Enterprise-Refresh/1.0", "Accept": "application/json"},
@@ -47,11 +49,13 @@ def _request_json(url: str, timeout: int = 30) -> dict:
 
 
 def _url(path: str, **params: object) -> str:
+    """Build an encoded enterprise API URL for a resource and query."""
     query = urllib.parse.urlencode(params)
     return f"{API_ROOT}/{path}{'?' + query if query else ''}"
 
 
 def _province_lookup(payload: dict) -> dict[str, dict]:
+    """Index API province records by normalized Vietnamese names and aliases."""
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         raise ValueError("Province reference response has no items list")
@@ -71,6 +75,7 @@ def _province_lookup(payload: dict) -> dict[str, dict]:
 
 
 def _count_response(payload: dict) -> int | None:
+    """Return a non-negative integer total when the API response is valid."""
     if not isinstance(payload, dict) or not isinstance(payload.get("total"), int):
         return None
     return max(0, payload["total"])
@@ -91,72 +96,69 @@ def _fetch_count(fetch: Callable[[str], dict], url: str, retries: int = 2) -> tu
     return None, "HTTP retry exhausted"
 
 
-def collect_snapshot(
-    fetch: Callable[[str], dict] = _request_json,
-    province_limit: int | None = None,
-    delay_seconds: float = 1.05,
-    retrieved_at: str | None = None,
-) -> dict:
-    """Collect one complete-or-explicitly-partial snapshot.
+def _fetch_track_components(api_province: dict, prefixes: tuple[str, ...],
+                            fetch: Callable[[str], dict], delay_seconds: float) -> list[dict]:
+    """Fetch each industry prefix and preserve failed or malformed values as unknown."""
+    components = []
+    for index, prefix in enumerate(prefixes):
+        if index:
+            time.sleep(max(0, delay_seconds))
+        query_url = _url("companies", province=api_province["slug"], industry=prefix, status="active", page=1, page_size=1)
+        payload, error = _fetch_count(fetch, query_url)
+        try:
+            if error:
+                raise RuntimeError(error)
+            value = _count_response(payload)
+            limitation = None if value is not None else "API response did not contain an integer total."
+            components.append({"api_filter_code": prefix, "raw_value": payload.get("total"), "value": value, "unit": "active registered enterprises", "source_url": query_url, "reference_period": "source-current", "limitation": limitation})
+        except Exception as exc:  # noqa: BLE001 - preserve failed component as unknown
+            components.append({"api_filter_code": prefix, "raw_value": None, "value": None, "unit": "active registered enterprises", "source_url": query_url, "reference_period": "source-current", "limitation": f"API request failed: {type(exc).__name__}"})
+    return components
 
-    ``fetch`` is injectable so policy tests never call the network.
-    """
-    retrieved = retrieved_at or datetime.now(timezone.utc).isoformat()
+
+def _province_record(unit: dict, lookup: dict[str, dict], fetch: Callable[[str], dict],
+                     retrieved: str, delay_seconds: float) -> dict:
+    """Build one province record without converting missing evidence to zero."""
     province_url = _url("provinces")
-    province_payload = fetch(province_url)
-    lookup = _province_lookup(province_payload)
-    units = PROVINCES[:province_limit] if province_limit else PROVINCES
-    records = []
-    for unit in units:
-        api_province = lookup.get(_key(unit["name"]))
-        base = {
-            "geo_unit_id": unit["code"],
-            "province_name": unit["name"],
-            "unit_type": unit["type"],
+    api_province = lookup.get(_key(unit["name"]))
+    base = {
+        "geo_unit_id": unit["code"],
+        "province_name": unit["name"],
+        "unit_type": unit["type"],
+        "source_name": "Doanhnghiep.vn public company API",
+        "source_url": province_url,
+        "retrieved_at": retrieved,
+        "source_geography": api_province,
+        "geography_basis": "API province reference matched by normalized current province name",
+        "taxonomy_version": "VSIC2018-working-1",
+        "tracks": {},
+    }
+    if not api_province:
+        for track in TRACK_PREFIXES:
+            base["tracks"][track] = {"value": None, "unit": "active registered enterprises", "components": [], "limitation": "Province is absent from API reference data."}
+        return base
+    for track, prefixes in TRACK_PREFIXES.items():
+        components = _fetch_track_components(api_province, prefixes, fetch, delay_seconds)
+        values = [item["value"] for item in components]
+        complete = all(value is not None for value in values)
+        base["tracks"][track] = {
+            "value": sum(values) if complete else None,
+            "unit": "active registered enterprises",
+            "components": components,
             "source_name": "Doanhnghiep.vn public company API",
-            "source_url": province_url,
+            "source_url": "https://doanhnghiep.vn/api/docs",
+            "reference_period": "source-current",
             "retrieved_at": retrieved,
-            "source_geography": api_province,
-            "geography_basis": "API province reference matched by normalized current province name",
-            "taxonomy_version": "VSIC2018-working-1",
-            "tracks": {},
+            "raw_value": [item["raw_value"] for item in components],
+            "transformation_method": "sum of disjoint VSIC API prefix totals" if complete else None,
+            "confidence": "medium" if complete else "unknown",
+            "limitation": None if complete else "At least one target prefix is unknown; aggregate withheld.",
         }
-        if not api_province:
-            for track in TRACK_PREFIXES:
-                base["tracks"][track] = {"value": None, "unit": "active registered enterprises", "components": [], "limitation": "Province is absent from API reference data."}
-            records.append(base)
-            continue
-        for track, prefixes in TRACK_PREFIXES.items():
-            components = []
-            for index, prefix in enumerate(prefixes):
-                if index:
-                    time.sleep(max(0, delay_seconds))
-                query_url = _url("companies", province=api_province["slug"], industry=prefix, status="active", page=1, page_size=1)
-                payload, error = _fetch_count(fetch, query_url)
-                try:
-                    if error:
-                        raise RuntimeError(error)
-                    value = _count_response(payload)
-                    limitation = None if value is not None else "API response did not contain an integer total."
-                    components.append({"api_filter_code": prefix, "raw_value": payload.get("total"), "value": value, "unit": "active registered enterprises", "source_url": query_url, "reference_period": "source-current", "limitation": limitation})
-                except Exception as exc:  # noqa: BLE001 - preserve failed component as unknown
-                    components.append({"api_filter_code": prefix, "raw_value": None, "value": None, "unit": "active registered enterprises", "source_url": query_url, "reference_period": "source-current", "limitation": f"API request failed: {type(exc).__name__}"})
-            values = [item["value"] for item in components]
-            complete = all(value is not None for value in values)
-            base["tracks"][track] = {
-                "value": sum(values) if complete else None,
-                "unit": "active registered enterprises",
-                "components": components,
-                "source_name": "Doanhnghiep.vn public company API",
-                "source_url": "https://doanhnghiep.vn/api/docs",
-                "reference_period": "source-current",
-                "retrieved_at": retrieved,
-                "raw_value": [item["raw_value"] for item in components],
-                "transformation_method": "sum of disjoint VSIC API prefix totals" if complete else None,
-                "confidence": "medium" if complete else "unknown",
-                "limitation": None if complete else "At least one target prefix is unknown; aggregate withheld.",
-            }
-        records.append(base)
+    return base
+
+
+def _snapshot_payload(records: list[dict], retrieved: str) -> dict:
+    """Create the versioned snapshot envelope and its completeness status."""
     return {
         "schema_version": "vn-province-enterprise-context-1",
         "scope": "VN",
@@ -169,7 +171,24 @@ def collect_snapshot(
     }
 
 
+def collect_snapshot(
+    fetch: Callable[[str], dict] = _request_json,
+    province_limit: int | None = None,
+    delay_seconds: float = 1.05,
+    retrieved_at: str | None = None,
+) -> dict:
+    """Collect a complete or explicitly partial province enterprise snapshot."""
+    retrieved = retrieved_at or datetime.now(timezone.utc).isoformat()
+    province_url = _url("provinces")
+    province_payload = fetch(province_url)
+    lookup = _province_lookup(province_payload)
+    units = PROVINCES[:province_limit] if province_limit else PROVINCES
+    records = [_province_record(unit, lookup, fetch, retrieved, delay_seconds) for unit in units]
+    return _snapshot_payload(records, retrieved)
+
+
 def main() -> None:
+    """Collect and write an enterprise context snapshot from CLI options."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--province-limit", type=int)

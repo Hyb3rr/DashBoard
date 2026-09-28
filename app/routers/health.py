@@ -13,6 +13,35 @@ from ..services import classification_watcher
 router = APIRouter()
 
 
+def _collector_is_healthy(collector_info: dict) -> bool:
+    """Check collector task, archive, parser, privacy, and shared-state health."""
+    if not collector_info.get("enabled"):
+        return True
+    unhealthy_tasks = {"failed", "stopped", "cancelled"}
+    if any(value in unhealthy_tasks for value in collector_info.get("tasks", {}).values()):
+        return False
+    if collector_info.get("raw_archive", {}).get("writer_status") == "FAILED":
+        return False
+    if collector_info.get("parser", {}).get("status") == "degraded":
+        return False
+    if collector_info.get("privacy_refresh", {}).get("status") == "failed":
+        return False
+    return not collector_info.get("control_plane_stale")
+
+
+def _system_is_healthy(rules_health: dict, storage: dict, collector_info: dict,
+                       watcher_info: dict, realtime_info: dict, app_role: str) -> bool:
+    """Combine subsystem readiness using the existing API health policy."""
+    healthy = rules_health["status"] == "ok" and all(
+        item.get("status") == "ok" for item in storage.values() if isinstance(item, dict) and "status" in item
+    )
+    healthy = healthy and _collector_is_healthy(collector_info)
+    healthy = healthy and watcher_info.get("status") != "retrying"
+    if app_role in {"all", "api"} and realtime_info.get("status") not in {"running", "disabled"}:
+        healthy = False
+    return healthy
+
+
 @router.get("/livez")
 def livez():
     """Minimal unauthenticated process liveness probe for a load balancer."""
@@ -27,6 +56,7 @@ def metrics_endpoint():
 
 @router.get("/health")
 def health(request: Request):
+    """Report detailed health across storage, collector, rules, workers, and AI."""
     rules_health = ruleset_health()
     collector_info = collector.shared_status() if collector else {"status": "disabled"}
     watcher_info = classification_watcher.status()
@@ -47,26 +77,9 @@ def health(request: Request):
         "state": ai_state,
         "summary": AiRepository().summary(),
     }
-    healthy = rules_health["status"] == "ok" and all(
-        item.get("status") == "ok" for item in storage.values() if isinstance(item, dict) and "status" in item
+    healthy = _system_is_healthy(
+        rules_health, storage, collector_info, watcher_info, realtime_info, config.settings.APP_ROLE
     )
-    if collector_info.get("enabled"):
-        task_states = collector_info.get("tasks", {})
-        unhealthy_tasks = {"failed", "stopped", "cancelled"}
-        if any(value in unhealthy_tasks for value in task_states.values()):
-            healthy = False
-        if collector_info.get("raw_archive", {}).get("writer_status") == "FAILED":
-            healthy = False
-        if collector_info.get("parser", {}).get("status") == "degraded":
-            healthy = False
-        if collector_info.get("privacy_refresh", {}).get("status") == "failed":
-            healthy = False
-        if collector_info.get("control_plane_stale"):
-            healthy = False
-    if watcher_info.get("status") == "retrying":
-        healthy = False
-    if config.settings.APP_ROLE in {"all", "api"} and realtime_info.get("status") not in {"running", "disabled"}:
-        healthy = False
     return {"status": "ok" if healthy else "degraded", "mode": config.settings.DATA_BACKEND,
             "rules": rules_health, "storage": storage, "collector": collector_info,
             "classification_watcher": watcher_info,

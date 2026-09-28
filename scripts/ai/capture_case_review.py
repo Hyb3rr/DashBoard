@@ -18,12 +18,19 @@ from app.ai.evaluation import build_review_capture
 from app.ai.providers.llama_cpp import LlamaCppHttpProvider
 from scripts.ai.evaluate_cases import _load_corpus, benchmark_metadata
 
+CAPTURE_TIMEOUT_SECONDS = 120.0
+CAPTURE_MAX_TOKENS = 256
+CAPTURE_CONTEXT_SIZE = 4096
+CAPTURE_READY_ATTEMPTS = 60
+
 
 def _canonical(value: object) -> str:
+    """Serialize a value deterministically for artifact fingerprinting."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _wait_ready(host: str, port: int, attempts: int, interval: float) -> None:
+    """Wait for the local inference server within a bounded retry window."""
     for _ in range(attempts):
         try:
             with urlopen(f"http://{host}:{port}/health", timeout=1):
@@ -34,12 +41,14 @@ def _wait_ready(host: str, port: int, attempts: int, interval: float) -> None:
 
 
 def _free_port(host: str) -> int:
+    """Reserve an available ephemeral TCP port for a local model server."""
     with socket.socket() as probe:
         probe.bind((host, 0))
         return int(probe.getsockname()[1])
 
 
 def _capture_one(case: dict, args: argparse.Namespace, metadata: dict) -> dict:
+    """Run one local explanation and return its validated review capture."""
     packet = case.get("case_packet", case)
     case_id = str(packet.get("case_id") or "unknown-case")
     port = _free_port(args.host)
@@ -81,6 +90,7 @@ def _capture_one(case: dict, args: argparse.Namespace, metadata: dict) -> dict:
 
 
 def main() -> int:
+    """Capture non-overwriting per-case review artifacts and a manifest."""
     parser = argparse.ArgumentParser(description="Capture independent per-case local AI reviews")
     parser.add_argument("cases", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -89,12 +99,12 @@ def main() -> int:
     parser.add_argument("--server", default=os.getenv("LLAMA_SERVER_BIN", "llama-server"))
     parser.add_argument("--model-name", default=os.getenv("FOUNDATION_SEC_MODEL_NAME", "Foundation-Sec-8B-Reasoning"))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--timeout", type=float, default=float(os.getenv("LOCAL_REASONING_TIMEOUT_SECONDS", "120")))
-    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("LOCAL_REASONING_MAX_TOKENS", "256")))
-    parser.add_argument("--context-size", type=int, default=int(os.getenv("FOUNDATION_SEC_CONTEXT_SIZE", "4096")))
+    parser.add_argument("--timeout", type=float, default=float(os.getenv("LOCAL_REASONING_TIMEOUT_SECONDS", str(CAPTURE_TIMEOUT_SECONDS))))
+    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("LOCAL_REASONING_MAX_TOKENS", str(CAPTURE_MAX_TOKENS))))
+    parser.add_argument("--context-size", type=int, default=int(os.getenv("FOUNDATION_SEC_CONTEXT_SIZE", str(CAPTURE_CONTEXT_SIZE))))
     parser.add_argument("--gpu-layers", type=int, default=int(os.getenv("FOUNDATION_SEC_GPU_LAYERS", "0")))
     parser.add_argument("--threads", type=int, default=int(os.getenv("FOUNDATION_SEC_THREADS", "6")))
-    parser.add_argument("--ready-attempts", type=int, default=60)
+    parser.add_argument("--ready-attempts", type=int, default=CAPTURE_READY_ATTEMPTS)
     parser.add_argument("--ready-interval", type=float, default=1.0)
     args = parser.parse_args()
     if args.model_path is None or not args.model_path.is_file():
@@ -103,7 +113,24 @@ def main() -> int:
         parser.error("capture server must bind to localhost")
 
     cases, manifest = _load_corpus(args.cases)
-    metadata = benchmark_metadata(manifest, args.model_path, args.timeout, cases)
+    metadata = benchmark_metadata(
+        manifest,
+        args.model_path,
+        args.timeout,
+        cases,
+        model_name=args.model_name,
+        max_tokens=args.max_tokens,
+        context_size=args.context_size,
+        gpu_layers=args.gpu_layers,
+        runtime_profile="manual_standalone_capture",
+    )
+    metadata.update({
+        "server_binary": args.server,
+        "host": args.host,
+        "threads": args.threads,
+        "ready_attempts": args.ready_attempts,
+        "ready_interval_seconds": args.ready_interval,
+    })
     metadata.update({
         "capture_format_version": "ai-4c1-v1",
         "capture_run_id": args.run_id,

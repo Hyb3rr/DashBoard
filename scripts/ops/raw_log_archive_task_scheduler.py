@@ -16,6 +16,7 @@ DEFAULT_ENV_FILE = Path.home() / ".config" / "sentinel-backup.env"
 
 
 def _env_file(path: str | Path) -> dict[str, str]:
+    """Read simple key-value settings from an optional environment file."""
     values: dict[str, str] = {}
     source = Path(path).expanduser()
     if not source.is_file():
@@ -37,6 +38,7 @@ def _env_file(path: str | Path) -> dict[str, str]:
 
 
 def python_executable(root: Path = ROOT) -> str:
+    """Choose the repository virtualenv interpreter when it exists."""
     candidate = root / ".venv" / "Scripts" / "python.exe"
     if candidate.is_file():
         return str(candidate)
@@ -45,6 +47,7 @@ def python_executable(root: Path = ROOT) -> str:
 
 
 def task_xml(root: Path = ROOT, env_file: str | Path = DEFAULT_ENV_FILE) -> bytes:
+    """Build the hourly least-privilege Windows scheduled-task definition."""
     task = ET.Element("Task", {"version": "1.4"})
     ET.SubElement(task, "RegistrationInfo")
     triggers = ET.SubElement(task, "Triggers")
@@ -74,6 +77,7 @@ def task_xml(root: Path = ROOT, env_file: str | Path = DEFAULT_ENV_FILE) -> byte
 
 def install(task_name: str = TASK_NAME, root: Path = ROOT,
             env_file: str | Path = DEFAULT_ENV_FILE) -> None:
+    """Install or replace the Windows task from a temporary XML definition."""
     if os.name != "nt":
         raise RuntimeError("Windows Task Scheduler adapter requires Windows")
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as handle:
@@ -91,6 +95,7 @@ def install(task_name: str = TASK_NAME, root: Path = ROOT,
 
 
 def uninstall(task_name: str = TASK_NAME) -> None:
+    """Remove the configured Windows scheduled task."""
     if os.name != "nt":
         raise RuntimeError("Windows Task Scheduler adapter requires Windows")
     completed = subprocess.run(["schtasks.exe", "/Delete", "/TN", task_name, "/F"], check=False)
@@ -99,6 +104,7 @@ def uninstall(task_name: str = TASK_NAME) -> None:
 
 
 def run(env_file: str | Path = DEFAULT_ENV_FILE, root: Path = ROOT) -> int:
+    """Run the shared archive maintenance job with environment-file settings."""
     environment = os.environ.copy()
     environment.update(_env_file(env_file))
     environment["PYTHONPATH"] = str(root)
@@ -112,6 +118,7 @@ def run(env_file: str | Path = DEFAULT_ENV_FILE, root: Path = ROOT) -> int:
 
 
 def main() -> int:
+    """Dispatch installation, removal, or one scheduled archive run."""
     parser = argparse.ArgumentParser(description="Install or run raw archive Task Scheduler adapter")
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--install", action="store_true")

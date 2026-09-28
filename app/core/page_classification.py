@@ -11,12 +11,7 @@ VALID_TYPES = {"product", "content", "other"}
 
 
 def classify_page(path: str | None, rules: Iterable[dict[str, Any]]) -> str:
-    """Return the highest-priority matching page type.
-
-    Rules use shell-style ``%`` wildcards (for example ``/products/%``) and
-    are evaluated against the path without query parameters.  No rule match
-    is explicitly ``other``; it is never treated as a product page.
-    """
+    """Match the highest-priority path rule, defaulting unmatched paths to other."""
     candidate = urlsplit(str(path or "")).path or "/"
     ordered = sorted(
         (rule for rule in rules if rule.get("active", True) and rule.get("page_type") in VALID_TYPES and rule.get("pattern")),
@@ -31,6 +26,7 @@ def classify_page(path: str | None, rules: Iterable[dict[str, Any]]) -> str:
 
 
 def is_product_page(path: str | None, rules: Iterable[dict[str, Any]]) -> bool:
+    """Return whether the page rules classify this path as a product page."""
     return classify_page(path, rules) == "product"
 
 

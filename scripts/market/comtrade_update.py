@@ -24,11 +24,13 @@ RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def _numeric_code(country: str) -> str | None:
+    """Return a country's ISO numeric code when it is recognized."""
     item = pycountry.countries.get(alpha_2=country.upper())
     return item.numeric if item else None
 
 
 def _retry_delay(error: HTTPError, attempt: int) -> float:
+    """Choose the server-requested delay or a bounded exponential backoff."""
     header = error.headers.get("Retry-After") if error.headers else None
     if header:
         try:
@@ -43,6 +45,7 @@ def _retry_delay(error: HTTPError, attempt: int) -> float:
 
 def _request_json(request: Request, timeout: float = 30.0, opener=urlopen,
                   sleep_fn=time.sleep, max_attempts: int | None = None) -> dict:
+    """Fetch and decode JSON with bounded retries for transient failures."""
     attempts = max_attempts or int(os.getenv("COMTRADE_MAX_ATTEMPTS", "3"))
     for attempt in range(attempts):
         try:
@@ -60,6 +63,7 @@ def _request_json(request: Request, timeout: float = 30.0, opener=urlopen,
 
 
 def _fetch(country: str, year: int, timeout: float = 30.0, flow_code: str = "M", cmd_code: str | None = None) -> list[dict]:
+    """Fetch one country's Comtrade observations for a year and trade flow."""
     numeric = _numeric_code(country)
     if not numeric:
         return []
@@ -107,50 +111,59 @@ def _aggregate(rows: list[dict], country: str, year: int) -> float | None:
 
 
 def _primary_countries() -> list[str]:
+    """Return catalog countries enabled as primary markets."""
     return sorted(item["country_code"] for item in catalog_rows() if item["primary_market"])
 
 
-def refresh(countries: list[str] | None = None, years: list[int] | None = None,
-            fetcher=_fetch, path: str | Path = MIRROR_PATH, now: datetime | None = None) -> dict:
-    """Refresh uncached recent observations, preserving good state on failure."""
-    path = Path(path)
-    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"trade": {}, "provenance": {}, "checks": {}}
-    trade, provenance, checks = current.get("trade") or {}, current.get("provenance") or {}, current.get("checks") or {}
-    countries = countries if countries is not None else _primary_countries()
-    years = years or [market_refresh.COMPLETE_YEAR - offset for offset in range(market_refresh.MAX_TRADE_AGE_YEARS + 1)]
-    now = now or datetime.now(timezone.utc)
-    max_age = timedelta(hours=float(os.getenv("COMTRADE_MIRROR_RECHECK_HOURS", "24")))
-    updated = failed = skipped = 0
-    failed_requests = []
+def _load_mirror(path: Path) -> tuple[dict, dict, dict]:
+    """Load trade, provenance, and freshness maps from the mirror file."""
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return current.get("trade") or {}, current.get("provenance") or {}, current.get("checks") or {}
+
+
+def _record_observation(trade: dict, provenance: dict, country: str, year: int, value: float) -> None:
+    """Store a mirrored value and its country-level provenance."""
+    trade.setdefault(country, {}).setdefault(market_refresh.HS_PARENT, {})[str(year)] = value
+    entry = provenance.setdefault(country, {"method": "mirror", "confidence": "medium", "years": []})
+    if isinstance(entry, str):
+        entry = {"method": entry, "confidence": "medium", "years": []}
+        provenance[country] = entry
+    years = entry.setdefault("years", [])
+    if str(year) not in years:
+        years.append(str(year))
+    entry["method"], entry["confidence"] = "mirror", "medium"
+
+
+def _refresh_observations(countries: list[str], years: list[int], fetcher, now: datetime,
+                          max_age: timedelta, trade: dict, provenance: dict, checks: dict) -> dict:
+    """Refresh stale country-year observations while preserving good cached values."""
+    result = {"updated": 0, "failed": 0, "skipped": 0, "failed_requests": []}
     for country in countries:
         for year in years:
             stamp = (checks.get(country) or {}).get(str(year))
             if stamp:
                 try:
                     if now - datetime.fromisoformat(stamp) < max_age:
-                        skipped += 1
+                        result["skipped"] += 1
                         continue
                 except ValueError:
                     pass
             try:
                 value = _aggregate(fetcher(country, year), country, year)
             except Exception:
-                failed += 1
-                failed_requests.append(f"{country}:{year}")
+                result["failed"] += 1
+                result["failed_requests"].append(f"{country}:{year}")
                 continue
             checks.setdefault(country, {})[str(year)] = now.isoformat()
             if value is None:
                 continue
-            trade.setdefault(country, {}).setdefault(market_refresh.HS_PARENT, {})[str(year)] = value
-            entry = provenance.setdefault(country, {"method": "mirror", "confidence": "medium", "years": []})
-            if isinstance(entry, str):
-                entry = {"method": entry, "confidence": "medium", "years": []}
-                provenance[country] = entry
-            if str(year) not in entry.setdefault("years", []):
-                entry["years"].append(str(year))
-            entry["method"], entry["confidence"] = "mirror", "medium"
-            updated += 1
-    payload = {"schema_version": 2, "refreshed_at": now.isoformat(), "trade": trade, "provenance": provenance, "checks": checks}
+            _record_observation(trade, provenance, country, year, value)
+            result["updated"] += 1
+    return result
+
+
+def _write_mirror(path: Path, payload: dict) -> None:
+    """Atomically persist a mirror snapshot and clean up failed temporary writes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
@@ -165,30 +178,58 @@ def refresh(countries: list[str] | None = None, years: list[int] | None = None,
         except OSError:
             pass
         raise
-    furniture_report = {"status": "disabled", "updated": 0, "failed": 0}
-    if os.getenv("COMTRADE_FURNITURE_EXPORT_REFRESH", "false").strip().lower() in {"1", "true", "yes", "on"}:
-        furniture_report = {"status": "updated", "updated": 0, "failed": 0}
-        for country in countries:
-            for year in years:
-                try:
-                    rows = fetcher(country, year, flow_code="X", cmd_code="9403")
-                    value = _aggregate(rows, country, year)
-                    if value is not None:
-                        trade.setdefault(country, {}).setdefault("9403", {})[str(year)] = value
-                        furniture_report["updated"] += 1
-                except Exception:
-                    furniture_report["failed"] += 1
-        furniture_report["status"] = "updated" if furniture_report["updated"] else "no_data"
-    report = {"status": "updated", "countries": len(countries), "observations": updated, "skipped": skipped,
-              "failed": failed, "failed_requests": failed_requests}
+
+
+def _refresh_furniture_exports(countries: list[str], years: list[int], fetcher, trade: dict) -> dict:
+    """Refresh optional furniture-export observations and summarize their outcome."""
+    report = {"status": "disabled", "updated": 0, "failed": 0}
+    if os.getenv("COMTRADE_FURNITURE_EXPORT_REFRESH", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        return report
+    report["status"] = "updated"
+    for country in countries:
+        for year in years:
+            try:
+                value = _aggregate(fetcher(country, year, flow_code="X", cmd_code="9403"), country, year)
+                if value is not None:
+                    trade.setdefault(country, {}).setdefault("9403", {})[str(year)] = value
+                    report["updated"] += 1
+            except Exception:
+                report["failed"] += 1
+    report["status"] = "updated" if report["updated"] else "no_data"
+    return report
+
+
+def _refresh_market_read_model(path: Path) -> dict:
+    """Refresh the derived market read model when using the canonical mirror."""
+    if path != MIRROR_PATH:
+        return {}
+    result = {"market_refresh": market_refresh.refresh()}
+    if os.getenv("POSTGRES_DSN"):
+        from ..db.repositories import RegionRepository
+        seed = json.loads(market_refresh.REGION_SEED_PATH.read_text(encoding="utf-8"))
+        RegionRepository().seed(seed)
+        result["read_model"] = {"status": "updated", "countries": len(seed)}
+    return result
+
+
+def refresh(countries: list[str] | None = None, years: list[int] | None = None,
+            fetcher=_fetch, path: str | Path = MIRROR_PATH, now: datetime | None = None) -> dict:
+    """Refresh uncached recent observations, preserving good state on failure."""
+    path = Path(path)
+    trade, provenance, checks = _load_mirror(path)
+    countries = countries if countries is not None else _primary_countries()
+    years = years or [market_refresh.COMPLETE_YEAR - offset for offset in range(market_refresh.MAX_TRADE_AGE_YEARS + 1)]
+    now = now or datetime.now(timezone.utc)
+    max_age = timedelta(hours=float(os.getenv("COMTRADE_MIRROR_RECHECK_HOURS", "24")))
+    outcome = _refresh_observations(countries, years, fetcher, now, max_age, trade, provenance, checks)
+    payload = {"schema_version": 2, "refreshed_at": now.isoformat(), "trade": trade, "provenance": provenance, "checks": checks}
+    _write_mirror(path, payload)
+    furniture_report = _refresh_furniture_exports(countries, years, fetcher, trade)
+    report = {"status": "updated", "countries": len(countries), "observations": outcome["updated"],
+              "skipped": outcome["skipped"],
+              "failed": outcome["failed"], "failed_requests": outcome["failed_requests"]}
     report["furniture_exports"] = furniture_report
-    if path == MIRROR_PATH:
-        report["market_refresh"] = market_refresh.refresh()
-        if os.getenv("POSTGRES_DSN"):
-            from ..db.repositories import RegionRepository
-            seed = json.loads(market_refresh.REGION_SEED_PATH.read_text(encoding="utf-8"))
-            RegionRepository().seed(seed)
-            report["read_model"] = {"status": "updated", "countries": len(seed)}
+    report.update(_refresh_market_read_model(path))
     return report
 
 

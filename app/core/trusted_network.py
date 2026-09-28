@@ -21,6 +21,7 @@ _FALSE_VALUES = {"0", "false", "no", "failed"}
 
 
 def _trusted_peer(request: Request) -> bool:
+    """Verify the immediate request peer belongs to a configured trusted proxy."""
     if not settings.TRUST_PROXY_HEADERS or not settings.TRUSTED_PROXY_NETWORKS:
         return False
     peer = request.client.host if request.client else None
@@ -32,6 +33,7 @@ def _trusted_peer(request: Request) -> bool:
 
 
 def _optional_bool(value: str | None) -> bool | None:
+    """Parse recognized proxy boolean headers while preserving unknown values."""
     if value is None:
         return None
     normalized = value.strip().lower()

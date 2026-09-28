@@ -7,6 +7,7 @@ import os
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
+    """Read an integer environment setting and enforce its minimum value."""
     try:
         return max(minimum, int(os.getenv(name, str(default))))
     except (TypeError, ValueError):
@@ -26,6 +27,7 @@ class CollectorConfig:
 
     @classmethod
     def from_env(cls) -> "CollectorConfig":
+        """Build collector settings from the process environment."""
         enabled = os.getenv("LOG_WS_ENABLED", "false").strip().lower() in {
             "1",
             "true",
@@ -46,5 +48,5 @@ class CollectorConfig:
 
     @property
     def valid(self) -> bool:
+        """Report whether required connection and source settings are present."""
         return bool(self.url and self.token and self.log_key and self.source_id)
-

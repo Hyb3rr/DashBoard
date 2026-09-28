@@ -11,6 +11,7 @@ from .reasoning import LocalReasoningProvider, ReasoningResult
 
 
 def _content(result: ReasoningResult) -> dict[str, Any] | None:
+    """Extract a structured analysis object from a provider response."""
     raw = result.raw_response or {}
     choices = raw.get("choices") if isinstance(raw, dict) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -29,12 +30,14 @@ def _content(result: ReasoningResult) -> dict[str, Any] | None:
 
 
 def _evidence_ids(value: Any) -> list[str]:
+    """Normalize supported evidence-reference representations to identifiers."""
     if not isinstance(value, list):
         return []
     return [item if isinstance(item, str) else str(item["evidence_id"]) for item in value if isinstance(item, str) or isinstance(item, dict) and item.get("evidence_id")]
 
 
 def evaluate_case(case_packet: dict[str, Any], result: ReasoningResult, latency_ms: float, include_analysis: bool = False) -> dict[str, Any]:
+    """Validate provider output against the case packet and report grounding."""
     packet_ids = {str(item["evidence_id"]) for item in case_packet.get("evidence", []) if isinstance(item, dict) and item.get("evidence_id")}
     analysis = _content(result) if result.status == "received" else None
     cited = _evidence_ids((analysis or {}).get("primary_evidence")) + _evidence_ids((analysis or {}).get("supporting_evidence"))
@@ -67,6 +70,7 @@ def evaluate_case(case_packet: dict[str, Any], result: ReasoningResult, latency_
 
 
 def _analysis_has_incomplete_text(analysis: dict[str, Any] | None) -> bool:
+    """Detect unfinished text in user-facing analysis fields."""
     if not analysis:
         return False
     values = [analysis.get("summary"), analysis.get("alternative_explanation"), *(analysis.get("recommended_investigation") or [])]
@@ -74,13 +78,15 @@ def _analysis_has_incomplete_text(analysis: dict[str, Any] | None) -> bool:
 
 
 def _looks_truncated(value: str) -> bool:
+    """Identify common signs that generated text ended mid-sentence."""
     stripped = value.rstrip()
     if stripped != value or "<span" in value or "</" in value or stripped.endswith((",", ":", ";")):
         return True
-    return stripped.lower().split()[-1:] in [["as"], ["and"], ["or"], ["the"], ["a"], ["an"], ["of"], ["to"], ["for"], ["with"], ["from"], ["any"], ["known"], ["anom"]]
+    return stripped.lower().split()[-1:] in [["as"], ["and"], ["or"], ["the"], ["a"], ["an"], ["of"], ["to"], ["for"], ["with"], ["from"], ["any"], ["anom"]]
 
 
 def _requires_evidence_reference(analysis: dict[str, Any]) -> bool:
+    """Determine whether an analysis makes claims that require cited evidence."""
     text = " ".join([analysis.get("summary", ""), analysis.get("alternative_explanation", ""), *(analysis.get("recommended_investigation") or [])]).lower()
     return any(term in text for term in ("evidence", "request", "path", "probe", "rare", "scan", "traffic", "suspicious", "malicious", "anomal"))
 
@@ -111,6 +117,7 @@ def build_review_capture(
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:
+    """Return a bounded nearest-rank percentile for measured latencies."""
     if not values:
         return None
     ordered = sorted(values)
@@ -119,6 +126,7 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 
 
 def evaluate_corpus(cases: Iterable[dict[str, Any]], provider: LocalReasoningProvider, include_analysis: bool = False) -> dict[str, Any]:
+    """Evaluate provider grounding and latency across a collection of cases."""
     reports = []
     for item in cases:
         packet = item.get("case_packet", item)

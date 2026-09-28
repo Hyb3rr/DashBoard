@@ -59,20 +59,22 @@ function geoSummary(d){
 }
 let lastClassificationRenderKey='';
 function renderClassificationAnalytics(){
-  const allCounts=ipSummary?.classification||{critical:0,medium:0,low:0,good:0,unknown:0};
+  const currentQueryIdentity=trafficQueryIdentity(snapshotTrafficQuery());
+  if(!trafficClassificationSummary||trafficClassificationSummary.queryIdentity!==currentQueryIdentity)return;
+  const allCounts=trafficClassificationSummary?.classification||{critical:0,medium:0,low:0,good:0,unknown:0};
   const items=[['critical','Critical','var(--critical)'],['medium','Medium','var(--watch)'],['low','Low','var(--low)'],['good','Good','var(--stable)'],['unknown','Unclassified','var(--tertiary)']];
-  const activeClassification=$('classification')?.value||'';
+  const activeClassification=trafficFilterType==='classification'?trafficFilterValue:'';
   const counts=activeClassification?Object.fromEntries(items.map(([key])=>[key,key===activeClassification?Number(allCounts[key]||0):0])):allCounts;
   const total=items.reduce((sum,[key])=>sum+Number(counts[key]||0),0),radius=42,circumference=2*Math.PI*radius;
   let offset=0;
   const arcs=items.map(([key,label,color])=>{const value=Number(counts[key]||0),length=total?value/total*circumference:0,arc=`<circle cx="50" cy="50" r="${radius}" fill="none" stroke="${color}" stroke-width="12" stroke-dasharray="${length} ${circumference-length}" stroke-dashoffset="-${offset}" transform="rotate(-90 50 50)"></circle>`;offset+=length;return arc}).join('');
-  const renderKey=`${items.map(([key])=>Number(counts[key]||0)).join(',')}|${activeClassification}`;
+  const renderKey=`${trafficClassificationSummary?.queryIdentity||'unavailable'}|${items.map(([key])=>Number(counts[key]||0)).join(',')}|${activeClassification}`;
   if(renderKey===lastClassificationRenderKey)return;
   lastClassificationRenderKey=renderKey;
   const legend=items.map(([key,label])=>`<div class="donut-entry${activeClassification===key?' active':''}"><i class="donut-dot ${key}"></i><b>${label}</b><em>${num(counts[key]||0)}</em><span class="donut-actions"><button type="button" class="donut-action" data-classification-filter="${key}"${activeClassification===key?' aria-pressed="true"':''}>Filter</button><button type="button" class="donut-action clear" data-classification-clear="${key}"${activeClassification!==key?' disabled':''}>Clear</button></span></div>`).join('');
   $('classification-donut').innerHTML=`<div class="donut-visual"><svg viewBox="0 0 100 100" role="img" aria-label="Classification breakdown">${total?`<circle cx="50" cy="50" r="${radius}" fill="none" stroke="var(--raised)" stroke-width="12"></circle>${arcs}`:'<circle cx="50" cy="50" r="42" fill="none" stroke="var(--raised)" stroke-width="12"></circle>'}</svg><strong>${num(total)}</strong><small>IPs</small></div><div class="donut-legend">${legend}</div>`;
-  $('classification-donut').querySelectorAll('[data-classification-filter]').forEach(button=>button.addEventListener('click',()=>{const value=button.dataset.classificationFilter;$('classification').value=value;setClassificationTrafficFilter(value);ipPage=1;loadIpSnapshot(true);loadTraffic(true)}));
-  $('classification-donut').querySelectorAll('[data-classification-clear]').forEach(button=>button.addEventListener('click',()=>{if(button.disabled)return;$('classification').value='';setClassificationTrafficFilter('');ipPage=1;loadIpSnapshot(true);loadTraffic(true)}));
+  $('classification-donut').querySelectorAll('[data-classification-filter]').forEach(button=>button.addEventListener('click',()=>{const value=button.dataset.classificationFilter;$('classification').value=value;setClassificationTrafficFilter(value);ipPage=1;loadIpSnapshot(true);loadTraffic()}));
+  $('classification-donut').querySelectorAll('[data-classification-clear]').forEach(button=>button.addEventListener('click',()=>{if(button.disabled)return;$('classification').value='';setClassificationTrafficFilter('');ipPage=1;loadIpSnapshot(true);loadTraffic()}));
 }
 function renderAnalytics(){
   if(ipsReady)renderClassificationAnalytics();
@@ -81,6 +83,11 @@ function trafficTime(value){return window.formatVnTime(value)}
 function trafficClock(value){return window.formatVnTime(value)}
 function seenTime(value){return window.formatVnTime(value)}
 const TRAFFIC_WINDOW_KEY='hub:v3:traffic-window';let trafficRange='1d',trafficStart='',trafficEnd='',trafficFilterType='',trafficFilterValue='',trafficExclude=false;
+let trafficRequestGeneration=0,ipSummaryRequestGeneration=0,trafficClassificationSummary=null;
+function snapshotTrafficQuery(){return Object.freeze({range:trafficRange,start:trafficStart?localIso(trafficStart):'',end:trafficEnd?localIso(trafficEnd):'',filterType:trafficFilterType,filterValue:trafficFilterValue,exclude:Boolean(trafficExclude)})}
+function trafficQueryIdentity(query){return JSON.stringify([query.start,query.end,query.range,query.filterType,query.filterValue,query.exclude])}
+function trafficQueryParams(query){const params=new URLSearchParams({range:query.range,source:'stream',mode:'live'});if(query.start)params.set('start',query.start);if(query.end)params.set('end',query.end);if(query.filterType){params.set('filter_type',query.filterType);params.set('filter_value',query.filterValue);if(query.exclude)params.set('exclude','true')}return params}
+function isCurrentTrafficQuery(generation,identity){return generation===trafficRequestGeneration&&identity===trafficQueryIdentity(snapshotTrafficQuery())}
 const mapRangeToTrafficRange=range=>range==='24h'?'1d':range;
 const trafficRangeToMapRange=range=>range==='1d'?'24h':range;
 const timeRangeLabels={'30m':'Last 30 minutes','1h':'Last 1 hour','6h':'Last 6 hours','12h':'Last 12 hours','1d':'Last 24 hours','3d':'Last 3 days','7d':'Last 7 days','30d':'Last 30 days'};
@@ -92,16 +99,21 @@ function syncTimePickerUi(){const custom=Boolean(trafficStart||trafficEnd),label
 function syncTrafficInputs(start,end){const startInput=$('traffic-start'),endInput=$('traffic-end');if(startInput&&!startInput.value)startInput.value=localInputValue(start);if(endInput&&!endInput.value)endInput.value=localInputValue(end);syncTimePickerUi();window.syncDashboardCalendar?.()}
 function filterLabel(){return trafficFilterType==='country'?'Country':trafficFilterType==='path'?'Path':trafficFilterType==='classification'?'Classification':'IP'}
 function renderTrafficFilter(data){const state=$('traffic-filter-state'),filter=data.filter||null;if(!filter?.type){state.hidden=true;state.innerHTML='';return}state.hidden=false;state.innerHTML=`<strong>${filterLabel()} ${filter.exclude?'≠':'='}</strong><span title="${esc(filter.value)}">${esc(filter.value)}</span><button class="secondary" type="button" id="traffic-filter-clear">Clear filter</button>`;state.querySelector('button').addEventListener('click',clearTrafficFilter)}
-function applyTrafficFilter(type,value,exclude){trafficFilterType=type;trafficFilterValue=value;trafficExclude=Boolean(exclude);saveTrafficWindow();loadTraffic(true)}
+function applyTrafficFilter(type,value,exclude){
+  const classificationWasSelected=Boolean($('classification')?.value);
+  trafficFilterType=type;trafficFilterValue=value;trafficExclude=Boolean(exclude);
+  if(type==='classification')$('classification').value=value;
+  else if(classificationWasSelected){$('classification').value='';document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.remove('selected'));ipPage=1;loadIpSnapshot(true)}
+  saveTrafficWindow();loadTraffic()
+}
 function clearTrafficFilter(){
   const wasClassification=trafficFilterType==='classification';
   trafficFilterType='';trafficFilterValue='';trafficExclude=false;
   if(wasClassification&&$('classification')){
     $('classification').value='';
     document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.remove('selected'));
-    renderClassificationAnalytics();
   }
-  saveTrafficWindow();loadTraffic(true);
+  saveTrafficWindow();loadTraffic();
 }
 function setClassificationTrafficFilter(value){
   if(value){trafficFilterType='classification';trafficFilterValue=value;trafficExclude=false}
@@ -137,20 +149,23 @@ function renderTraffic(data){
   $('top-ips').innerHTML=renderIpRows((data.top_ips||[]).slice(0,6));
   $('top-paths').innerHTML=renderRows((data.top_paths||[]).slice(0,6),x=>x.path,'path');
 }
-let trafficRequest=null;
-async function loadTraffic(force=false){
-  if(trafficRequest)return trafficRequest;
-  trafficRequest=(async()=>{
+async function loadTraffic(){
+  const generation=++trafficRequestGeneration,query=snapshotTrafficQuery(),identity=trafficQueryIdentity(query),params=trafficQueryParams(query);
   try{
-    const params=new URLSearchParams({range:trafficRange,source:'stream',mode:'live'});
-    if(trafficStart)params.set('start',localIso(trafficStart));if(trafficEnd)params.set('end',localIso(trafficEnd));
-    if(trafficFilterType){params.set('filter_type',trafficFilterType);params.set('filter_value',trafficFilterValue);if(trafficExclude)params.set('exclude','true')}
     const response=await fetch(apiUrl(`/api/analytics/traffic?${params.toString()}`),{cache:'no-store'});
+    if(!isCurrentTrafficQuery(generation,identity))return false;
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    const data=await response.json();syncTrafficInputs(data.start,data.end);saveTrafficWindow();renderTraffic(data);await loadIpSummary(data.start,data.end);
-  }catch(error){$('traffic-chart').innerHTML=`<div class="state"><strong>Traffic analytics unavailable.</strong>${esc(error.message||'Request failed')}</div>`}
-  })();
-  try{return await trafficRequest}finally{trafficRequest=null}
+    const data=await response.json();
+    if(!isCurrentTrafficQuery(generation,identity))return false;
+    trafficClassificationSummary={...(data.classification_summary||{}),queryIdentity:identity};
+    syncTrafficInputs(data.start,data.end);saveTrafficWindow();renderTraffic(data);renderAnalytics();
+    await loadIpSummary(data.start,data.end,identity,generation);
+    return true;
+  }catch(error){
+    if(!isCurrentTrafficQuery(generation,identity))return false;
+    $('traffic-chart').innerHTML=`<div class="state"><strong>Traffic analytics unavailable.</strong>${esc(error.message||'Request failed')}</div>`;
+    return false;
+  }
 }
 let countryDemandPeriod='30d';
 let countryDemandCountries=[];
@@ -238,9 +253,9 @@ function openCountryDemand(c){
   drawer.addEventListener('click',event=>{if(event.target===drawer)close()},{once:true});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!drawer.hidden)close()},{once:true});
 }
-function applyTrafficWindow(){trafficStart=$('traffic-start').value.trim();trafficEnd=$('traffic-end').value.trim();const valid=value=>/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)&&!Number.isNaN(new Date(value.replace(' ','T')).getTime());if(!valid(trafficStart)||!valid(trafficEnd)){notify('Use format YYYY-MM-DD HH:mm');return false}if(new Date(trafficEnd.replace(' ','T'))<=new Date(trafficStart.replace(' ','T'))){notify('End must be after start');return false}syncTimePickerUi();saveTrafficWindow();window.dispatchEvent(new CustomEvent('dashboard-time-window-change'));loadTraffic(true);window.reloadDashboardMap?.();return true}
-function clearTrafficWindow(){trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';trafficRange='1d';syncTimePickerUi();saveTrafficWindow();loadTraffic(true);window.reloadDashboardMap?.()}
-function setDashboardMapRange(range){trafficRange=mapRangeToTrafficRange(range);trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';syncTimePickerUi();saveTrafficWindow();loadTraffic(true)}
+function applyTrafficWindow(){trafficStart=$('traffic-start').value.trim();trafficEnd=$('traffic-end').value.trim();const valid=value=>/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)&&!Number.isNaN(new Date(value.replace(' ','T')).getTime());if(!valid(trafficStart)||!valid(trafficEnd)){notify('Use format YYYY-MM-DD HH:mm');return false}if(new Date(trafficEnd.replace(' ','T'))<=new Date(trafficStart.replace(' ','T'))){notify('End must be after start');return false}syncTimePickerUi();saveTrafficWindow();window.dispatchEvent(new CustomEvent('dashboard-time-window-change'));loadTraffic();window.reloadDashboardMap?.();return true}
+function clearTrafficWindow(){trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';trafficRange='1d';syncTimePickerUi();saveTrafficWindow();loadTraffic();window.reloadDashboardMap?.()}
+function setDashboardMapRange(range){trafficRange=mapRangeToTrafficRange(range);trafficStart='';trafficEnd='';$('traffic-start').value='';$('traffic-end').value='';syncTimePickerUi();saveTrafficWindow();loadTraffic()}
 function getDashboardMapRange(){return trafficStart||trafficEnd?'custom':trafficRangeToMapRange(trafficRange)}
 function getDashboardTimeWindow(){return {range:getDashboardMapRange(),start:trafficStart,end:trafficEnd}}
 window.getDashboardMapRange=getDashboardMapRange;
@@ -303,10 +318,22 @@ function render(){
 const IP_SNAPSHOT_KEY='hub:v4:ip-page';let trafficTimer=null,eventSource=null,fallbackPollTimer=null,durableRealtimeTimer=null,sseConnected=false;
 function snapshotKey(){return IP_SNAPSHOT_KEY}
 function pageQuery(){const params=new URLSearchParams({page:String(ipPage),page_size:String(ipPageSize),sort:sortField,direction:sortDir});const q=$('search').value.trim();if(q)params.set('q',q);if($('privacy').value)params.set('privacy',$('privacy').value);if($('classification').value)params.set('classification',$('classification').value);if($('disposition').value)params.set('disposition',$('disposition').value);return params}
-async function loadIpSummary(start='',end=''){try{const params=new URLSearchParams();if(start)params.set('start',start);if(end)params.set('end',end);const query=params.toString();const response=await fetch(apiUrl(`/api/ips/summary${query?`?${query}`:''}`),{cache:'no-store'});if(!response.ok)throw new Error();ipSummary=await response.json();summary();renderAnalytics()}catch(_){} }
+async function loadIpSummary(start,end,queryIdentity,trafficGeneration){
+  if(!isCurrentTrafficQuery(trafficGeneration,queryIdentity))return false;
+  const summaryGeneration=++ipSummaryRequestGeneration,params=new URLSearchParams();
+  if(start)params.set('start',start);if(end)params.set('end',end);
+  try{
+    const response=await fetch(apiUrl(`/api/ips/summary?${params.toString()}`),{cache:'no-store'});
+    if(!isCurrentTrafficQuery(trafficGeneration,queryIdentity)||summaryGeneration!==ipSummaryRequestGeneration)return false;
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    ipSummary=await response.json();
+    if(!isCurrentTrafficQuery(trafficGeneration,queryIdentity)||summaryGeneration!==ipSummaryRequestGeneration)return false;
+    summary();renderAnalytics();return true;
+  }catch(_){return false}
+}
 function recordRealtimeLatency(items){const renderedAt=Date.now(),event=window.__ipRealtimeLastEvent||{},samples=(items||[]).map(item=>{const p=item.pipeline||{},received=Date.parse(p.received_at||'');if(!Number.isFinite(received))return null;const total=Math.max(0,renderedAt-received),backend=Number(p.backend_ready_ms),published=Date.parse(event.published_at||''),delivered=Number(event.received_at),profiled=Boolean(p.profile_ready_at);return {ip:item.ip,segment:profiled?'profiled':'profile-pending',end_to_end_ms:total,backend_ready_ms:Number.isFinite(backend)?backend:null,publish_to_sse_ms:Number.isFinite(published)&&Number.isFinite(delivered)?Math.max(0,delivered-published):null,delivery_render_ms:Number.isFinite(delivered)?Math.max(0,renderedAt-delivered):null,rendered_at:new Date(renderedAt).toISOString()}}).filter(Boolean);if(!samples.length)return;const history=[...(Array.isArray(window.__ipRealtimeMetrics)?window.__ipRealtimeMetrics:[]),...samples].slice(-200),percentile=(list,p)=>{const ordered=list.map(x=>x.end_to_end_ms).sort((a,b)=>a-b);return ordered.length?ordered[Math.min(ordered.length-1,Math.ceil(ordered.length*p)-1)]:null},profiled=history.filter(x=>x.segment==='profiled'),pending=history.filter(x=>x.segment==='profile-pending'),latest=samples[samples.length-1];window.__ipRealtimeMetrics=history;$('ip-realtime-latency').textContent=`realtime p95 ${num(percentile(history,.95))} ms · profile ${num(percentile(profiled,.95))} · pending ${num(percentile(pending,.95))}`;$('ip-realtime-latency').title=`Latest ${num(latest.end_to_end_ms)} ms · backend ${num(latest.backend_ready_ms)} ms · publish/SSE ${num(latest.publish_to_sse_ms)} ms · render ${num(latest.delivery_render_ms)} ms · ${latest.segment} · ${latest.ip} · ${history.length} samples`}
-async function loadIpSnapshot(force=false,realtimeItems=[]){try{const response=await fetch(apiUrl(`/api/ips/page?${pageQuery()}`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipPage=Number(data.page||ipPage);ipTotalPages=Math.max(1,Number(data.total_pages||1));ipCursor=Number(data.change_cursor||ipCursor);ipsReady=true;summary();render();recordRealtimeLatency(realtimeItems);renderAnalytics();await loadIpSummary()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="8"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}}
-function applyIpChanges(items){const known=new Set(ips.map(item=>item.ip));if(items.some(item=>!known.has(item.ip)))return false;const changes=new Map(items.map(item=>[item.ip,item]));ips=ips.map(item=>changes.get(item.ip)||item);render();recordRealtimeLatency(items);loadIpSummary();return true}
+async function loadIpSnapshot(force=false,realtimeItems=[]){try{const response=await fetch(apiUrl(`/api/ips/page?${pageQuery()}`),{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();ips=data.items||[];ipPage=Number(data.page||ipPage);ipTotalPages=Math.max(1,Number(data.total_pages||1));ipCursor=Number(data.change_cursor||ipCursor);ipsReady=true;summary();render();recordRealtimeLatency(realtimeItems);renderAnalytics()}catch(error){const message=error instanceof TypeError?'Cannot reach Hub API at http://127.0.0.1:8000. Check that Uvicorn is running.':`Hub API error: ${error.message}`;$('rows').innerHTML=`<tr><td colspan="8"><div class="state"><strong>Intelligence unavailable</strong>${esc(message)}</div></td></tr>`;notify(message)}}
+function applyIpChanges(items){const known=new Set(ips.map(item=>item.ip));if(items.some(item=>!known.has(item.ip)))return false;const changes=new Map(items.map(item=>[item.ip,item]));ips=ips.map(item=>changes.get(item.ip)||item);render();recordRealtimeLatency(items);return true}
 async function syncIpDelta(){if(deltaBusy)return false;deltaBusy=true;try{let after=ipCursor,more=true,transitions=[],changedItems=[];while(more){const response=await fetch(apiUrl(`/api/ips/updates?after=${encodeURIComponent(after)}&limit=500`),{cache:'no-store'});if(!response.ok)throw new Error();const data=await response.json();if(data.reset_required){await loadIpSnapshot(true);return true}transitions.push(...(data.transitions||[]));changedItems.push(...(data.items||[]));after=Number(data.cursor||after);more=Boolean(data.has_more);ipCursor=after}if(transitions.length)showRiskTransitions(transitions);if(!changedItems.length)return false;if(!applyIpChanges(changedItems))await loadIpSnapshot(true,changedItems);return true}catch(_){return false}finally{deltaBusy=false}}
 function showRiskTransitions(transitions){
   const fresh=transitions.filter(x=>['medium','critical'].includes(x.new_label)&&x.new_label!==x.old_label);
@@ -322,8 +349,8 @@ function showRiskTransitions(transitions){
   }
 }
 
-function scheduleRealtimeFlush(delay=1000){if(collectorState==='backlog')return;if(realtimeFlushTimer)return;const debounce=Math.max(750,Number(delay)||0);realtimeFlushTimer=setTimeout(async()=>{realtimeFlushTimer=null;if(realtimeFlushRunning){realtimeFlushPending=true;return}realtimeFlushRunning=true;try{if(await syncIpDelta())await loadTraffic(true)}finally{realtimeFlushRunning=false;if(realtimeFlushPending){realtimeFlushPending=false;scheduleRealtimeFlush(750)}}},debounce)}
-function scheduleTrafficRefresh(){if(trafficTimer)return;trafficTimer=window.setTimeout(()=>{trafficTimer=null;loadTraffic(true)},1000)}
+function scheduleRealtimeFlush(delay=1000){if(collectorState==='backlog')return;if(realtimeFlushTimer)return;const debounce=Math.max(750,Number(delay)||0);realtimeFlushTimer=setTimeout(async()=>{realtimeFlushTimer=null;if(realtimeFlushRunning){realtimeFlushPending=true;return}realtimeFlushRunning=true;try{if(await syncIpDelta())await loadTraffic()}finally{realtimeFlushRunning=false;if(realtimeFlushPending){realtimeFlushPending=false;scheduleRealtimeFlush(750)}}},debounce)}
+function scheduleTrafficRefresh(){if(trafficTimer)return;trafficTimer=window.setTimeout(()=>{trafficTimer=null;loadTraffic()},1000)}
 function setCollectorStatus(data){const state=data.status||'unknown',previous=collectorState;collectorState=state;$('collector-state').textContent=state==='backlog'?'Replaying log…':state.charAt(0).toUpperCase()+state.slice(1);$('collector-dot').style.background=state==='live'?'var(--stable)':state==='retrying'||state==='config_error'?'var(--hostile)':'var(--watch)';if(state==='live'&&previous==='backlog')scheduleRealtimeFlush()}
 function startFallbackPolling(){if(fallbackPollTimer)return;fallbackPollTimer=setInterval(()=>scheduleRealtimeFlush(),5000)}
 function stopFallbackPolling(){if(fallbackPollTimer){clearInterval(fallbackPollTimer);fallbackPollTimer=null}}
@@ -443,7 +470,7 @@ restoreTrafficWindow();
 if(trafficFilterType==='classification'&&$('classification'))$('classification').value=trafficFilterValue;
 syncTimePickerUi();
 ['Any abuse','Abuse recent','Abuse historical','Abuse persistent'].forEach((label,index)=>{const value=['intel:any_abuse','intel:abuse_recent','intel:abuse_historical','intel:abuse_persistent'][index],select=$('privacy');if(select&&!select.querySelector(`option[value="${value}"]`)){const option=document.createElement('option');option.value=value;option.textContent=label;select.appendChild(option)}});
- $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);let searchTimer=null;['privacy','disposition'].forEach(id=>$(id).addEventListener('input',()=>{ipPage=1;loadIpSnapshot(true)}));$('classification').addEventListener('input',()=>{const value=$('classification').value;setClassificationTrafficFilter(value);document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===value));ipPage=1;loadIpSnapshot(true);loadTraffic(true)});$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ipPage=1;loadIpSnapshot(true)},300)});
+ $('theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));applyTheme(initialTheme);let searchTimer=null;['privacy','disposition'].forEach(id=>$(id).addEventListener('input',()=>{ipPage=1;loadIpSnapshot(true)}));$('classification').addEventListener('input',()=>{const value=$('classification').value;setClassificationTrafficFilter(value);document.querySelectorAll('.risk-tab').forEach(tab=>tab.classList.toggle('selected',tab.dataset.classification===value));ipPage=1;loadIpSnapshot(true);loadTraffic()});$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ipPage=1;loadIpSnapshot(true)},300)});
  ['top-ips','top-paths'].forEach(id=>$(id).addEventListener('click',event=>{const action=event.target.closest('[data-traffic-action]');if(!action)return;event.preventDefault();event.stopPropagation();applyTrafficFilter(action.dataset.filterType,action.dataset.filterValue,action.dataset.trafficAction==='exclude')}));
  document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{if(sortField===th.dataset.sort)sortDir=sortDir==='desc'?'asc':'desc';else{sortField=th.dataset.sort;sortDir='desc'}loadIpSnapshot(true)}));
 $('ip-prev').addEventListener('click',()=>{if(ipPage>1){ipPage--;loadIpSnapshot(true)}});$('ip-next').addEventListener('click',()=>{if(ipPage<ipTotalPages){ipPage++;loadIpSnapshot(true)}});

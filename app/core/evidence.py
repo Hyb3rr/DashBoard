@@ -13,10 +13,12 @@ SUPPORTED_SEVERITIES = frozenset({"supporting", "low", "medium", "high", "critic
 
 
 def _canonical(value: Any) -> str:
+    """Serialize values deterministically for stable evidence identity."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _stable_id(payload: Mapping[str, Any]) -> str:
+    """Create a compact content-derived identifier for an evidence payload."""
     return f"ev_{hashlib.sha256(_canonical(payload).encode('utf-8')).hexdigest()[:24]}"
 
 
@@ -38,6 +40,7 @@ class UnifiedEvidence:
     evidence_id: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate evidence fields and assign its deterministic identifier."""
         if not self.source.strip() or not self.observed_at.strip() or not self.description.strip():
             raise ValueError("evidence source, observed_at and description must not be empty")
         if self.type not in SUPPORTED_TYPES:
@@ -54,6 +57,7 @@ class UnifiedEvidence:
         object.__setattr__(self, "evidence_id", expected)
 
     def _identity_payload(self) -> dict[str, Any]:
+        """Build the canonical fields that define this evidence identity."""
         return {
             "source": self.source, "type": self.type, "severity": self.severity,
             "observed": dict(self.observed), "baseline": dict(self.baseline),
@@ -63,4 +67,5 @@ class UnifiedEvidence:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the validated evidence record for API and storage use."""
         return {**self._identity_payload(), "evidence_id": self.evidence_id, "freshness": self.freshness}

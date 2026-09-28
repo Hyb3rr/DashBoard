@@ -14,6 +14,7 @@ from scripts.ops.backup_postgres import AzureBlobUploader, backup_postgres
 
 
 def _component(manifest: dict, component_name: str, settings: BackupSettings) -> dict:
+    """Project one completed database backup into the set manifest."""
     return {
         "backup_id": manifest["backup_id"],
         "object_key": manifest["object_key"],

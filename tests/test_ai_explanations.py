@@ -42,3 +42,29 @@ def test_get_job_hides_unvalidated_result(monkeypatch):
     response = ai_explanations.get_explanation_job("job_1")
     assert response["analysis"] is None
     assert response["validation"] is None
+
+
+def test_get_job_projects_abstention_without_analysis_or_validation(monkeypatch):
+    class FakeRepository:
+        def get(self, _):
+            return {
+                "job_id": "job_1",
+                "case_id": "case_1",
+                "evidence_fingerprint": "fp_1",
+                "status": "abstained",
+                "validation_status": "abstained",
+                "failure_code": "local_reasoning_budget_exceeded",
+                "analysis_json": {"must": "not leak"},
+                "validation_json": {"must": "not leak"},
+                "provenance_json": {"model": "local"},
+            }
+
+    monkeypatch.setattr(ai_explanations, "AiExplainJobRepository", FakeRepository)
+    response = ai_explanations.get_explanation_job("job_1")
+
+    assert response["status"] == "abstained"
+    assert response["validation_status"] == "abstained"
+    assert response["failure_code"] == "local_reasoning_budget_exceeded"
+    assert response["analysis"] is None
+    assert response["validation"] is None
+    assert "raw_response" not in response

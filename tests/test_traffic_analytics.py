@@ -18,6 +18,7 @@ def test_clickhouse_bucket_timestamps_are_explicit_utc():
 
 def test_summary_window_counts_distinct_active_ips_by_current_label(monkeypatch):
     from contextlib import contextmanager
+    from app.db import state_repository
     from app.db.repositories import StateRepository
 
     class Result:
@@ -42,7 +43,7 @@ def test_summary_window_counts_distinct_active_ips_by_current_label(monkeypatch)
     def fake_transaction():
         yield Connection()
 
-    monkeypatch.setattr("app.db.repositories.transaction", fake_transaction)
+    monkeypatch.setattr(state_repository, "transaction", fake_transaction)
     result = StateRepository().summary_window(
         datetime(2026, 1, 1, tzinfo=timezone.utc),
         datetime(2026, 1, 1, 23, 59, tzinfo=timezone.utc),
@@ -53,6 +54,7 @@ def test_summary_window_counts_distinct_active_ips_by_current_label(monkeypatch)
 
 def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeypatch):
     from contextlib import contextmanager
+    from app.db import state_repository
     from app.db.repositories import StateRepository
 
     class Result:
@@ -76,7 +78,7 @@ def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeyp
     def fake_transaction():
         yield Connection()
 
-    monkeypatch.setattr("app.db.repositories.transaction", fake_transaction)
+    monkeypatch.setattr(state_repository, "transaction", fake_transaction)
     result = StateRepository().risk_traffic_series(
         datetime(2026, 1, 1, tzinfo=timezone.utc),
         datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
@@ -88,6 +90,66 @@ def test_risk_traffic_series_returns_medium_and_critical_request_buckets(monkeyp
         "medium_requests": 7,
         "critical_requests": 3,
     }]
+
+
+def test_classification_summary_uses_distinct_exact_traffic_cohort_and_unknown_fallback(monkeypatch):
+    from contextlib import contextmanager
+    from app.db import state_repository
+    from app.db.repositories import StateRepository
+
+    class Result:
+        def fetchone(self):
+            return {"total": 3, "critical": 1, "medium": 0, "low": 0, "good": 1, "unknown": 1}
+
+    class Connection:
+        def execute(self, sql, args=()):
+            assert "SELECT DISTINCT ip FROM unnest(%s::inet[])" in sql
+            assert "LEFT JOIN ip_classification_state" in sql
+            assert args == (["203.0.113.1", "203.0.113.2", "203.0.113.3"],)
+            return Result()
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr(state_repository, "transaction", fake_transaction)
+    result = StateRepository().classification_summary_for_ips([
+        "203.0.113.1", "203.0.113.1", "203.0.113.2", "203.0.113.3",
+    ])
+
+    assert result == {
+        "total_ips": 3,
+        "classification": {"critical": 1, "medium": 0, "low": 0, "good": 1, "unknown": 1},
+    }
+    assert sum(result["classification"].values()) == result["total_ips"]
+
+
+def test_empty_traffic_cohort_has_zero_classification_counts_without_database_query(monkeypatch):
+    from app.db import state_repository
+    from app.db.repositories import StateRepository
+
+    def unexpected_transaction():
+        raise AssertionError("empty cohort must not query PostgreSQL")
+
+    monkeypatch.setattr(state_repository, "transaction", unexpected_transaction)
+    result = StateRepository().classification_summary_for_ips([])
+
+    assert result == {
+        "total_ips": 0,
+        "classification": {"critical": 0, "medium": 0, "low": 0, "good": 0, "unknown": 0},
+    }
+
+
+def test_path_filter_risk_series_is_intentionally_unavailable():
+    from app.db.repositories import StateRepository
+
+    assert StateRepository().risk_traffic_series(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        300,
+        filter_type="path",
+        filter_value="/wp-login.php",
+    ) == []
 
 
 @pytest.mark.integration

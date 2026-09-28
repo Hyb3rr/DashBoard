@@ -13,6 +13,7 @@ router = APIRouter()
 
 @router.get("/api/collector/status")
 def collector_status():
+    """Return shared collector health and live AI backend status."""
     payload = collector.shared_status()
     payload["ai_state_backend"] = "postgresql_live_only"
     return payload
@@ -20,8 +21,10 @@ def collector_status():
 
 @router.post("/api/ips/refresh-unknown")
 async def refresh_unknown(limit: int = 500):
+    """Stream progress while refreshing incomplete IP enrichment profiles."""
     limit = min(max(limit, 1), 5000)
     def select_unknown():
+        """Select the highest-traffic profiles that still need enrichment."""
         with postgres_store.transaction() as pg_conn:
             return pg_conn.execute("""SELECT host(o.ip) AS ip
                 FROM ip_observations_state o LEFT JOIN ip_profiles p ON p.ip=o.ip
@@ -33,6 +36,7 @@ async def refresh_unknown(limit: int = 500):
     selected = [str(row["ip"]) for row in rows]
 
     async def generate_split():
+        """Yield newline-delimited progress and outcome records for each IP."""
         yield json.dumps({"type": "start", "selected": len(selected), "mode": "live", "order": "requests_desc"}) + "\n"
         processed = complete = partial = failed = 0
         for ip in selected:
@@ -55,7 +59,9 @@ async def refresh_unknown(limit: int = 500):
 
 @router.get("/api/stream")
 async def realtime_stream():
+    """Stream cross-process change notifications as server-sent events."""
     async def generate():
+        """Yield queued change events and periodic SSE heartbeats."""
         subscription = await bus.open_subscription()
         try:
             # Flush the SSE response immediately so EventSource can establish

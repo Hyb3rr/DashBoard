@@ -3,26 +3,32 @@ from app.db import repositories
 
 class _FakeConnection:
     def __init__(self):
+        """Initialize captured SQL and parameter lists for repository assertions."""
         self.sql = []
         self.params = []
 
     def execute(self, sql, params=()):
+        """Record one repository SQL statement and its bound parameters."""
         self.sql.append(sql)
         self.params.append(params)
 
 
 class _Transaction:
     def __init__(self, connection):
+        """Wrap a fake connection in the transaction context-manager contract."""
         self.connection = connection
 
     def __enter__(self):
+        """Return the captured connection when the repository opens its scope."""
         return self.connection
 
     def __exit__(self, *exc):
+        """Leave fake transaction handling unchanged after repository calls."""
         return False
 
 
 def test_profile_upsert_refreshes_enrichment_fields_without_detection_state(monkeypatch):
+    """Keep enrichment fields refreshable without overwriting detection-owned state."""
     connection = _FakeConnection()
     monkeypatch.setattr(repositories, "transaction", lambda: _Transaction(connection))
 
@@ -61,3 +67,5 @@ def test_profile_upsert_refreshes_enrichment_fields_without_detection_state(monk
     assert "risk_score=EXCLUDED.risk_score" not in conflict_sql
     assert "risk_level=EXCLUDED.risk_level" not in conflict_sql
     assert "evidence=EXCLUDED.evidence" not in conflict_sql
+    assert len(connection.sql) == 2
+    assert "network_location=%s" in connection.sql[1]

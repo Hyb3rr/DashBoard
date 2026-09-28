@@ -25,6 +25,7 @@ def enqueue(ip: str) -> bool:
 
 
 def _claim(limit: int) -> list[dict]:
+    """Claim pending enrichment requests safely across worker processes."""
     with postgres_store.transaction() as conn:
         rows = conn.execute(
             """WITH picked AS (
@@ -43,6 +44,7 @@ def _claim(limit: int) -> list[dict]:
 
 
 def _finish(request_id: int, ok: bool, error: str | None) -> None:
+    """Persist completion or failure for one claimed enrichment request."""
     with postgres_store.transaction() as conn:
         conn.execute(
             """UPDATE enrichment_requests

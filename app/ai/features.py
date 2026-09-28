@@ -1,9 +1,4 @@
-"""AI feature extraction — pure Python, no database dependency.
-
-build_window_features() now accepts pre-fetched bucket rows as plain dicts
-instead of a SQLite connection. The caller (PgDetectionRepository or
-score_cycle) is responsible for fetching the rows from PostgreSQL.
-"""
+"""Build AI model features from pre-fetched PostgreSQL data or event fixtures."""
 
 from __future__ import annotations
 
@@ -36,18 +31,14 @@ SENSITIVE_MARKERS = (
 
 
 def _empty() -> pd.DataFrame:
+    """Return an empty frame with the stable model feature columns."""
     return pd.DataFrame(columns=WINDOW_COLUMNS)
 
 
 def build_window_features(
     bucket_rows: Sequence[dict],
 ) -> pd.DataFrame:
-    """Build one row per IP/minute from pre-fetched PG bucket rows.
-
-    Each row dict must have: ip, bucket_minute, requests, unique_paths_approx,
-    status_404, status_403, status_5xx, post_requests, sensitive_hits,
-    wp_login_hits, bytes_sum.
-    """
+    """Build one Isolation Forest feature row per IP and minute from fetched buckets."""
     if not bucket_rows:
         return _empty()
 
@@ -73,25 +64,19 @@ def build_window_features(
     return pd.DataFrame(grouped, columns=WINDOW_COLUMNS)
 
 
-def build_window_features_from_events(
+def _prepare_event_frame(
     events: Sequence[dict],
-    start_at: datetime | str | None = None,
-    end_at: datetime | str | None = None,
-    ips: Sequence[str] | None = None,
+    start_at: datetime | str | None,
+    end_at: datetime | str | None,
+    ips: Sequence[str] | None,
 ) -> pd.DataFrame:
-    """Build window features directly from raw event dicts (for testing/replay)."""
-    if not events:
-        return _empty()
-
+    """Normalize raw events and apply the requested time and IP filters."""
     frame = pd.DataFrame(events)
     if "timestamp" not in frame.columns or "src_ip" not in frame.columns:
-        return _empty()
+        return pd.DataFrame()
 
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame = frame.dropna(subset=["timestamp", "src_ip"])
-    if frame.empty:
-        return _empty()
-
     if start_at is not None:
         start_ts = pd.Timestamp(start_at if isinstance(start_at, str) else start_at.isoformat(), tz="UTC")
         frame = frame[frame["timestamp"] >= start_ts]
@@ -101,7 +86,7 @@ def build_window_features_from_events(
     if ips is not None:
         frame = frame[frame["src_ip"].isin(set(ips))]
     if frame.empty:
-        return _empty()
+        return frame
 
     frame["window_start"] = frame["timestamp"].dt.floor("1min")
     frame["path_text"] = frame.get("path", pd.Series(dtype=str)).fillna("").astype(str).str.lower()
@@ -117,25 +102,45 @@ def build_window_features_from_events(
         lambda path: int(any(marker in path for marker in SENSITIVE_MARKERS))
     )
     frame["login"] = frame["path_text"].str.contains("/wp-login.php", regex=False).astype(int)
+    return frame
 
-    grouped = []
-    for (ip, window_start), group in frame.groupby(["src_ip", "window_start"], sort=True):
-        timestamps = group["timestamp"].sort_values().astype("int64") / 1_000_000_000
-        intervals = timestamps.diff().dropna()
-        grouped.append({
-            "ip": ip,
-            "window_start": window_start,
-            "requests": int(len(group)),
-            "unique_paths": int(group["path_text"].nunique()),
-            "ratio_404": float(group["is_404"].mean()),
-            "ratio_403": float(group["is_403"].mean()),
-            "ratio_5xx": float(group["is_5xx"].mean()),
-            "post_ratio": float(group["is_post"].mean()),
-            "sensitive_hits": int(group["sensitive"].sum()),
-            "login_attempts": int(group["login"].sum()),
-            "avg_request_interval": float(intervals.mean()) if len(intervals) else 0.0,
-            "std_request_interval": float(intervals.std(ddof=0)) if len(intervals) else 0.0,
-            "unique_user_agents": int(group["user_agent_text"].nunique()),
-            "bytes_avg": float(group["bytes_num"].mean()) if group["bytes_num"].notna().any() else 0.0,
-        })
+
+def _aggregate_event_window(ip: str, window_start, group: pd.DataFrame) -> dict:
+    """Summarize request behavior for one IP and one UTC minute."""
+    timestamps = group["timestamp"].sort_values().astype("int64") / 1_000_000_000
+    intervals = timestamps.diff().dropna()
+    return {
+        "ip": ip,
+        "window_start": window_start,
+        "requests": int(len(group)),
+        "unique_paths": int(group["path_text"].nunique()),
+        "ratio_404": float(group["is_404"].mean()),
+        "ratio_403": float(group["is_403"].mean()),
+        "ratio_5xx": float(group["is_5xx"].mean()),
+        "post_ratio": float(group["is_post"].mean()),
+        "sensitive_hits": int(group["sensitive"].sum()),
+        "login_attempts": int(group["login"].sum()),
+        "avg_request_interval": float(intervals.mean()) if len(intervals) else 0.0,
+        "std_request_interval": float(intervals.std(ddof=0)) if len(intervals) else 0.0,
+        "unique_user_agents": int(group["user_agent_text"].nunique()),
+        "bytes_avg": float(group["bytes_num"].mean()) if group["bytes_num"].notna().any() else 0.0,
+    }
+
+
+def build_window_features_from_events(
+    events: Sequence[dict],
+    start_at: datetime | str | None = None,
+    end_at: datetime | str | None = None,
+    ips: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Build window features directly from raw event dicts (for testing/replay)."""
+    if not events:
+        return _empty()
+    frame = _prepare_event_frame(events, start_at, end_at, ips)
+    if frame.empty:
+        return _empty()
+    grouped = [
+        _aggregate_event_window(ip, window_start, group)
+        for (ip, window_start), group in frame.groupby(["src_ip", "window_start"], sort=True)
+    ]
     return pd.DataFrame(grouped, columns=WINDOW_COLUMNS)

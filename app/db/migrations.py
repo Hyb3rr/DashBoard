@@ -26,6 +26,7 @@ class Migration:
 
 
 def discover(directory: Path = MIGRATION_DIR) -> list[Migration]:
+    """Load ordered SQL migrations and validate contiguous version numbering."""
     migrations: list[Migration] = []
     for path in sorted(directory.glob("*.sql")):
         match = _MIGRATION_RE.match(path.name)
@@ -52,11 +53,13 @@ def discover(directory: Path = MIGRATION_DIR) -> list[Migration]:
 
 
 def _table_exists(conn: Any, table_name: str) -> bool:
+    """Check whether a public-schema table exists in the connected database."""
     row = conn.execute("SELECT to_regclass(%s) AS relation", (f"public.{table_name}",)).fetchone()
     return bool(row and row["relation"])
 
 
 def _record(conn: Any, migration: Migration) -> None:
+    """Record a migration as applied in the schema migration ledger."""
     conn.execute(
         """INSERT INTO schema_migrations
            (version, filename, checksum_sha256, status)
@@ -66,6 +69,7 @@ def _record(conn: Any, migration: Migration) -> None:
 
 
 def _record_if_missing(conn: Any, migration: Migration, applied: dict[int, Any]) -> None:
+    """Record a migration only when it is not already present in the ledger."""
     if migration.version not in applied:
         _record(conn, migration)
         applied[migration.version] = {
@@ -76,6 +80,7 @@ def _record_if_missing(conn: Any, migration: Migration, applied: dict[int, Any])
 
 
 def _validate_applied(conn: Any, migration: Migration, row: Any) -> None:
+    """Reject an applied migration whose filename, checksum, or status drifted."""
     if row["filename"] != migration.filename or row["checksum_sha256"] != migration.checksum_sha256:
         raise RuntimeError(
             f"Migration checksum mismatch for {migration.filename}: "
@@ -86,12 +91,7 @@ def _validate_applied(conn: Any, migration: Migration, row: Any) -> None:
 
 
 def apply_after_base_schema(conn: Any, migrations: list[Migration] | None = None) -> None:
-    """Track 000 and adopt/apply migrations after 001_initial.sql.
-
-    ``postgres.ensure_schema`` has already applied 001 in the explicit
-    bootstrap path. Existing databases are adopted only when every table from
-    002 onward exists. A partially migrated database fails closed.
-    """
+    """Track and apply post-baseline migrations, adopting only complete legacy schemas."""
     migrations = migrations or discover()
     ledger = migrations[0]
     base = migrations[1]

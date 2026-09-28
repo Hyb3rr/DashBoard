@@ -1,6 +1,17 @@
+import hashlib
+import json
+
 from app.ai.evaluation import build_review_capture, evaluate_case, evaluate_corpus
 from app.ai.reasoning import ReasoningResult
-from scripts.ai.evaluate_cases import _load_corpus, benchmark_metadata
+from scripts.ai.evaluate_cases import (
+    DEFAULT_CONFIGURED_CONTEXT_SIZE,
+    OFFLINE_EVALUATION_TIMEOUT_SECONDS,
+    _build_report,
+    _canonical,
+    _capture_metadata,
+    _load_corpus,
+    benchmark_metadata,
+)
 from app.ai.providers.llama_cpp import _valid_analysis
 
 
@@ -70,6 +81,119 @@ def test_benchmark_metadata_hashes_dynamic_schema_per_case():
     assert len(metadata["schema_sha256"]) == 64
 
 
+def test_evaluation_metadata_matches_provider_token_budget_without_inference(monkeypatch):
+    import argparse
+    import scripts.ai.evaluate_cases as evaluate_cases
+
+    monkeypatch.delenv("LOCAL_REASONING_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("FOUNDATION_SEC_CONTEXT_SIZE", raising=False)
+    monkeypatch.setattr(evaluate_cases, "_load_corpus", lambda _path: ([], {}))
+    monkeypatch.setattr(evaluate_cases, "_runtime_version", lambda _binary: "test")
+    observed = {}
+
+    def fake_evaluate(_cases, provider, _capture):
+        observed["provider_max_tokens"] = provider.max_tokens
+        return {}
+
+    monkeypatch.setattr(evaluate_cases, "evaluate_corpus", fake_evaluate)
+    report = _build_report(argparse.Namespace(
+        cases="unused.json",
+        endpoint="http://127.0.0.1:8081/v1/chat/completions",
+        model="test-model",
+        timeout=OFFLINE_EVALUATION_TIMEOUT_SECONDS,
+        capture_analysis=False,
+        model_path=None,
+        run_id="test",
+    ))
+
+    assert observed["provider_max_tokens"] == 768
+    assert report["benchmark_metadata"]["max_tokens"] == observed["provider_max_tokens"]
+    assert report["benchmark_metadata"]["timeout_seconds"] == 30
+    assert report["benchmark_metadata"]["context_size"] == DEFAULT_CONFIGURED_CONTEXT_SIZE
+    assert report["benchmark_metadata"]["runtime_profile"] == "offline_evaluation"
+    assert report["benchmark_metadata"]["model_name"] == "test-model"
+
+
+def test_manual_capture_metadata_uses_resolved_cli_configuration_without_inference(
+    monkeypatch, tmp_path
+):
+    import json
+    import sys
+    import scripts.ai.capture_case_review as capture
+    import scripts.ai.evaluate_cases as evaluate_cases
+
+    cases_path = tmp_path / "cases.json"
+    cases_path.write_text(json.dumps({"cases": [{"case_packet": {"case_id": "case-1"}}]}))
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"fixture")
+    output_path = tmp_path / "captures"
+    monkeypatch.setenv("LOCAL_REASONING_MAX_TOKENS", "256")
+    monkeypatch.setenv("FOUNDATION_SEC_CONTEXT_SIZE", "4096")
+    monkeypatch.setattr(evaluate_cases, "_runtime_version", lambda _binary: "test")
+    monkeypatch.setattr(
+        capture,
+        "_capture_one",
+        lambda _case, _args, _metadata: {
+            "status": "completed",
+            "validation": {"grounded": True},
+        },
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "capture_case_review",
+        str(cases_path),
+        "--output-dir", str(output_path),
+        "--run-id", "test-run",
+        "--model-path", str(model_path),
+        "--timeout", "90",
+        "--max-tokens", "512",
+        "--context-size", "6144",
+        "--gpu-layers", "2",
+        "--threads", "4",
+        "--ready-attempts", "120",
+        "--ready-interval", "0.25",
+    ])
+
+    assert capture.main() == 0
+    metadata = json.loads((output_path / "manifest.json").read_text())["metadata"]
+    assert metadata["timeout_seconds"] == 90
+    assert metadata["max_tokens"] == 512
+    assert metadata["context_size"] == 6144
+    assert metadata["gpu_layers"] == 2
+    assert metadata["threads"] == 4
+    assert metadata["ready_attempts"] == 120
+    assert metadata["ready_interval_seconds"] == 0.25
+    assert metadata["runtime_profile"] == "manual_standalone_capture"
+    assert metadata["model_name"] == "Foundation-Sec-8B-Reasoning"
+    assert metadata["host"] == "127.0.0.1"
+    assert metadata["server_binary"] == "llama-server"
+
+
+def test_offline_and_manual_capture_profiles_remain_explicit_and_distinct():
+    from scripts.ai.capture_case_review import (
+        CAPTURE_CONTEXT_SIZE,
+        CAPTURE_MAX_TOKENS,
+        CAPTURE_READY_ATTEMPTS,
+        CAPTURE_TIMEOUT_SECONDS,
+    )
+
+    assert OFFLINE_EVALUATION_TIMEOUT_SECONDS == 30
+    assert (CAPTURE_TIMEOUT_SECONDS, CAPTURE_MAX_TOKENS, CAPTURE_CONTEXT_SIZE, CAPTURE_READY_ATTEMPTS) == (
+        120, 256, 4096, 60
+    )
+
+
+def test_capture_metadata_hashes_report_before_adding_capture_metadata():
+    report = {"total_cases": 1, "grounded_cases": 1}
+
+    metadata = _capture_metadata(report, "review-run")
+
+    assert metadata["run_id"] == "review-run"
+    assert metadata["raw_provider_response_saved"] is False
+    assert metadata["report_sha256"] == hashlib.sha256(
+        _canonical(report).encode("utf-8")
+    ).hexdigest()
+
+
 def test_capture_mode_keeps_only_validated_analysis():
     captured = evaluate_case(PACKET, result('{"summary":"scan","primary_evidence":[{"evidence_id":"ev_1","reason":"rule"}],"supporting_evidence":[],"alternative_explanation":"none","uncertainty":"low","recommended_investigation":[]}'), 12, include_analysis=True)
     assert captured["status"] == "completed"
@@ -90,6 +214,30 @@ def test_evaluation_rejects_obvious_truncated_text():
     report = evaluate_case({**PACKET, "evidence": [{"evidence_id": "ev_1"}]}, provider_result, 12)
     assert report["incomplete_text"] is True
     assert report["grounded"] is False
+
+
+def test_evaluation_accepts_complete_text_ending_in_known():
+    provider_result = result('{"summary":"ASN is already known","primary_evidence":[{"evidence_id":"ev_1","reason":"ASN signal"}],"supporting_evidence":[],"alternative_explanation":"Could be routine network activity.","uncertainty":"moderate","recommended_investigation":[]}')
+
+    report = evaluate_case(PACKET, provider_result, 12)
+
+    assert report["incomplete_text"] is False
+    assert report["grounded"] is True
+
+
+def test_evaluation_still_rejects_obvious_incomplete_fragments():
+    for fragment in ("Evidence indicates activity from", "Repeated probes,"):
+        provider_result = result(json.dumps({
+            "summary": fragment,
+            "primary_evidence": [{"evidence_id": "ev_1"}],
+            "supporting_evidence": [],
+            "alternative_explanation": "Could be routine network activity.",
+            "uncertainty": "moderate",
+            "recommended_investigation": [],
+        }))
+        report = evaluate_case(PACKET, provider_result, 12)
+        assert report["incomplete_text"] is True
+        assert report["grounded"] is False
 
 
 def test_evaluation_rejects_trailing_comma_fragment():

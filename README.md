@@ -59,6 +59,15 @@ does not print or validate credential values.
 
 ```
 app/                         package chính (FastAPI, core, services, collectors...)
+app/db/repositories.py      compatibility facade cho profile, geo, intelligence, disposition
+app/db/detection_repository.py detection feature aggregation, rules và atomic PG detection transaction
+app/db/state_repository.py  dashboard IP inventory, summary và change-feed read models
+app/db/region_repository.py country profile và qualified-traffic context
+app/db/market_repository.py market identity, catalog và publication facade
+app/db/market_evidence_repository.py OSM/H3/local evidence, calibration và area/city rollups
+app/db/market_demand_repository.py RFQ, product priors, industrial và country-demand snapshots
+app/db/alert_repository.py  alert persistence, cursor pagination và outbox
+app/db/json_codec.py        adapter JSONB và serialization ổn định dùng chung
 rules/behavior/              1 file JSON / rule, validate bởi rules/schema/
 scripts/geo/ market/ ops/    scripts vận hành & migration (ngoài package app)
 app/core/                    clock & failure-injection hooks (dùng ở runtime)
@@ -81,12 +90,57 @@ app/web/templates|static     frontend (đường dẫn cấu hình qua TEMPLATES
 - **Không mất, không trùng log:** log chỉ được xác nhận sau khi lưu thành công; khi kết nối lại hoặc khởi động lại, các log đã xử lý sẽ được bỏ qua để tránh ghi và đếm trùng.
 - **Backpressure thay vì drop:** mọi queue có giới hạn; storage chậm → áp dụng backpressure thay vì âm thầm mất log.
 - **Tách lưu trữ theo workload:** ClickHouse = event bất biến/lịch sử/analytics; PostgreSQL = state hiện tại (IP profile, evidence, classification, job, intel).
+- **Change-feed retention:** `ip_change_log` được giới hạn bởi maintenance task riêng trong `data_scheduler`; AI scoring chỉ ghi semantic changes, không dọn durable feed.
+- **Data refresh scheduler:** chạy ngoài vòng đời FastAPI; cấu hình macOS nằm ở mục riêng bên dưới. `scripts/dev_run.sh` không khởi chạy scheduler.
 - **Giải thích market score:** Region Profile giải thích cả cấp quốc gia và khu vực bằng các thành phần đã lưu (product demand, OSM sector features, industrial land, access observations, economic potential và machinery imports); đây là market/commercial context, tách biệt với security risk.
 - **Geo conflict:** Operational country, city, coordinates, RIR registration và ip2region context được giữ thành các lớp riêng. Khi nguồn mâu thuẫn, hệ thống hiển thị `resolved_with_conflict` và giữ candidate; không tự gán một city hoặc thay đổi security classification chỉ vì geo disagreement.
 - **IP Detail hierarchy:** IP traffic appears before the compact `Why this verdict?` score explanation; network location separates the operational result from source candidates and conflict context so live investigation remains the primary view.
 - **IP Detail investigation tabs:** `Overview`, `Activity`, `Detections`, `Evidence`, and `Intel` organize the existing case data client-side while keeping the summary visible and avoiding extra API requests or full-page rerenders.
 - **IP Detail overview:** Overview summarizes the current assessment, activity span, request/error volume, and active score contributions. Detections stays expanded for direct reading; Evidence uses a two-column layout on desktop and collapses responsively on smaller screens.
 - **Fail-isolated:** 1 job/nguồn lỗi không kéo sập cái khác (intel source, raw archive, backup component... đều retry/degrade độc lập).
+
+---
+
+## Data refresh scheduler
+
+On macOS, the scheduler can run as a per-user LaunchAgent, independently of
+the FastAPI process. `RunAtLoad` runs one pass at login; `StartInterval` repeats
+it using `DATA_SCHEDULER_INTERVAL_SECONDS`. The scheduler's persisted due-state
+prevents every launch from forcing every provider refresh, and its process lock
+prevents overlapping passes. PostgreSQL and ClickHouse must still be running
+for jobs that depend on them. A LaunchAgent runs after user login, not before
+login at boot.
+
+With `.env` configured, write the plist and load it into the current user
+session:
+
+```sh
+python -m scripts.ops.data_scheduler_launchd --install
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sentinel.data-scheduler.plist"
+launchctl print "gui/$(id -u)/com.sentinel.data-scheduler"
+```
+
+To unload and remove it:
+
+```sh
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sentinel.data-scheduler.plist"
+python -m scripts.ops.data_scheduler_launchd --uninstall
+```
+
+Changing `DATA_SCHEDULER_INTERVAL_SECONDS` requires regenerating the plist and
+reloading the agent. `DATA_SCHEDULER_ENABLED=false` makes each invocation exit
+without starting a refresh pass. Logs are written under `data/logs/`; the
+one-shot runner can also be invoked directly with
+`python -m scripts.ops.data_scheduler`.
+
+The shared intelligence updater is disabled by default
+(`INTEL_UPDATER_ENABLED=false`). When explicitly enabled, it refreshes SAPICS
+through the existing intelligence schedule; otherwise
+`SAPICS_UPDATER_ENABLED` controls SAPICS's independent fallback schedule.
+`IP2REGION_UPDATER_ENABLED` controls ip2region refreshes. Both local database
+refresh intervals default to 24 hours. Their startup-time network downloads
+were removed from `scripts/dev_run.sh`; failed downloads leave the previous
+validated files in place.
 
 ---
 
@@ -99,6 +153,11 @@ Nguồn sinh log (IP, thời gian, method, path, status, User-Agent). Server ch�
 ### 2. Log Collector
 
 Nhận log realtime qua **WebSocket**, hỗ trợ reconnect/replay để tránh mất log, xử lý trùng, hoặc sai lệch state sau khi mất kết nối.
+
+Collector giữ vai trò điều phối lifecycle và status. Session/lease/reconnect nằm
+trong `app/collectors/session.py`; batch intake và source-offset buffering ở
+`batching.py`; queue, drain và ordered commit/retry ở `storage.py`; enrichment
+và privacy refresh có worker/state riêng trong `background.py`.
 
 **Raw log archive (song song với fast path):**
 
@@ -195,8 +254,12 @@ Detection → Structured Evidence (Unified Evidence) → Local AI → Explanatio
 ```
 
 AI hỗ trợ **giải thích/tổng hợp**, không nằm trong ingest hot path, không tự đổi classification/risk, không điều khiển Web Server.
-- Provider gọi `llama-server` (Foundation-Sec GGUF) cục bộ qua HTTP; JSON-Schema constrained decoding, timeout hữu hạn, output budget mặc định 256 token, **không retry**. Evidence-view riêng cho inference có budget giới hạn (model không thể cite evidence bị loại khỏi budget).
-- Job qua PostgreSQL: `pending → running → completed/failed`, dedupe theo `(case_id, evidence_fingerprint)`. Worker (`run_explain_worker`) claim job bằng `FOR UPDATE SKIP LOCKED`, concurrency = 1, không retry trong cùng job.
+- Foundation-Sec là bounded optional explainer, không phải dependency của detection, classification, risk scoring, alerts hay collector. Các quyết định security vẫn dựa trên pipeline deterministic và evidence hiện có khi AI unavailable hoặc abstain.
+- `LOCAL_REASONING_MAX_INPUT_TOKENS` là eligibility budget theo estimated prompt tokens: `0` (mặc định) fail-closed và abstain trước khi gọi model; giá trị dương `N` chỉ cho phép packet có estimate `<= N`. Ngưỡng production dương hiện **chưa được calibration**.
+- Trạng thái được giữ riêng: `too_large` nghĩa là vượt giới hạn context an toàn của model; `abstained` với `local_reasoning_budget_exceeded` nghĩa là không đủ eligibility theo ngân sách reasoning CPU; `timeout` nghĩa là model đã được gọi nhưng không trả lời trong thời hạn. Abstention không phải provider failure và không làm thay đổi detection/risk.
+- Provider gọi `llama-server` (Foundation-Sec GGUF) cục bộ qua HTTP; JSON-Schema constrained decoding, timeout hữu hạn, output budget mặc định 768 token, **không retry**. Evidence-view riêng cho inference có budget giới hạn (model không thể cite evidence bị loại khỏi budget).
+- Các công cụ offline có profile riêng để giới hạn chi phí chạy: `evaluate_cases.py` dùng server đã chạy sẵn, mặc định timeout 30 giây mỗi case và output budget thực của provider (768 token nếu không cấu hình); metadata context ghi cấu hình server (`FOUNDATION_SEC_CONTEXT_SIZE`, mặc định 8192), không phải provider safety fallback. `capture_case_review.py` khởi chạy server độc lập cho từng case và có fallback profile riêng: timeout 120 giây, 256 token, context 4096, tối đa 60 lần readiness check. Đây không phải cấu hình worker production; artifact ghi lại các giá trị đã resolve từ CLI/environment.
+- Job qua PostgreSQL: `pending → running → completed/failed/abstained`, dedupe theo `(case_id, evidence_fingerprint)`. Worker (`run_explain_worker`) claim job bằng `FOR UPDATE SKIP LOCKED`, concurrency = 1, không retry trong cùng job.
 - **Semantic auto-trigger:** đã có contract (PostgreSQL cursor, dedupe, backlog cap 100 IP) nhưng consumer **disabled by default** — chưa tự tạo AI job.
 
 ---

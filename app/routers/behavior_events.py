@@ -23,6 +23,7 @@ _last_rate_cleanup = 0.0
 
 
 def _rate_limited(key: str, now: float) -> bool:
+    """Apply a bounded per-client sliding-window request limit."""
     global _last_rate_cleanup
     if now - _last_rate_cleanup >= _RATE_CLEANUP_INTERVAL_SECONDS:
         for client_key, timestamps in list(_rate_windows.items()):
@@ -42,6 +43,7 @@ def _rate_limited(key: str, now: float) -> bool:
 
 @router.post("/api/behavior/events")
 async def receive_behavior_events(request: Request) -> JSONResponse:
+    """Validate and store a bounded batch of behavioral telemetry events."""
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         return JSONResponse({"accepted": 0, "rejected": 0, "error": "content_type_required"}, status_code=415)
     content_length = request.headers.get("content-length")

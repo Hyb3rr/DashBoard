@@ -22,6 +22,7 @@ def calibration_export():
 
 @router.get("/api/ips")
 def list_ips(limit: int = 100):
+    """Return a bounded first page of IP records for legacy dashboard clients."""
     bounded = min(max(limit, 1), 5000)
     result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
     return _pg_rows(result["rows"])
@@ -38,6 +39,7 @@ def ip_page(
     classification: str | None = None,
     disposition: str | None = None,
 ):
+    """Return one filtered IP inventory page with pagination metadata."""
     page = max(1, int(page))
     page_size = min(50, max(1, int(page_size)))
     intel_tag = privacy if privacy and privacy.startswith("intel:") else None
@@ -52,6 +54,7 @@ def ip_page(
 
 @router.get("/api/ips/summary")
 def ip_summary(start: str | None = None, end: str | None = None):
+    """Return an IP summary for a validated UTC time window."""
     now = datetime.now(timezone.utc)
     end_stamp = _parse_summary_time(end) if end else now
     start_stamp = _parse_summary_time(start) if start else end_stamp - timedelta(days=1)
@@ -65,6 +68,7 @@ def ip_summary(start: str | None = None, end: str | None = None):
 
 
 def _parse_summary_time(value: str | None) -> datetime | None:
+    """Parse a dashboard time parameter into an aware UTC timestamp."""
     if not value:
         return None
     try:
@@ -106,68 +110,48 @@ def _apply_geo_fallback(profile: dict) -> dict:
     return profile
 
 
-def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
-    """Build the dashboard contract from the PostgreSQL state read model."""
-    observation = dict(row.get("observation_payload") or {})
-    observation.setdefault("recent_behavior_score", observation.get("behavior_score", 0))
-    observation.setdefault("behavior_evidence", observation.get("recent_behavior_evidence", []))
-    profile = {key: value for key, value in row.items() if key not in {"observation_payload", "label", "classification_score", "classification_confidence", "disposition"}}
-    _apply_geo_fallback(profile)
-    profile["ip"] = str(row.get("ip") or observation.get("ip") or profile.get("ip"))
-    for key in ("identity_evidence", "reputation", "provider_errors", "provider_status", "field_sources", "evidence", "sources"):
-        if profile.get(key) is None:
-            profile[key] = [] if key in {"identity_evidence", "reputation", "provider_errors", "evidence", "sources"} else {}
-    profile["abuse_reputation"] = abuse_reputation_state(
-        profile.get("threat_indicators"), profile.get("provider_status")
-    )
-    profile["intel_tags"] = intel_tags_for_abuse(profile["abuse_reputation"])
-    
-    # Region context is intentionally excluded from the realtime IP hot path.
-    # AI is explanatory/read-only here. Rules and persisted classification state
-    # remain the source of classification decisions.
-    classification = classify_ip(profile, observation, {}, None)
-    if row.get("label") is not None:
-        classification["label"] = row["label"]
-    if row.get("classification_score") is not None:
-        classification["score"] = int(row["classification_score"])
-    if row.get("classification_confidence") is not None:
-        classification["confidence"] = int(row["classification_confidence"])
-    
-    item = {
-        **profile,
-        "ip": profile["ip"],
-        "observation": observation,
-        "classification": classification,
-        "threat_signal_score": int(classification.get("score", 0)),
-        "threat_signal_label": classification.get("label", "unknown"),
-        "disposition": {
-            "state": row.get("disposition") or "new",
-            "suggested_state": row.get("suggested_state"),
-            "assigned_to": row.get("assigned_to"),
-            "note": row.get("note"),
-            "updated_at": row.get("disposition_updated_at").isoformat() if hasattr(row.get("disposition_updated_at"), "isoformat") else row.get("disposition_updated_at"),
-            "history": row.get("disposition_history") or [],
-        },
-        "profile_risk_score": int(profile.get("risk_score") or 0),
-
-        "effective_risk_score": int(classification.get("score", 0)),
-        "effective_risk_level": classification.get("label", "unknown"),
-        "requests": int(observation.get("requests") or 0),
-        "status_4xx": int(observation.get("status_4xx") or 0),
-        "status_5xx": int(observation.get("status_5xx") or 0),
-        "unique_paths": int(observation.get("unique_paths") or 0),
-        "first_seen": observation.get("first_seen"),
-        "last_seen": observation.get("last_seen"),
-        "ai_profile": ai_profile or {},
-        "ai_status": "ready" if ai_profile else "pending",
+def _disposition_payload(row: dict, *, include_history: bool) -> dict:
+    """Project persisted analyst disposition fields into the response DTO."""
+    payload = {
+        "state": row.get("disposition") or "new",
+        "suggested_state": row.get("suggested_state"),
+        "assigned_to": row.get("assigned_to"),
+        "note": row.get("note"),
+        "updated_at": row.get("disposition_updated_at").isoformat() if hasattr(row.get("disposition_updated_at"), "isoformat") else row.get("disposition_updated_at"),
     }
+    if include_history:
+        payload["history"] = row.get("disposition_history") or []
+    return payload
+
+
+def _compact_network_location(location: dict | None) -> dict | None:
+    """Project canonical location metadata into the compact inventory DTO."""
+    if not location:
+        return None
+    compact = {
+        key: location.get(key)
+        for key in ("country", "country_code", "city", "scope", "location_status")
+        if location.get(key) is not None
+    }
+    canonical = location.get("canonical_resolution") or {}
+    if canonical:
+        compact["canonical_resolution"] = {
+            key: canonical.get(key)
+            for key in ("status", "resolved", "candidates")
+            if canonical.get(key) is not None
+        }
+    return compact
+
+
+def _pipeline_payload(observation: dict, row: dict) -> dict:
+    """Build ingestion-to-state timing metadata for an IP response."""
     received_at = observation.get("pipeline_received_at")
     state_ready_at = observation.get("pipeline_state_ready_at")
     profile_ready_at = row.get("updated_at")
-    ready_candidates = [value for value in (state_ready_at, profile_ready_at) if value]
-    ready_at = max(ready_candidates, key=lambda value: _as_utc(value)) if ready_candidates else None
+    candidates = [value for value in (state_ready_at, profile_ready_at) if value]
+    ready_at = max(candidates, key=_as_utc) if candidates else None
     serialized_at = datetime.now(timezone.utc)
-    item["pipeline"] = {
+    return {
         "received_at": _iso_value(received_at),
         "state_ready_at": _iso_value(state_ready_at),
         "profile_ready_at": _iso_value(profile_ready_at),
@@ -175,10 +159,84 @@ def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
         "api_serialized_at": serialized_at.isoformat(),
         "backend_ready_ms": _elapsed_ms(received_at, ready_at),
     }
+
+
+def _prepare_profile(row: dict, observation: dict) -> dict:
+    """Build a normalized profile with stable defaults for optional evidence."""
+    excluded = {"observation_payload", "label", "classification_score", "classification_confidence", "disposition"}
+    profile = {key: value for key, value in row.items() if key not in excluded}
+    _apply_geo_fallback(profile)
+    profile["ip"] = str(row.get("ip") or observation.get("ip") or profile.get("ip"))
+    list_fields = {"identity_evidence", "reputation", "provider_errors", "evidence", "sources"}
+    mapping_fields = {"provider_status", "field_sources"}
+    for key in list_fields | mapping_fields:
+        if profile.get(key) is None:
+            profile[key] = [] if key in list_fields else {}
+    profile["abuse_reputation"] = abuse_reputation_state(
+        profile.get("threat_indicators"), profile.get("provider_status")
+    )
+    profile["intel_tags"] = intel_tags_for_abuse(profile["abuse_reputation"])
+    return profile
+
+
+def _classification_payload(row: dict, profile: dict, observation: dict) -> dict:
+    """Apply persisted classification fields over the deterministic assessment."""
+    classification = classify_ip(profile, observation, {}, None)
+    if row.get("label") is not None:
+        classification["label"] = row["label"]
+    if row.get("classification_score") is not None:
+        classification["score"] = int(row["classification_score"])
+    if row.get("classification_confidence") is not None:
+        classification["confidence"] = int(row["classification_confidence"])
+    return classification
+
+
+def _dashboard_summary_fields(observation: dict, classification: dict, profile: dict) -> dict:
+    """Project compact risk and request counters used by dashboard views."""
+    score = int(classification.get("score", 0))
+    label = classification.get("label", "unknown")
+    return {
+        "threat_signal_score": score,
+        "threat_signal_label": label,
+        "profile_risk_score": int(profile.get("risk_score") or 0),
+        "effective_risk_score": score,
+        "effective_risk_level": label,
+        "requests": int(observation.get("requests") or 0),
+        "status_4xx": int(observation.get("status_4xx") or 0),
+        "status_5xx": int(observation.get("status_5xx") or 0),
+        "unique_paths": int(observation.get("unique_paths") or 0),
+        "first_seen": observation.get("first_seen"),
+        "last_seen": observation.get("last_seen"),
+    }
+
+
+def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
+    """Build the dashboard contract from the PostgreSQL state read model."""
+    observation = dict(row.get("observation_payload") or {})
+    observation.setdefault("recent_behavior_score", observation.get("behavior_score", 0))
+    observation.setdefault("behavior_evidence", observation.get("recent_behavior_evidence", []))
+    profile = _prepare_profile(row, observation)
+
+    # Region context is intentionally excluded from the realtime IP hot path.
+    # AI is explanatory/read-only here. Rules and persisted classification state
+    # remain the source of classification decisions.
+    classification = _classification_payload(row, profile, observation)
+    item = {
+        **profile,
+        "ip": profile["ip"],
+        "observation": observation,
+        "classification": classification,
+        "disposition": _disposition_payload(row, include_history=True),
+        "ai_profile": ai_profile or {},
+        "ai_status": "ready" if ai_profile else "pending",
+        **_dashboard_summary_fields(observation, classification, profile),
+    }
+    item["pipeline"] = _pipeline_payload(observation, row)
     return item
 
 
 def _as_utc(value) -> datetime:
+    """Normalize supported timestamp values to an aware UTC datetime."""
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -189,6 +247,7 @@ def _as_utc(value) -> datetime:
 
 
 def _iso_value(value) -> str | None:
+    """Serialize a supported timestamp or return null when unavailable."""
     if not value:
         return None
     try:
@@ -198,6 +257,7 @@ def _iso_value(value) -> str | None:
 
 
 def _elapsed_ms(start, end) -> float | None:
+    """Calculate a non-negative elapsed duration in milliseconds."""
     if not start or not end:
         return None
     try:
@@ -207,10 +267,12 @@ def _elapsed_ms(start, end) -> float | None:
 
 
 def _pg_items(ips: list[str] | set[str], compact: bool = False) -> list[dict]:
+    """Load and project a collection of IPs using the selected response shape."""
     return _pg_items_with_mode(ips, compact=compact)
 
 
 def _pg_items_with_mode(ips: list[str] | set[str], compact: bool = False) -> list[dict]:
+    """Join persisted IP rows with AI scores before response projection."""
     repo = StateRepository()
     rows = repo.get_many(ips)
     scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
@@ -218,6 +280,7 @@ def _pg_items_with_mode(ips: list[str] | set[str], compact: bool = False) -> lis
 
 
 def _pg_rows(rows: list[dict]) -> list[dict]:
+    """Project full investigation response objects for database rows."""
     ips = [str(row["ip"]) for row in rows]
     scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
     return [_pg_item(row, scores.get(str(row["ip"]))) for row in rows]
@@ -244,25 +307,11 @@ def _pg_compact_item(row: dict, ai_profile: dict | None = None) -> dict:
     reputation = abuse_reputation_state(row.get("threat_indicators"), provider_status)
     source_location = profile.get("network_location")
     location = source_location if isinstance(source_location, dict) else None
-    compact_location = None
-    if location:
-        canonical = location.get("canonical_resolution") or {}
-        compact_location = {
-            key: location.get(key)
-            for key in ("country", "country_code", "city", "scope", "location_status")
-            if location.get(key) is not None
-        }
-        if canonical:
-            compact_location["canonical_resolution"] = {
-                key: canonical.get(key)
-                for key in ("status", "resolved", "candidates")
-                if canonical.get(key) is not None
-            }
     item = {
         "ip": str(row.get("ip") or ""),
         "country": profile.get("country"), "country_code": profile.get("country_code"),
         "city": profile.get("city"), "region": profile.get("region"),
-        "network_location": compact_location,
+        "network_location": _compact_network_location(location),
         "network_type": profile.get("network_type"),
         "organization": profile.get("organization"), "asn": profile.get("asn"),
         "is_tor": row.get("is_tor"), "is_vpn": row.get("is_vpn"),
@@ -271,12 +320,7 @@ def _pg_compact_item(row: dict, ai_profile: dict | None = None) -> dict:
         "observation": observation,
         "classification": {"label": label, "score": score, "confidence": confidence},
         "threat_signal_score": score, "threat_signal_label": label,
-        "disposition": {
-            "state": row.get("disposition") or "new",
-            "suggested_state": row.get("suggested_state"),
-            "assigned_to": row.get("assigned_to"), "note": row.get("note"),
-            "updated_at": row.get("disposition_updated_at").isoformat() if hasattr(row.get("disposition_updated_at"), "isoformat") else row.get("disposition_updated_at"),
-        },
+        "disposition": _disposition_payload(row, include_history=False),
         "requests": int(observation.get("requests") or 0),
         "status_4xx": int(observation.get("status_4xx") or 0),
         "status_5xx": int(observation.get("status_5xx") or 0),
@@ -288,6 +332,7 @@ def _pg_compact_item(row: dict, ai_profile: dict | None = None) -> dict:
 
 
 def _pg_list_rows(rows: list[dict]) -> list[dict]:
+    """Project compact inventory DTOs with their associated AI summaries."""
     ips = [str(row["ip"]) for row in rows]
     scores = {str(item["ip"]): item for item in AiRepository().scores(ips)}
     return [_pg_compact_item(row, scores.get(str(row["ip"]))) for row in rows]
@@ -295,6 +340,7 @@ def _pg_list_rows(rows: list[dict]) -> list[dict]:
 
 @router.get("/api/ips/snapshot")
 def ip_snapshot(limit: int = 500):
+    """Return the current bounded IP inventory and change cursor."""
     bounded = min(max(limit, 1), 500)
     result = StateRepository().page(1, bounded, "threat_signal_score", "desc")
     return {"items": _pg_rows(result["rows"]), "cursor": result["cursor"], "snapshot_at": datetime.now(timezone.utc).isoformat()}
@@ -302,6 +348,7 @@ def ip_snapshot(limit: int = 500):
 
 @router.get("/api/ips/updates")
 def ip_updates(after: int = 0, limit: int = 500):
+    """Return compact changed-IP rows after a durable sequence cursor."""
     limit = min(max(limit, 1), 500)
     result = StateRepository().changes(after, limit)
     if result.get("reset_required"):

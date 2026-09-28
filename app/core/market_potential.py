@@ -31,6 +31,7 @@ SALES_WEIGHTS = {
 
 
 def _bounded(value: Any) -> float | None:
+    """Parse and clamp a normalized signal to the inclusive zero-to-one range."""
     if value is None:
         return None
     try:
@@ -53,6 +54,7 @@ def percentile_rank(value: float | None, peers: Iterable[float | None]) -> float
 
 
 def weighted_normalized_score(signals: Mapping[str, Any], weights: Mapping[str, float]) -> float | None:
+    """Blend available normalized signals using only their corresponding weights."""
     available = [(key, _bounded(signals.get(key)), weight) for key, weight in weights.items()]
     available = [(key, value, weight) for key, value, weight in available if value is not None]
     if not available:
@@ -62,11 +64,7 @@ def weighted_normalized_score(signals: Mapping[str, Any], weights: Mapping[str, 
 
 
 def country_product_prior(signals: Mapping[str, Any], category: str) -> float | None:
-    """Score country demand from normalized country signals.
-
-    Woodworking uses sector consumption; metalworking expects the same field to
-    be supplied as a manufacturing-value-added proxy by the adapter.
-    """
+    """Score product demand from normalized country signals and category context."""
     if category not in {"woodworking", "metalworking"}:
         raise ValueError(f"unsupported product category: {category}")
     return weighted_normalized_score(signals, COUNTRY_WEIGHTS)
@@ -85,6 +83,7 @@ def minmax_normalize(values: Mapping[str, Any]) -> dict[str, float | None]:
 
 
 def _number(value: Any) -> float | None:
+    """Parse a finite numeric value while preserving missing or invalid inputs."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -103,6 +102,7 @@ def country_prior_snapshot(signals: Mapping[str, Any], category: str,
 
 
 def city_fit_score(raw: Mapping[str, Any], peer_values: Iterable[float | None]) -> float | None:
+    """Score city fit from business density, sector share, and peer ranking."""
     density = _bounded(raw.get("business_density_per_km2"))
     share = _bounded(raw.get("sector_relevant_business_share"))
     cluster = _bounded(raw.get("industrial_cluster_flag"))
@@ -113,6 +113,7 @@ def city_fit_score(raw: Mapping[str, Any], peer_values: Iterable[float | None]) 
 
 
 def sales_validation_score(signals: Mapping[str, Any], peer_values: Iterable[float | None]) -> float | None:
+    """Rank a weighted sales-validation signal against its peer cohort."""
     raw = weighted_normalized_score(signals, SALES_WEIGHTS)
     return None if raw is None else round((percentile_rank(raw / 100, peer_values) or 0.0) * 100, 4)
 
@@ -120,6 +121,7 @@ def sales_validation_score(signals: Mapping[str, Any], peer_values: Iterable[flo
 def blend_scores(country_prior: float | None, city_fit: float | None,
                  sales_score: float | None, rfq_count_12m: int,
                  k: int = K_DEFAULT) -> dict[str, Any]:
+    """Blend external market evidence and internal sales validation by evidence strength."""
     """Blend evidence continuously; missing evidence never becomes an observed zero.
 
     The 60/40 country/city split is a tunable v1 default. When one external
@@ -151,6 +153,7 @@ def blend_scores(country_prior: float | None, city_fit: float | None,
 
 def confidence(signal_groups: Mapping[str, Any], freshness: float | None,
                source_quality: float | None, internal_validation: bool) -> dict[str, Any]:
+    """Estimate confidence from evidence coverage, freshness, quality, and validation."""
     """Return 0..1 confidence and explicit five-group coverage."""
     total = 5
     covered = sum(value is not None for value in signal_groups.values())

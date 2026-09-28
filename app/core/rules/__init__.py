@@ -48,6 +48,7 @@ class Detection:
     rule_type: str = "anomaly"
 
     def to_dict(self) -> dict:
+        """Serialize the detection and its rule metadata for storage or APIs."""
         return {
             "id": self.id, "name": self.name, "severity": self.severity,
             "mitre_technique": self.mitre_technique, "points": self.points,
@@ -56,6 +57,7 @@ class Detection:
         }
 
     def to_evidence(self, observed_at: str) -> UnifiedEvidence:
+        """Convert this detection into the shared evidence contract."""
         return UnifiedEvidence(
             source="rule", type="rule", severity=self.severity,
             observed={"rule_id": self.id, "rule_name": self.name},
@@ -90,6 +92,7 @@ _health = {"status": "unloaded", "error": None, "loaded_at": None, "ruleset_hash
 
 
 def _validate_rule(raw: Any, filename: str) -> Rule:
+    """Validate one rule definition and convert it into an immutable Rule."""
     if not isinstance(raw, dict):
         raise ValueError(f"{filename}: rule must be a mapping")
     required = ("id", "name", "severity", "points", "rule_type", "window", "condition", "version", "enabled", "false_positive_notes")
@@ -100,10 +103,25 @@ def _validate_rule(raw: Any, filename: str) -> Rule:
         raise ValueError(f"{filename}: enabled must be boolean")
     if not raw["enabled"]:
         return None
+    _validate_rule_identity(raw, filename)
+    _validate_rule_scoring(raw, filename)
+    rule_type, mitre = _validate_rule_technique(raw, filename)
+    _validate_condition(raw["condition"], filename, 0)
+    return Rule(str(raw["id"]), str(raw["name"]), str(raw["severity"]), mitre,
+                int(raw["points"]), raw["condition"], str(raw.get("description", "")),
+                int(raw["version"]), rule_type, str(raw["window"]), tuple(str(item) for item in raw["false_positive_notes"]))
+
+
+def _validate_rule_identity(raw: dict, filename: str) -> None:
+    """Validate a rule identifier and its positive integer version."""
     if not re.fullmatch(r"[A-Z][A-Z0-9-]{2,63}", str(raw["id"])):
         raise ValueError(f"{filename}: invalid rule id")
     if not isinstance(raw["version"], int) or raw["version"] < 1:
         raise ValueError(f"{filename}: version must be a positive integer")
+
+
+def _validate_rule_scoring(raw: dict, filename: str) -> None:
+    """Validate rule severity, point range, time window, and false-positive notes."""
     if str(raw["severity"]) not in {"low", "medium", "high", "critical"}:
         raise ValueError(f"{filename}: invalid severity")
     if not isinstance(raw["points"], int) or not 0 <= raw["points"] <= 100:
@@ -112,6 +130,10 @@ def _validate_rule(raw: Any, filename: str) -> Rule:
         raise ValueError(f"{filename}: window must be 1h or 24h")
     if not isinstance(raw["false_positive_notes"], list) or not raw["false_positive_notes"]:
         raise ValueError(f"{filename}: false_positive_notes must be a non-empty list")
+
+
+def _validate_rule_technique(raw: dict, filename: str) -> tuple[str, str | None]:
+    """Validate rule type and its required or forbidden MITRE technique."""
     rule_type = str(raw["rule_type"])
     if rule_type not in {"technique", "anomaly"}:
         raise ValueError(f"{filename}: rule_type must be technique or anomaly")
@@ -122,10 +144,7 @@ def _validate_rule(raw: Any, filename: str) -> Rule:
         raise ValueError(f"{filename}: anomaly rule must have null mitre_technique")
     if mitre is not None and not re.fullmatch(r"T\d{4}(?:\.\d{3})?", str(mitre)):
         raise ValueError(f"{filename}: invalid mitre_technique")
-    _validate_condition(raw["condition"], filename, 0)
-    return Rule(str(raw["id"]), str(raw["name"]), str(raw["severity"]), mitre,
-                int(raw["points"]), raw["condition"], str(raw.get("description", "")),
-                int(raw["version"]), rule_type, str(raw["window"]), tuple(str(item) for item in raw["false_positive_notes"]))
+    return rule_type, mitre
 
 
 _FIELDS = {
@@ -138,20 +157,34 @@ _OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"}
 
 
 def _validate_condition(node: Any, filename: str, depth: int) -> None:
+    """Validate a condition tree and all of its nested leaf expressions."""
     if depth > 12 or not isinstance(node, dict):
         raise ValueError(f"{filename}: invalid condition tree")
+    if _validate_logical_condition(node, filename, depth):
+        return
+    _validate_condition_leaf(node, filename)
+
+
+def _validate_logical_condition(node: dict, filename: str, depth: int) -> bool:
+    """Validate and recurse through one all, any, or not condition node."""
     keys = set(node)
     logical = keys & {"all", "any", "not"}
-    if logical:
-        if len(logical) != 1 or keys != logical:
-            raise ValueError(f"{filename}: invalid logical condition")
-        key = next(iter(logical))
-        children = node[key] if key != "not" else [node[key]]
-        if not isinstance(children, list) or not children:
-            raise ValueError(f"{filename}: logical condition requires children")
-        for child in children:
-            _validate_condition(child, filename, depth + 1)
-        return
+    if not logical:
+        return False
+    if len(logical) != 1 or keys != logical:
+        raise ValueError(f"{filename}: invalid logical condition")
+    key = next(iter(logical))
+    children = node[key] if key != "not" else [node[key]]
+    if not isinstance(children, list) or not children:
+        raise ValueError(f"{filename}: logical condition requires children")
+    for child in children:
+        _validate_condition(child, filename, depth + 1)
+    return True
+
+
+def _validate_condition_leaf(node: dict, filename: str) -> None:
+    """Validate a field/operator/value leaf in a rule condition."""
+    keys = set(node)
     if keys != {"field", "operator", "value"}:
         raise ValueError(f"{filename}: invalid condition leaf")
     if node["field"] not in _FIELDS:
@@ -171,6 +204,7 @@ def _validate_condition(node: Any, filename: str, depth: int) -> None:
 
 
 def _load_rules_files(directory: Path, pattern: str, parser) -> tuple[tuple[Rule, ...], str]:
+    """Load, validate, and fingerprint all enabled rule files in a directory."""
     rules: list[Rule] = []
     serialized: list[dict] = []
     for filename in sorted(directory.glob(pattern)):
@@ -201,6 +235,7 @@ def load_rules_json(path: Path | None = None) -> tuple[tuple[Rule, ...], str]:
 
 
 def reload_rules(path: Path | None = None) -> str:
+    """Replace the active registry with a validated ruleset from disk."""
     global _registry, _ruleset_hash, _rules_path, _rules_signature, _health
     directory = path or _rules_path
     rules, digest = load_rules(directory)
@@ -214,10 +249,12 @@ def reload_rules(path: Path | None = None) -> str:
 
 
 def _signature(directory: Path) -> tuple[tuple[str, int, int], ...]:
+    """Capture rule-file metadata used to detect changes without rereading."""
     return tuple(sorted((str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in directory.glob("*.json")))
 
 
 def ensure_rules_current() -> None:
+    """Reload rules when their file signature changes and preserve health errors."""
     global _health
     if not _registry:
         reload_rules()
@@ -236,21 +273,25 @@ def ensure_rules_current() -> None:
 
 
 def ruleset_health() -> dict:
+    """Return the active rule registry status and latest reload metadata."""
     ensure_rules_current()
     return dict(_health)
 
 
 def ruleset_hash() -> str:
+    """Return the content hash of the active validated ruleset."""
     ensure_rules_current()
     return _ruleset_hash
 
 
 def rules() -> tuple[Rule, ...]:
+    """Return the current immutable behavior-rule registry."""
     ensure_rules_current()
     return _registry
 
 
 def _field(ctx: BehaviorContext, name: str) -> Any:
+    """Read a supported behavior metric from its detection context."""
     if name == "status_4xx_ratio":
         return ctx.status_4xx / ctx.requests if ctx.requests else 0.0
     if name == "status_4xx_ratio_1h":
@@ -265,6 +306,7 @@ def _field(ctx: BehaviorContext, name: str) -> Any:
 
 
 def _compare(actual: Any, operator: str, expected: Any) -> bool:
+    """Evaluate one validated comparison operator against a metric value."""
     if actual is None and operator in {"gt", "gte", "lt", "lte"}:
         actual = 0
     if operator == "eq":
@@ -287,6 +329,7 @@ def _compare(actual: Any, operator: str, expected: Any) -> bool:
 
 
 def evaluate_condition(ctx: BehaviorContext, node: dict) -> bool:
+    """Evaluate a nested logical rule condition against behavior context."""
     if "all" in node:
         return all(evaluate_condition(ctx, child) for child in node["all"])
     if "any" in node:
@@ -299,6 +342,7 @@ def evaluate_condition(ctx: BehaviorContext, node: dict) -> bool:
 
 
 def run_rules(ctx: BehaviorContext, window: str | None = None) -> list[Detection]:
+    """Return detections for enabled rules matching the optional time window."""
     result = []
     for rule in rules():
         if window is not None and rule.window != window:

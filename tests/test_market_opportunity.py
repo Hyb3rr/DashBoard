@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.core.market_catalog import NON_PRIMARY_ECONOMIES, PRIMARY_UN_MEMBERS, catalog_rows
-from app.db import market_repository
+from app.db import market_evidence_repository, market_repository
 
 
 class _Result:
@@ -54,7 +54,9 @@ class _Transaction:
 
 def _repo(monkeypatch):
     connection = _Connection()
-    monkeypatch.setattr(market_repository, "transaction", lambda: _Transaction(connection))
+    transaction = lambda: _Transaction(connection)
+    monkeypatch.setattr(market_repository, "transaction", transaction)
+    monkeypatch.setattr(market_evidence_repository, "transaction", transaction)
     return market_repository.MarketRepository(), connection
 
 

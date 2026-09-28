@@ -10,16 +10,19 @@ ROLE_RANK = {"viewer": 1, "analyst": 2, "admin": 3}
 
 
 def parse_roles(value: str | None) -> frozenset[str]:
+    """Parse a role header and discard values outside the supported role set."""
     roles = {item.strip().lower() for item in str(value or "").replace(",", " ").split()}
     return frozenset(role for role in roles if role in ROLES)
 
 
 def has_role(roles: Iterable[str], required: str) -> bool:
+    """Check whether the highest assigned role meets a required role level."""
     highest = max((ROLE_RANK.get(str(role).lower(), 0) for role in roles), default=0)
     return highest >= ROLE_RANK[required]
 
 
 def required_role(method: str, path: str) -> str | None:
+    """Map a mutation route to its minimum role, leaving read routes open."""
     if method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return None
     if method.upper() == "PATCH" and path == "/api/alerts/settings":

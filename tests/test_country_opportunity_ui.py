@@ -49,16 +49,16 @@ def test_country_opportunity_details_use_responsive_side_sheet():
 
 def test_classification_filter_scopes_dashboard_donut_counts():
     javascript = (ROOT / "app" / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
-    assert "const allCounts=ipSummary?.classification" in javascript
+    assert "const allCounts=trafficClassificationSummary?.classification" in javascript
     assert "Object.fromEntries(items.map(([key])=>[key,key===activeClassification" in javascript
-    assert "const activeClassification=$(\'classification\')?.value||\'\';" in javascript
+    assert "trafficFilterType==='classification'?trafficFilterValue:''" in javascript
 
 
 def test_clearing_classification_traffic_filter_resets_donut_selection():
     javascript = (ROOT / "app" / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
     assert "const wasClassification=trafficFilterType==='classification';" in javascript
     assert "$('classification').value='';" in javascript
-    assert "renderClassificationAnalytics();" in javascript
+    assert "saveTrafficWindow();loadTraffic();" in javascript
 
 
 def test_dashboard_uses_sse_events_and_fallback_polling_without_parallel_one_second_poll():
@@ -68,5 +68,7 @@ def test_dashboard_uses_sse_events_and_fallback_polling_without_parallel_one_sec
     assert "function startFallbackPolling(){if(fallbackPollTimer)return;fallbackPollTimer=setInterval(()=>scheduleRealtimeFlush(),5000)}" in javascript
     assert "eventSource.addEventListener('ip_changes'" in javascript
     assert "const debounce=Math.max(750,Number(delay)||0)" in javascript
-    assert "let trafficRequest=null" in javascript
-    assert "if(trafficRequest)return trafficRequest" in javascript
+    assert "let trafficRequestGeneration=0" in javascript
+    assert "const generation=++trafficRequestGeneration" in javascript
+    assert "if(!isCurrentTrafficQuery(generation,identity))return false;" in javascript
+    assert "trafficRequest=null" not in javascript

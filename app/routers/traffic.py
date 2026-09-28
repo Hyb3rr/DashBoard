@@ -12,6 +12,7 @@ router = APIRouter()
 
 
 def _parse_traffic_time(value: str | None) -> datetime | None:
+    """Parse an ISO timestamp and normalize it to UTC."""
     if not value:
         return None
     try:
@@ -22,10 +23,19 @@ def _parse_traffic_time(value: str | None) -> datetime | None:
 
 
 def _country_ips(country: str, exclude: bool) -> list[str] | None:
+    """Resolve IPs matching the requested country cohort from PostgreSQL."""
     try:
         with postgres_store.transaction() as conn:
-            operator = "!=" if exclude else "="
-            rows = conn.execute(f"SELECT ip::text AS ip FROM ip_profiles WHERE country_code {operator} %s OR country_code IS NULL", (country.upper(),)).fetchall()
+            if exclude:
+                rows = conn.execute(
+                    "SELECT ip::text AS ip FROM ip_profiles WHERE country_code != %s OR country_code IS NULL",
+                    (country.upper(),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT ip::text AS ip FROM ip_profiles WHERE country_code = %s",
+                    (country.upper(),),
+                ).fetchall()
         return [str(row["ip"]) for row in rows]
     except Exception as exc:
         raise HTTPException(503, f"PostgreSQL country state unavailable: {exc}") from exc
@@ -51,6 +61,7 @@ def _classification_ips(label: str, exclude: bool) -> list[str]:
 
 
 def _traffic(start, end, bucket, name, label, source, filter_type, filter_value, exclude):
+    """Combine ClickHouse traffic analytics with PostgreSQL risk signals."""
     allowed = (_country_ips(str(filter_value), exclude) if filter_type == "country"
                else _classification_ips(str(filter_value), exclude) if filter_type == "classification"
                else None)
@@ -61,6 +72,11 @@ def _traffic(start, end, bucket, name, label, source, filter_type, filter_value,
     except Exception as exc:
         raise HTTPException(503, f"ClickHouse traffic unavailable: {exc}") from exc
     try:
+        cohort_ips = result.pop("_cohort_ips", [])
+        # Cohort membership comes from exact raw-event timestamps in ClickHouse.
+        # Classification is the latest PostgreSQL state; absent/lagging state is
+        # represented as unknown rather than dropping an observed IP.
+        result["classification_summary"] = StateRepository().classification_summary_for_ips(cohort_ips)
         result["risk_series"] = StateRepository().risk_traffic_series(
             start, end, bucket, dataset_id=settings.DATASET_LIVE_ID,
             filter_type=filter_type, filter_value=filter_value, exclude=exclude
@@ -78,6 +94,7 @@ def _traffic(start, end, bucket, name, label, source, filter_type, filter_value,
 def traffic_analytics(range_key: str = Query("1h", alias="range"), start: str | None = None, end: str | None = None,
                       filter_type: str | None = None, filter_value: str | None = None, exclude: bool = False,
                       source: str = Query("all", pattern="^(all|stream)$")):
+    """Validate a traffic range and return aggregated dashboard analytics."""
     ranges = {"30m": (1800, 300, "last 30 minutes"), "1h": (3600, 600, "last 1 hour"),
               "6h": (21600, 1800, "last 6 hours"), "12h": (43200, 3600, "last 12 hours"),
               "1d": (86400, 7200, "last 1 day"), "3d": (259200, 21600, "last 3 days"),
@@ -103,6 +120,7 @@ def traffic_analytics(range_key: str = Query("1h", alias="range"), start: str | 
 
 @router.get("/api/ip/{ip}/traffic")
 def ip_traffic(ip: str, range_key: str = Query("1h", alias="range"), start: str | None = None, end: str | None = None):
+    """Return time-bucketed traffic analytics for one validated IP address."""
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:

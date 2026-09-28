@@ -55,6 +55,7 @@ def build_evidence_rows(matrix: Mapping[str, Any], inputs: Iterable[Mapping[str,
 
 
 def refresh(repo: Any, country_code: str = "VN", now: datetime | None = None) -> dict[str, Any]:
+    """Build and publish one country product-demand evidence snapshot."""
     matrix = load_matrix(MATRIX_PATH)
     now = now or datetime.now(timezone.utc)
     collected_at = now.isoformat()

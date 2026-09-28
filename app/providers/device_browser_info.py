@@ -23,6 +23,7 @@ def _csv_payload(payload: bytes, source: str) -> bytes:
 
 
 def refresh(conn, url: str | None = None, api_key: str | None = None, cache: Path | None = None) -> dict:
+    """Refresh the Device Browser feed through the PostgreSQL intelligence adapter."""
     from .pg_intel import refresh_device_browser
 
     return refresh_device_browser(conn, url=url, api_key=api_key, cache=cache)

@@ -34,18 +34,22 @@ DEFAULT_TRAIN_N_JOBS = 2
 
 
 def _utc_now() -> datetime:
+    """Return the current UTC time for model and scoring lifecycle records."""
     return datetime.now(timezone.utc)
 
 
 def _floor_minute(value: datetime) -> datetime:
+    """Align a timestamp to the start of its UTC minute."""
     return value.astimezone(timezone.utc).replace(second=0, microsecond=0)
 
 
 def _iso(value: datetime | None) -> str | None:
+    """Serialize an optional timestamp in UTC."""
     return value.astimezone(timezone.utc).isoformat() if value else None
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read a bounded positive integer setting with a safe default."""
     try:
         return max(minimum, int(os.getenv(name, str(default))))
     except (TypeError, ValueError):
@@ -53,12 +57,14 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 
 def model_path() -> Path:
+    """Resolve the configured Isolation Forest artifact path."""
     configured = os.getenv("AI_MODEL_PATH", str(AI_MODEL_PATH)).strip()
     path = Path(configured)
     return path if path.is_absolute() else PROJECT_DIR / path
 
 
 def _fit_model_frame(frame: pd.DataFrame, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Fit the scaler and Isolation Forest and return a versioned model bundle."""
     scaler = StandardScaler()
     scaled = scaler.fit_transform(frame[FEATURE_COLUMNS])
     model = IsolationForest(
@@ -94,6 +100,7 @@ def _fit_model_frame(frame: pd.DataFrame, metadata: dict[str, Any]) -> dict[str,
 
 
 def _atomic_save(bundle: dict[str, Any], path: Path) -> None:
+    """Persist a model bundle atomically and sync its file and directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -113,6 +120,7 @@ def _atomic_save(bundle: dict[str, Any], path: Path) -> None:
 
 
 def load_model_bundle() -> dict[str, Any] | None:
+    """Load a compatible model artifact or return unavailable."""
     path = model_path()
     if not path.exists():
         return None
@@ -128,6 +136,7 @@ def load_model_bundle() -> dict[str, Any] | None:
 
 
 def _state(conn):
+    """Read or initialize the persisted Isolation Forest lifecycle row."""
     row = conn.execute("SELECT * FROM ai_model_state WHERE model_key = %s", (MODEL_KEY,)).fetchone()
     if row:
         return row
@@ -141,6 +150,7 @@ def _state(conn):
 
 
 def _feature_frame(conn, start: datetime, end: datetime, ips: list[str] | None = None) -> pd.DataFrame:
+    """Read bounded minute features and derive model windows."""
     max_ips = _env_int("AI_TRAIN_MAX_IPS", DEFAULT_TRAIN_MAX_IPS)
     max_windows = _env_int("AI_TRAIN_MAX_WINDOWS", DEFAULT_TRAIN_MAX_WINDOWS)
     sql = """SELECT host(f.ip) AS ip, f.bucket_minute, f.requests,
@@ -283,12 +293,14 @@ def train_model(conn, fit_executor=None) -> dict[str, Any]:
 
 
 def _confidence(windows: int) -> tuple[int, str]:
+    """Map observed model-window count to the existing confidence contract."""
     value = min(100, windows * 10)
     level = "low" if windows < 3 else "medium" if windows < 10 else "high"
     return value, level
 
 
 def _window_score(decision: float, floor: float) -> int:
+    """Convert a model decision score into the bounded anomaly window score."""
     if floor == 0:
         return 100
     ratio = decision / floor
@@ -296,17 +308,20 @@ def _window_score(decision: float, floor: float) -> int:
 
 
 def _feature_value(value):
+    """Convert a model feature to a JSON-safe numeric value."""
     if pd.isna(value):
         return 0
     return float(value) if isinstance(value, (float,)) else int(value)
 
 
 def _previous_evidence(value) -> dict[str, dict]:
+    """Index prior AI evidence by its observed window start."""
     decoded = decode(value)
     return {str(item.get("window_start")): item for item in decoded if isinstance(item, dict) and item.get("window_start")}
 
 
 def expire_inactive_scores(conn, now: datetime | None = None) -> int:
+    """Clear stale anomaly scores while preserving their previous state."""
     now = now or _utc_now()
     cutoff = now - timedelta(hours=_env_int("LOG_WS_AI_EXPIRE_HOURS", DEFAULT_EXPIRE_HOURS))
     rows = conn.execute(
@@ -323,15 +338,133 @@ def expire_inactive_scores(conn, now: datetime | None = None) -> int:
     return len(rows)
 
 
-def _trim_change_log(conn) -> None:
-    conn.execute(
-        "DELETE FROM ip_change_log WHERE seq <= "
-        "(SELECT CASE WHEN MAX(seq) > 50000 THEN MAX(seq) - 50000 ELSE 0 END FROM ip_change_log)"
+def _score_windows(frame: pd.DataFrame, bundle: dict[str, Any]) -> tuple[pd.DataFrame, int]:
+    """Apply the persisted model to feature windows and mark anomalous rows."""
+    scaled = bundle["scaler"].transform(frame[FEATURE_COLUMNS])
+    predictions = bundle["model"].predict(scaled)
+    decisions = bundle["model"].decision_function(scaled)
+    scored = frame.copy()
+    scored["decision"] = decisions
+    scored["is_anomaly"] = predictions == -1
+    floor = float(bundle.get("training_decision_floor") or 0)
+    scored["window_score"] = [
+        _window_score(float(score), floor) if anomaly else 0
+        for score, anomaly in zip(decisions, predictions == -1)
+    ]
+    return scored, int(scored["is_anomaly"].sum())
+
+
+def _anomaly_evidence(row: pd.Series, previous: dict[str, Any], bundle: dict[str, Any], floor: float) -> dict[str, Any]:
+    """Build one explainable evidence record for an anomalous model window."""
+    window_start = row["window_start"].isoformat()
+    window_score = int(row["window_score"])
+    features = {column: _feature_value(row[column]) for column in FEATURE_COLUMNS}
+    contract = UnifiedEvidence(
+        source="isolation_forest",
+        type="isolation_forest",
+        severity="supporting",
+        observed={"window_start": window_start, "features": features},
+        baseline={"model_version": bundle["model_version"], "decision_floor": floor},
+        score_contribution=0,
+        observed_at=window_start,
+        description="Isolation Forest flagged an anomalous traffic window.",
+        supporting_context={"decision_score": float(row["decision"]), "window_score": window_score},
+        mode=MODEL_MODE,
+    ).to_dict()
+    contract.update({
+        "window_start": window_start,
+        "decision_score": float(row["decision"]),
+        "window_score": window_score,
+        "previous_window_score": previous.get("window_score"),
+        "window_score_delta": window_score - int(previous["window_score"])
+        if previous.get("window_score") is not None else None,
+        "model_version": bundle["model_version"],
+        "features": features,
+    })
+    return contract
+
+
+def _build_ip_score(ip: str, group: pd.DataFrame, previous: dict[str, Any] | None,
+                    bundle: dict[str, Any], scored_at: str, force_full: bool) -> dict[str, Any]:
+    """Assemble current anomaly score, confidence, reason, and evidence for one IP."""
+    previous_score = int(previous["ai_anomaly_score"] or 0) if previous else 0
+    previous_map = _previous_evidence(previous["ai_evidence_json"] if previous else "[]")
+    anomalies = group[group["is_anomaly"]].sort_values(["decision", "window_start"], ascending=[True, True])
+    floor = float(bundle.get("training_decision_floor") or 0)
+    evidence = [
+        _anomaly_evidence(row, previous_map.get(row["window_start"].isoformat(), {}), bundle, floor)
+        for _, row in anomalies.head(3).iterrows()
+    ]
+    confidence, confidence_level = _confidence(len(group))
+    score = int(anomalies["window_score"].max()) if not anomalies.empty else 0
+    reason = "model_refresh" if force_full else "new_traffic"
+    if not anomalies.empty and len(group) < _env_int("LOG_WS_AI_MIN_IP_WINDOWS", DEFAULT_MIN_IP_WINDOWS):
+        reason = "insufficient_ip_windows"
+    elif anomalies.empty:
+        reason = "normal"
+    return {
+        "ip": ip,
+        "windows_seen": len(group),
+        "anomalous_windows": len(anomalies),
+        "score": score,
+        "evidence": evidence,
+        "confidence": confidence,
+        "confidence_level": confidence_level,
+        "previous_score": previous_score,
+        "score_delta": score - previous_score,
+        "reason": reason,
+        "last_window_at": group["window_start"].max().isoformat(),
+        "scored_at": scored_at,
+        "model_version": bundle["model_version"],
+    }
+
+
+def _persist_ip_score(conn, score: dict[str, Any], previous: dict[str, Any] | None) -> bool:
+    """Upsert one IP's anomaly read model and emit a change only when it differs."""
+    old_tuple = tuple(previous[column] for column in (
+        "ai_anomaly_score", "anomalous_windows", "windows_seen", "score_reason", "ai_evidence_json"
+    )) if previous else None
+    new_tuple = (
+        score["score"], score["anomalous_windows"], score["windows_seen"],
+        score["reason"], Jsonb(score["evidence"]),
     )
+    conn.execute(
+        """INSERT INTO ip_ai_scores
+          (ip,windows_seen,anomalous_windows,ai_anomaly_score,ai_evidence_json,model_mode,scored_at,
+           confidence,confidence_level,previous_ai_anomaly_score,score_delta,score_reason,last_window_at,model_version)
+          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+          ON CONFLICT (ip) DO UPDATE SET
+            windows_seen=EXCLUDED.windows_seen, anomalous_windows=EXCLUDED.anomalous_windows,
+            ai_anomaly_score=EXCLUDED.ai_anomaly_score, ai_evidence_json=EXCLUDED.ai_evidence_json,
+            model_mode=EXCLUDED.model_mode, scored_at=EXCLUDED.scored_at,
+            confidence=EXCLUDED.confidence, confidence_level=EXCLUDED.confidence_level,
+            previous_ai_anomaly_score=EXCLUDED.previous_ai_anomaly_score, score_delta=EXCLUDED.score_delta,
+            score_reason=EXCLUDED.score_reason, last_window_at=EXCLUDED.last_window_at,
+            model_version=EXCLUDED.model_version""",
+        (score["ip"], score["windows_seen"], score["anomalous_windows"], score["score"],
+         Jsonb(score["evidence"]), MODEL_MODE, score["scored_at"], score["confidence"],
+         score["confidence_level"], score["previous_score"], score["score_delta"], score["reason"],
+         score["last_window_at"], score["model_version"]),
+    )
+    if old_tuple == new_tuple:
+        return False
+    append_ip_changes(conn, (score["ip"],), "ai", score["scored_at"])
+    return True
+
+
+def _finish_score_cycle(conn, now: datetime, max_event: int) -> None:
+    """Persist the completed AI score cursor and commit its transaction."""
+    scored_at = _iso(now)
+    conn.execute(
+        """UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s,
+           last_score_status=%s, updated_at=%s WHERE model_key=%s""",
+        (max_event, scored_at, "scored", scored_at, MODEL_KEY),
+    )
+    conn.commit()
 
 
 def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
-    """Score affected 24-hour windows with the persisted model."""
+    """Orchestrate one bounded scoring cycle with the persisted model."""
     now = _utc_now()
     end = _floor_minute(now)
     start = end - timedelta(hours=_env_int("LOG_WS_AI_SCORE_LOOKBACK_HOURS", DEFAULT_SCORE_LOOKBACK_HOURS))
@@ -357,102 +490,23 @@ def score_cycle(conn, force_full: bool = False) -> dict[str, Any]:
     ips = [row["ip"] for row in ip_rows]
     expired = expire_inactive_scores(conn, now)
     if not ips:
-        _trim_change_log(conn)
-        conn.execute(
-            "UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s WHERE model_key=%s",
-            (max_event, _iso(now), "scored", _iso(now), MODEL_KEY),
-        )
-        conn.commit()
+        _finish_score_cycle(conn, now, max_event)
         return {**base, "status": "scored", "ips": 0, "windows": 0, "anomalous_windows": 0, "expired": expired, "changed_ips": expired, "cursor": max_event}
 
     frame = _feature_frame(conn, start, end, ips)
     if frame.empty:
-        _trim_change_log(conn)
-        conn.execute("UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s WHERE model_key=%s", (max_event, _iso(now), "scored", _iso(now), MODEL_KEY))
-        conn.commit()
+        _finish_score_cycle(conn, now, max_event)
         return {**base, "status": "scored", "ips": len(ips), "windows": 0, "anomalous_windows": 0, "expired": expired, "changed_ips": expired, "cursor": max_event}
 
-    scaled = bundle["scaler"].transform(frame[FEATURE_COLUMNS])
-    predictions = bundle["model"].predict(scaled)
-    decisions = bundle["model"].decision_function(scaled)
-    frame = frame.copy()
-    frame["decision"] = decisions
-    frame["is_anomaly"] = predictions == -1
-    floor = float(bundle.get("training_decision_floor") or 0)
-    frame["window_score"] = [_window_score(float(score), floor) if anomaly else 0 for score, anomaly in zip(decisions, predictions == -1)]
+    frame, anomaly_count = _score_windows(frame, bundle)
     scored_at = _iso(now)
     changed = 0
-    anomaly_count = int(frame["is_anomaly"].sum())
     for ip, group in frame.groupby("ip", sort=True):
         previous = conn.execute("SELECT * FROM ip_ai_scores WHERE ip = %s", (ip,)).fetchone()
-        previous_score = int(previous["ai_anomaly_score"] or 0) if previous else 0
-        previous_map = _previous_evidence(previous["ai_evidence_json"] if previous else "[]")
-        anomalies = group[group["is_anomaly"]].sort_values(["decision", "window_start"], ascending=[True, True])
-        evidence = []
-        for _, row in anomalies.head(3).iterrows():
-            window_start = row["window_start"].isoformat()
-            old = previous_map.get(window_start, {})
-            window_score = int(row["window_score"])
-            contract = UnifiedEvidence(
-                source="isolation_forest",
-                type="isolation_forest",
-                severity="supporting",
-                observed={"window_start": window_start, "features": {column: _feature_value(row[column]) for column in FEATURE_COLUMNS}},
-                baseline={"model_version": bundle["model_version"], "decision_floor": floor},
-                score_contribution=0,
-                observed_at=window_start,
-                description="Isolation Forest flagged an anomalous traffic window.",
-                supporting_context={"decision_score": float(row["decision"]), "window_score": window_score},
-                mode=MODEL_MODE,
-            ).to_dict()
-            contract.update({
-                "window_start": window_start,
-                "decision_score": float(row["decision"]),
-                "window_score": window_score,
-                "previous_window_score": old.get("window_score"),
-                "window_score_delta": window_score - int(old["window_score"]) if old.get("window_score") is not None else None,
-                "model_version": bundle["model_version"],
-                "features": {column: _feature_value(row[column]) for column in FEATURE_COLUMNS},
-            })
-            evidence.append(contract)
-        confidence, confidence_level = _confidence(len(group))
-        score = int(anomalies["window_score"].max()) if not anomalies.empty else 0
-        reason = "model_refresh" if force_full else "new_traffic"
-        if not anomalies.empty and len(group) < _env_int("LOG_WS_AI_MIN_IP_WINDOWS", DEFAULT_MIN_IP_WINDOWS):
-            reason = "insufficient_ip_windows"
-        elif anomalies.empty:
-            reason = "normal"
-        last_window = group["window_start"].max().isoformat()
-        delta = score - previous_score
-        old_tuple = tuple(previous[column] for column in ("ai_anomaly_score", "anomalous_windows", "windows_seen", "score_reason", "ai_evidence_json")) if previous else None
-        new_tuple = (score, int(len(anomalies)), int(len(group)), reason, Jsonb(evidence))
-        conn.execute(
-            """INSERT INTO ip_ai_scores
-              (ip,windows_seen,anomalous_windows,ai_anomaly_score,ai_evidence_json,model_mode,scored_at,
-               confidence,confidence_level,previous_ai_anomaly_score,score_delta,score_reason,last_window_at,model_version)
-              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-              ON CONFLICT (ip) DO UPDATE SET
-                windows_seen=EXCLUDED.windows_seen, anomalous_windows=EXCLUDED.anomalous_windows,
-                ai_anomaly_score=EXCLUDED.ai_anomaly_score, ai_evidence_json=EXCLUDED.ai_evidence_json,
-                model_mode=EXCLUDED.model_mode, scored_at=EXCLUDED.scored_at,
-                confidence=EXCLUDED.confidence, confidence_level=EXCLUDED.confidence_level,
-                previous_ai_anomaly_score=EXCLUDED.previous_ai_anomaly_score, score_delta=EXCLUDED.score_delta,
-                score_reason=EXCLUDED.score_reason, last_window_at=EXCLUDED.last_window_at,
-                model_version=EXCLUDED.model_version""",
-            (ip, len(group), len(anomalies), score, Jsonb(evidence), MODEL_MODE, scored_at,
-             confidence, confidence_level, previous_score, delta, reason, last_window, bundle["model_version"]),
-        )
-        if old_tuple != new_tuple:
-            append_ip_changes(conn, (ip,), "ai", scored_at)
-            changed += 1
+        score = _build_ip_score(ip, group, previous, bundle, scored_at, force_full)
+        changed += _persist_ip_score(conn, score, previous)
 
-    _trim_change_log(conn)
-    conn.execute(
-        """UPDATE ai_model_state SET last_scored_event_id=%s, last_score_at=%s, last_score_status=%s, updated_at=%s
-           WHERE model_key=%s""",
-        (max_event, scored_at, "scored", scored_at, MODEL_KEY),
-    )
-    conn.commit()
+    _finish_score_cycle(conn, now, max_event)
     return {**base, "status": "scored", "ips": len(ips), "windows": len(frame), "anomalous_windows": anomaly_count, "changed_ips": changed + expired, "expired": expired, "cursor": max_event}
 
 

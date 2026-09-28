@@ -19,6 +19,7 @@ import pycountry
 
 
 def iso2(value: str) -> str | None:
+    """Resolve common ISO country-code forms to an alpha-2 code."""
     code = (value or "").strip().upper()
     if len(code) == 2:
         return code
@@ -90,6 +91,7 @@ def configured_signal(path_env: str, url_env: str, cache_path: Path, aliases: tu
 
 
 def _request_bytes(url: str, params: dict[str, Any] | None = None, timeout: float = 60.0) -> bytes:
+    """Download response bytes with optional URL query parameters."""
     if params:
         from urllib.parse import urlencode
         separator = "&" if "?" in url else "?"
@@ -100,6 +102,7 @@ def _request_bytes(url: str, params: dict[str, Any] | None = None, timeout: floa
 
 
 def _record_country(row: dict[str, Any]) -> str | None:
+    """Resolve a row's country from supported code and name fields."""
     for key in ("country_code", "iso2", "ISO2", "iso3", "ISO3", "Area Code (M49)", "M49", "m49_code", "ReporterISO", "RefArea", "REF_AREA", "area_code"):
         value = row.get(key)
         if value not in (None, ""):
@@ -116,6 +119,7 @@ def _record_country(row: dict[str, Any]) -> str | None:
 
 
 def _record_year(row: dict[str, Any]) -> int | None:
+    """Parse the first recognized year or period field in a source row."""
     for key in ("year", "Year", "TIME_PERIOD", "time_period", "period"):
         try:
             return int(str(row.get(key, "")).strip()[:4])
@@ -125,6 +129,7 @@ def _record_year(row: dict[str, Any]) -> int | None:
 
 
 def _record_value(row: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
+    """Parse the first finite numeric value found under the supplied aliases."""
     for key in aliases:
         value = row.get(key)
         if value in (None, "", "..", "NA", "N/A"):
@@ -139,6 +144,7 @@ def _record_value(row: dict[str, Any], aliases: tuple[str, ...]) -> float | None
 
 
 def _rows_from_json(payload: Any) -> list[dict[str, Any]]:
+    """Extract record arrays from common JSON API response shapes."""
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if not isinstance(payload, dict):
@@ -151,6 +157,7 @@ def _rows_from_json(payload: Any) -> list[dict[str, Any]]:
 
 
 def _bgs_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Select comparable finished-cement production features from a BGS response."""
     rows = []
     for feature in payload.get("features", []) if isinstance(payload, dict) else []:
         properties = feature.get("properties") if isinstance(feature, dict) else None
@@ -171,6 +178,7 @@ def _bgs_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _rows_from_csv(content: bytes) -> list[dict[str, Any]]:
+    """Decode CSV response bytes into dictionary rows."""
     text = content.decode("utf-8-sig", errors="replace")
     return list(csv.DictReader(io.StringIO(text)))
 
@@ -186,52 +194,81 @@ def _parse_ilostat_sdmx_json(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return simple
     structure = payload.get("structure") or {}
     if payload.get("structures") and payload.get("dataSets"):
-        rows: list[dict[str, Any]] = []
-        for dataset in payload.get("dataSets", []):
-            schema = payload["structures"][dataset.get("structure", 0)]
-            series_dimensions = schema.get("dimensions", {}).get("series", [])
-            observation_dimensions = schema.get("dimensions", {}).get("observation", [])
-            series_values = [dimension.get("values", []) for dimension in series_dimensions]
-            time_values = (observation_dimensions[0].get("values", []) if observation_dimensions else [])
-            for series_key, series in (dataset.get("series") or {}).items():
-                indexes = [int(part) for part in str(series_key).split(":")]
-                base: dict[str, Any] = {}
-                for dimension, choices, index in zip(series_dimensions, series_values, indexes):
-                    if index < len(choices):
-                        choice = choices[index]
-                        base[dimension.get("id", "")] = choice.get("id") if isinstance(choice, dict) else choice
-                for observation_key, observation in (series.get("observations") or {}).items():
-                    time_index = int(str(observation_key).split(":", 1)[0])
-                    row = dict(base)
-                    if time_index < len(time_values):
-                        choice = time_values[time_index]
-                        row["TIME_PERIOD"] = choice.get("id") if isinstance(choice, dict) else choice
-                    row["value"] = observation[0] if isinstance(observation, list) and observation else observation
-                    rows.append(row)
-        return rows
+        return _parse_sdmx_series_datasets(payload)
+    return _parse_sdmx_flat_datasets(payload.get("dataSets", []), structure)
+
+
+def _dimension_value(choices: list, index: int) -> Any:
+    """Return a dimension value in its canonical ID-or-value form."""
+    choice = choices[index]
+    return choice.get("id") if isinstance(choice, dict) else choice
+
+
+def _parse_sdmx_series_dataset(dataset: dict, schema: dict) -> list[dict[str, Any]]:
+    """Expand one compact SDMX dataset with series and observation dimensions."""
+    series_dimensions = schema.get("dimensions", {}).get("series", [])
+    observation_dimensions = schema.get("dimensions", {}).get("observation", [])
+    series_values = [dimension.get("values", []) for dimension in series_dimensions]
+    time_values = observation_dimensions[0].get("values", []) if observation_dimensions else []
+    rows = []
+    for series_key, series in (dataset.get("series") or {}).items():
+        indexes = [int(part) for part in str(series_key).split(":")]
+        base = {
+            dimension.get("id", ""): _dimension_value(choices, index)
+            for dimension, choices, index in zip(series_dimensions, series_values, indexes)
+            if index < len(choices)
+        }
+        rows.extend(_parse_sdmx_series_observations(series, base, time_values))
+    return rows
+
+
+def _parse_sdmx_series_observations(series: dict, base: dict, time_values: list) -> list[dict[str, Any]]:
+    """Expand one SDMX series into rows with dimension values and observations."""
+    rows = []
+    for observation_key, observation in (series.get("observations") or {}).items():
+        time_index = int(str(observation_key).split(":", 1)[0])
+        row = dict(base)
+        if time_index < len(time_values):
+            row["TIME_PERIOD"] = _dimension_value(time_values, time_index)
+        row["value"] = observation[0] if isinstance(observation, list) and observation else observation
+        rows.append(row)
+    return rows
+
+
+def _parse_sdmx_series_datasets(payload: dict) -> list[dict[str, Any]]:
+    """Expand all structured SDMX datasets using their selected schema."""
+    rows = []
+    for dataset in payload.get("dataSets", []):
+        schema = payload["structures"][dataset.get("structure", 0)]
+        rows.extend(_parse_sdmx_series_dataset(dataset, schema))
+    return rows
+
+
+def _parse_sdmx_flat_datasets(datasets: list, structure: dict) -> list[dict[str, Any]]:
+    """Expand SDMX datasets encoded with flat observation dimension indexes."""
     dimensions = structure.get("dimensions", {}).get("observation", [])
     time_dimension = (structure.get("dimensions", {}).get("time") or [{}])[0]
     names = [dimension.get("id") for dimension in dimensions]
     values = [dimension.get("values", []) for dimension in dimensions]
-    rows: list[dict[str, Any]] = []
-    for dataset in payload.get("dataSets", []):
+    time_values = time_dimension.get("values", [])
+    rows = []
+    for dataset in datasets:
         for key, observation in (dataset.get("observations") or {}).items():
             indexes = [int(part) for part in str(key).split(":")]
             row = {"value": observation[0] if isinstance(observation, list) and observation else observation}
             for name, choices, index in zip(names, values, indexes):
                 if name and index < len(choices):
-                    row[name] = choices[index].get("id") if isinstance(choices[index], dict) else choices[index]
+                    row[name] = _dimension_value(choices, index)
             if time_dimension and len(indexes) > len(names):
                 time_index = indexes[-1]
-                time_values = time_dimension.get("values", [])
                 if time_index < len(time_values):
-                    choice = time_values[time_index]
-                    row["TIME_PERIOD"] = choice.get("id") if isinstance(choice, dict) else choice
+                    row["TIME_PERIOD"] = _dimension_value(time_values, time_index)
             rows.append(row)
     return rows
 
 
 def _parse_ilostat_sdmx_xml(content: bytes) -> list[dict[str, Any]]:
+    """Convert SDMX-XML observations into flat record dictionaries."""
     root = ET.fromstring(content)
     rows = []
     for observation in root.iter():
@@ -245,6 +282,7 @@ def _parse_ilostat_sdmx_xml(content: bytes) -> list[dict[str, Any]]:
 
 
 def _write_normalized_rows(rows: list[dict[str, Any]], destination: Path, aliases: tuple[str, ...]) -> dict[str, Any]:
+    """Atomically write each country's latest valid normalized signal."""
     latest: dict[str, tuple[int, float]] = {}
     for row in rows:
         country, year, value = _record_country(row), _record_year(row), _record_value(row, aliases)
@@ -267,6 +305,7 @@ def _write_normalized_rows(rows: list[dict[str, Any]], destination: Path, aliase
 
 
 def refresh_faostat(destination: Path, url: str | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Refresh the FAOSTAT signal from its configured API or report its failure."""
     url = url or os.getenv("FAOSTAT_FORESTRY_API_URL")
     if not url:
         return {"status": "not_configured", "source": "faostat"}
@@ -286,6 +325,7 @@ def refresh_faostat(destination: Path, url: str | None = None, params: dict[str,
 
 
 def refresh_ilostat(destination: Path, url: str | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Refresh normalized ILOSTAT wage observations and preserve source metadata."""
     url = url or os.getenv("ILOSTAT_WAGES_API_URL")
     if not url:
         return {"status": "not_configured", "source": "ilostat"}
@@ -306,6 +346,7 @@ def refresh_ilostat(destination: Path, url: str | None = None, params: dict[str,
 
 
 def refresh_bgs_cement(destination: Path, url: str | None = None) -> dict[str, Any]:
+    """Refresh finished-cement production from paginated BGS API results."""
     url = url or os.getenv("BGS_CEMENT_API_URL")
     if not url:
         return {"status": "not_configured", "source": "bgs_cement"}

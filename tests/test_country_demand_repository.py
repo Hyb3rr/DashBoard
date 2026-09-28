@@ -1,4 +1,4 @@
-from app.services.country_demand import CountryDemandService
+from app.services.country_demand import CountryDemandService, _normalize_observation
 from app.core.country_demand import aggregate_session_observations
 
 
@@ -52,6 +52,31 @@ def test_session_aggregation_marks_country_conflict_without_traffic_scoring():
     assert result[0]["geo_evidence"]["geo_conflict"] is True
     assert result[0]["traffic_status"] == "unknown"
     assert result[0]["geo_evidence"]["geo_conflict"] is True
+
+
+def test_observation_normalization_prefers_event_country_and_event_flags():
+    """Keep event country and explicit booleans ahead of profile fallbacks."""
+    result = _normalize_observation(
+        {"src_ip": "203.0.113.1", "cf_country": "us", "country_source": "edge",
+         "path": "/products/saw?campaign=x", "is_tor": False, "engaged": True},
+        {"203.0.113.1": {"country_code": "SG", "network_type": "mobile",
+                          "is_tor": True, "is_vpn": True, "is_hosting": True,
+                          "label": "malicious"}},
+    )
+
+    assert result["country_code"] == "US"
+    assert result["country_source"] == "edge"
+    assert result["product_page"] is True
+    assert result["is_tor"] is False
+    assert result["is_vpn"] is True
+    assert result["is_mobile"] is True
+    assert result["cgnat"] is True
+    assert result["malicious_ip"] is True
+
+
+def test_observation_without_any_country_is_excluded():
+    """Skip traffic rows lacking both event and profile country evidence."""
+    assert _normalize_observation({"src_ip": "203.0.113.2"}, {}) is None
 
 
 def test_publish_writes_batch_before_publishing():

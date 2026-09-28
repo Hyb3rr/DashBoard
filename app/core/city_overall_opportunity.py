@@ -15,6 +15,7 @@ GROUP_WEIGHTS = {
 
 
 def _number(value: Any) -> float | None:
+    """Convert finite numeric-like evidence to a float when possible."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -23,6 +24,7 @@ def _number(value: Any) -> float | None:
 
 
 def _percentile(value: float | None, peers: Sequence[float | None], *, minimum_peers: int = 2) -> float | None:
+    """Return a tie-aware peer percentile only for a sufficiently sized cohort."""
     if value is None:
         return None
     present = [item for item in peers if item is not None]
@@ -38,6 +40,7 @@ def _percentile(value: float | None, peers: Sequence[float | None], *, minimum_p
 
 
 def _enterprise_total(row: Mapping[str, Any]) -> float | None:
+    """Sum woodworking and metalworking enterprises only when both are known."""
     tracks = row.get("relevant_enterprises", {}).get("tracks", {})
     values = [_number((tracks.get(name) or {}).get("value")) for name in ("woodworking", "metalworking")]
     # A missing track is unavailable, not a zero contribution to a complete
@@ -46,6 +49,7 @@ def _enterprise_total(row: Mapping[str, Any]) -> float | None:
 
 
 def extract_groups(row: Mapping[str, Any]) -> dict[str, float | None]:
+    """Extract score inputs while excluding presentation-only fallback values."""
     investment = row.get("province_investment_momentum", {})
     current = investment.get("current_period", {})
     stock = investment.get("cumulative_stock", {})
@@ -64,6 +68,7 @@ def extract_groups(row: Mapping[str, Any]) -> dict[str, float | None]:
 
 
 def score_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Score each geographic row relative to available peers and report coverage."""
     groups = {str(row.get("geo_unit_id")): extract_groups(row) for row in rows}
     peers = {name: [values.get(name) for values in groups.values()] for name in GROUP_WEIGHTS}
     result = {}

@@ -13,11 +13,13 @@ router = APIRouter()
 
 @router.get("/api/ip/{ip}/paths")
 def ip_path_activity(ip: str, limit: int = 12):
+    """Reject the retired path-activity endpoint with its replacement guidance."""
     raise HTTPException(410, "Path Activity endpoint is retired in split live mode; use IP Traffic")
 
 
 @router.get("/api/ip/{ip}")
 async def ip_details(ip: str, refresh: bool = False):
+    """Return one IP investigation record and queue missing enrichment if needed."""
     try:
         address = ipaddress.ip_address(ip)
     except ValueError as exc:
@@ -39,6 +41,7 @@ async def ip_details(ip: str, refresh: bool = False):
 
 @router.get("/api/ip/{ip}/attack")
 def ip_attack(ip: str, window: str = Query("24h")):
+    """Return persisted detections and grouped MITRE techniques for an IP."""
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:
@@ -66,6 +69,7 @@ def ip_attack(ip: str, window: str = Query("24h")):
 
 @router.post("/api/ip/{ip}/disposition")
 def update_ip_disposition(ip: str, payload: dict = Body(...)):
+    """Validate and persist an analyst disposition for one IP address."""
     try:
         address = str(ipaddress.ip_address(ip))
     except ValueError as exc:

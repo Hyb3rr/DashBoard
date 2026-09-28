@@ -13,18 +13,21 @@ from .telegram import format_early_alert, send_message
 
 class EarlyAlertPublisher:
     def __init__(self, maxsize: int = 1000, publish: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None) -> None:
+        """Initialize a bounded preliminary-alert queue and optional publisher."""
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
         self._publish = publish
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
+        """Start the single alert delivery task if it is not already running."""
         if self._task:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="early-alerts")
 
     async def stop(self) -> None:
+        """Cancel and await the delivery task during shutdown."""
         self._stop.set()
         if self._task:
             self._task.cancel()
@@ -32,6 +35,7 @@ class EarlyAlertPublisher:
         self._task = None
 
     def enqueue(self, detection: EarlyDetection, ip: str | None = None) -> bool:
+        """Queue one preliminary detection without blocking the collector path."""
         payload = {
             "type": "preliminary",
             "ip": ip,
@@ -48,6 +52,7 @@ class EarlyAlertPublisher:
         return True
 
     async def _run(self) -> None:
+        """Deliver queued alerts to realtime subscribers and Telegram."""
         while not self._stop.is_set():
             try:
                 payload = await asyncio.wait_for(self._queue.get(), timeout=1.0)
@@ -65,6 +70,7 @@ class EarlyAlertPublisher:
                 self._queue.task_done()
 
     def status(self) -> dict[str, int]:
+        """Expose the bounded delivery queue depth for health reporting."""
         depth = self._queue.qsize()
         metrics.gauge("early_alert.queue_depth", depth)
         return {"queue_depth": depth}

@@ -23,6 +23,7 @@ LABELS = {"good", "low", "medium", "critical", "unknown"}
 
 
 def _row(item: dict) -> dict:
+    """Flatten one IP profile into the stable human-review CSV schema."""
     classification = item.get("classification") or {}
     breakdown = classification.get("score_breakdown") or {}
     ai_profile = item.get("ai_profile") or {}
@@ -50,6 +51,7 @@ def _row(item: dict) -> dict:
 
 
 def csv_text(items: Iterable[dict]) -> str:
+    """Serialize IP profiles as a calibration CSV with a fixed column order."""
     stream = StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=FIELDS)
     writer.writeheader()

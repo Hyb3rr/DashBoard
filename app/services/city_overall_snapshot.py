@@ -12,6 +12,7 @@ PEER_GROUP = "VN-34"
 
 
 def build_vietnam_snapshot(*, now: datetime | None = None) -> dict:
+    """Build a versioned authoritative opportunity snapshot for Vietnamese provinces."""
     now = now or datetime.now(timezone.utc)
     rows = build_vietnam_province_profile(include_overall=False).get("provinces", [])
     scores = score_rows(rows)
@@ -26,6 +27,7 @@ def build_vietnam_snapshot(*, now: datetime | None = None) -> dict:
 
 
 def publish_vietnam_snapshot(repository, *, now: datetime | None = None) -> dict:
+    """Persist and publish one complete Vietnam opportunity snapshot atomically by version."""
     snapshot = build_vietnam_snapshot(now=now)
     repository.create_city_overall_snapshot(snapshot)
     repository.write_city_overall_rows(snapshot["rows"], snapshot["snapshot_id"])

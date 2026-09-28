@@ -12,6 +12,7 @@ from typing import Any
 
 
 def _text(value: Any) -> str | None:
+    """Trim a text claim and convert empty values to null."""
     if value is None:
         return None
     value = str(value).strip()
@@ -19,11 +20,13 @@ def _text(value: Any) -> str | None:
 
 
 def _country(value: Any) -> str | None:
+    """Normalize a valid two-letter country code or return null."""
     value = _text(value)
     return value.upper() if value and len(value) == 2 and value.isalpha() else None
 
 
 def _coordinate(value: Any, minimum: float, maximum: float) -> float | None:
+    """Parse a finite coordinate-like value within its allowed bounds."""
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -44,6 +47,7 @@ def _lineage(source: str, *, explicit: str | None = None) -> str:
 
 def _base(source: str, source_type: str, scope: str, raw_ref: str | None = None,
           *, derived_from: str | None = None) -> dict[str, Any]:
+    """Create the shared normalized GeoIP claim envelope."""
     return {
         "source": source,
         "derived_from": _lineage(source, explicit=derived_from),
@@ -104,6 +108,7 @@ def normalize_geoip(source: str, payload: dict[str, Any] | None, *, database_ver
 
 
 def normalize_ip2region(payload: dict[str, Any] | None, *, raw_ref: str | None = None) -> dict[str, Any]:
+    """Normalize ip2region context without treating it as authoritative GeoIP."""
     payload = payload or {}
     result = _base("ip2region", "context_validation", "context_only", raw_ref,
                    derived_from="ip2region")
@@ -116,6 +121,7 @@ def normalize_ip2region(payload: dict[str, Any] | None, *, raw_ref: str | None =
 
 
 def normalize_rir(source: str, country_code: Any, *, raw_ref: str | None = None) -> dict[str, Any]:
+    """Normalize an RIR registration claim separately from physical location."""
     result = _base(f"rir:{source}", "registration", "allocation_registration", raw_ref,
                    derived_from=f"rir:{_lineage(source)}")
     result["country_code"] = _country(country_code)
@@ -124,6 +130,7 @@ def normalize_rir(source: str, country_code: Any, *, raw_ref: str | None = None)
 
 def normalize_geofeed(country_code: Any, *, region: Any = None, city: Any = None,
                       raw_ref: str | None = None, verified: bool = False) -> dict[str, Any]:
+    """Normalize a self-published geofeed claim with its verification context."""
     result = _base("geofeed", "self_published", "network_operational", raw_ref,
                    derived_from="geofeed")
     result["country_code"] = _country(country_code)

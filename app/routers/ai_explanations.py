@@ -23,10 +23,12 @@ class ExplainRequest(BaseModel):
 
 
 def _iso(value):
+    """Serialize timestamp-like AI job fields for JSON responses."""
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _job_response(job: dict) -> dict:
+    """Project a persisted explanation job into the public response contract."""
     completed = job.get("status") == "completed" and job.get("validation_status") == "validated"
     return {
         "job_id": job["job_id"], "case_id": job["case_id"],
@@ -43,6 +45,7 @@ def _job_response(job: dict) -> dict:
 
 @router.post("/api/ai/cases/{case_id}/explain", status_code=202)
 def request_explanation(case_id: str, request: ExplainRequest):
+    """Create or reuse a bounded AI explanation job for the supplied case."""
     identity = case_id.strip()
     if not identity:
         raise HTTPException(status_code=400, detail="case_id is required")
@@ -81,6 +84,7 @@ def request_explanation(case_id: str, request: ExplainRequest):
 
 @router.get("/api/ai/jobs/{job_id}")
 def get_explanation_job(job_id: str):
+    """Return one persisted AI explanation job and validated result if ready."""
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id is required")
     try:

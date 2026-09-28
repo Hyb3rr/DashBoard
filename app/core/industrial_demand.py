@@ -20,6 +20,7 @@ GEO_SCOPES = {"country", "geo_unit"}
 
 
 def load_matrix(path: str | Path) -> dict[str, Any]:
+    """Load and validate a product-industry mapping matrix from JSON."""
     with Path(path).open(encoding="utf-8") as handle:
         matrix = json.load(handle)
     validate_matrix(matrix)
@@ -27,6 +28,7 @@ def load_matrix(path: str | Path) -> dict[str, Any]:
 
 
 def validate_matrix(matrix: Mapping[str, Any]) -> None:
+    """Enforce the versioned evidence-only product mapping contract."""
     if matrix.get("schema_version") != "market-demand-v2":
         raise ValueError("unsupported product-industry matrix version")
     if matrix.get("scoring") != "evidence_only":
@@ -62,12 +64,7 @@ def evidence_id(evidence: Mapping[str, Any]) -> str:
 
 
 def normalize_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate one source observation and assign its stable identity.
-
-    A province/geo-unit observation must originate at geo-unit resolution. A
-    country observation is retained as country context and cannot be relabeled
-    as a province observation by this policy.
-    """
+    """Validate observation scope and assign identity without relabeling country evidence."""
     required = ("source_id", "source_geo_scope", "observed_period", "collected_at",
                 "mapping_version", "limitations")
     missing = [key for key in required if key not in raw or raw[key] in (None, "")]

@@ -16,16 +16,67 @@ def test_legacy_economic_indicators_normalise_to_object():
     assert value["indicators"]["gdp"]["value"] == 10
 
 
-def test_world_bank_metadata_parser_reads_composite_export():
+def test_world_bank_metadata_parser_reads_composite_export(tmp_path, monkeypatch):
+    metadata_path = tmp_path / "metadata.csv"
+    metadata_path.write_text(
+        "Exported metadata\n"
+        "Data from database: World Development Indicators\n"
+        "Code,License Type,Unit of measure,Source\n"
+        "NY.GDP.MKTP.CD,CC BY 4.0,Current US$,World Bank WDI\n",
+        encoding="cp1252",
+    )
+    monkeypatch.setattr(market_refresh, "WB_METADATA", metadata_path)
     metadata = market_refresh.parse_world_bank_metadata()
-    assert "NY.GDP.MKTP.CD" in metadata
+    assert metadata["NY.GDP.MKTP.CD"]["unit"] == "Current US$"
 
 
-def test_comtrade_parser_discovers_existing_years_and_parent():
+def test_comtrade_parser_discovers_existing_years_and_parent(tmp_path, monkeypatch):
+    comtrade_dir = tmp_path / "comtrade"
+    comtrade_dir.mkdir()
+    (comtrade_dir / "reporter.csv").write_text(
+        "freqCode,flowCode,partnerISO,cmdCode,reporterISO,primaryValue,refYear\n"
+        "A,M,W00,8465,VNM,100000,2025\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(market_refresh, "COMTRADE_DIR", comtrade_dir)
+    monkeypatch.setattr(market_refresh, "MIRROR_CACHE", tmp_path / "missing-mirror.json")
     trade, diagnostics = market_refresh.parse_comtrade()
     assert diagnostics["latest_complete_year"] == 2025
     assert 2025 in diagnostics["years"]
-    assert any("8465" in country_data for country_data in trade.values())
+    assert trade["VN"]["8465"][2025] == 100000
+
+
+def test_comtrade_reporter_observations_win_and_mirror_fills_missing_years(tmp_path, monkeypatch):
+    comtrade_dir = tmp_path / "comtrade"
+    comtrade_dir.mkdir()
+    csv_path = comtrade_dir / "reporter.csv"
+    csv_path.write_text(
+        "freqCode,flowCode,partnerISO,cmdCode,reporterISO,primaryValue,refYear\n"
+        "A,M,W00,8465,VNM,100,2025\n"
+        "A,M,W00,846510,VNM,5,2025\n"
+        "A,X,W00,8465,VNM,900,2025\n"
+        "A,M,USA,8465,VNM,800,2025\n",
+        encoding="utf-8",
+    )
+    (comtrade_dir / "mirror.json").write_text(json.dumps({
+        "trade": {
+            "VN": {"8465": {"2025": 999, "2024": 80}, "846510": {"2025": 50, "2024": 70}},
+            "SG": {"8465": {"2024": 30}},
+        },
+        "provenance": {"VN": {"method": "bilateral_mirror", "confidence": "medium", "years": [2024, 2025]},
+                       "SG": "mirror"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(market_refresh, "COMTRADE_DIR", comtrade_dir)
+    monkeypatch.setattr(market_refresh, "MIRROR_CACHE", comtrade_dir / "mirror.json")
+
+    trade, diagnostics = market_refresh.parse_comtrade()
+
+    assert trade["VN"]["8465"] == {2025: 100.0, 2024: 80.0}
+    assert trade["VN"]["846510"] == {2025: 5.0, 2024: 70.0}
+    assert trade["SG"]["8465"] == {2024: 30.0}
+    assert diagnostics["mirror_countries"] == 2
+    assert diagnostics["mirror_provenance"]["VN"]["reporter_parent_years"] == [2025]
+    assert diagnostics["mirror_provenance"]["VN"]["reporter_child_years"] == {"846510": [2025]}
 
 
 def test_comtrade_fetch_supports_furniture_export_query(monkeypatch):

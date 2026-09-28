@@ -26,6 +26,7 @@ _VOLATILE_PROFILE_FIELDS = {
 
 
 def _stable_profile_value(value):
+    """Remove volatile timestamps recursively before comparing profile values."""
     if isinstance(value, dict):
         return {key: _stable_profile_value(item) for key, item in sorted(value.items())
                 if key not in {"checked_at", "fetched_at", "updated_at"}}
@@ -46,6 +47,7 @@ def profile_state_changed(previous: dict | None, current: dict) -> bool:
 
 
 def classification_observation(row: dict) -> dict:
+    """Build the stable behavior observation consumed by IP classification."""
     recent_available = row.get("recent_updated_at") is not None
     return {
         "behavior_score": row.get("behavior_score", 0),
@@ -132,6 +134,7 @@ async def ensure_profile_postgres(ip: str, refresh: bool = False, change_reason:
 
 # Maintain compatibility with existing code calling ensure_profile
 async def ensure_profile(conn, ip: str, refresh: bool = False):
+    """Delegate legacy profile callers to the PostgreSQL enrichment path."""
     return await ensure_profile_postgres(ip, refresh)
 
 

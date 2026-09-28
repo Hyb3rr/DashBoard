@@ -3,6 +3,8 @@ import asyncio
 import pytest
 
 from app.collectors.websocket_collector import CollectorConfig, WebSocketCollector
+from app.collectors import batching
+from app.collectors.websocket_collector import utc_now
 from app.core.fast_detection import EarlyDetection
 from app.services import early_alerts as early_alerts_module
 from app.services.ai_runtime import AiRuntime
@@ -48,14 +50,15 @@ async def test_slow_ai_does_not_block_ingest_alert_or_storage(monkeypatch):
         "observe",
         lambda _line: [EarlyDetection("sensitive_path_probe", "/.env", "GET", "/.env", "203.0.113.10")],
     )
-    collector._stop.clear()
-    collector._storage_task = asyncio.create_task(collector._storage_loop())
+    collector.stop_event.clear()
+    collector.storage_worker.start()
     try:
-        await collector.handle_message(
+        await batching.handle_message(
+            collector,
             '{"type":"lines","items":["203.0.113.10 raw access line"]}',
-            0,
+            0, utc_now,
         )
-        await collector._storage_queue.join()
+        await collector.storage_worker.queue.join()
 
         assert detected and detected[0][1] == "203.0.113.10"
         assert committed and committed[0][0] == ["203.0.113.10 raw access line"]
@@ -64,9 +67,9 @@ async def test_slow_ai_does_not_block_ingest_alert_or_storage(monkeypatch):
     finally:
         release_ai.set()
         await runtime.stop()
-        collector._stop.set()
-        collector._storage_task.cancel()
-        await asyncio.gather(collector._storage_task, return_exceptions=True)
+        collector.stop_event.set()
+        collector.storage_worker.task.cancel()
+        await asyncio.gather(collector.storage_worker.task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

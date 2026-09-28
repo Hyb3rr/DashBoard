@@ -16,12 +16,14 @@ from app.db.ai_jobs import AiExplainJobRepository
 
 
 def _load_packets(path: Path) -> dict[str, dict]:
+    """Load CasePackets into a case-ID lookup map."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     cases = payload.get("cases", []) if isinstance(payload, dict) else payload
     return {str(item.get("case_packet", item)["case_id"]): item.get("case_packet", item) for item in cases}
 
 
 def _setting_float(name: str, default: float) -> float:
+    """Read a floating-point environment setting with a fallback."""
     try:
         return float(os.getenv(name, str(default)))
     except ValueError:
@@ -29,6 +31,7 @@ def _setting_float(name: str, default: float) -> float:
 
 
 def _endpoint_default() -> str:
+    """Resolve the configured local model endpoint URL."""
     explicit = os.getenv("LOCAL_REASONING_ENDPOINT", "").strip()
     if explicit:
         return explicit
@@ -40,6 +43,7 @@ def _endpoint_default() -> str:
 
 
 def main() -> int:
+    """Configure and run the dedicated AI explanation worker."""
     load_dotenv()
     parser = argparse.ArgumentParser(description="Run dedicated local AI explain worker")
     parser.add_argument("--packets", type=Path, required=True, help="Bounded CasePacket corpus/read model")
@@ -52,7 +56,7 @@ def main() -> int:
     args = parser.parse_args()
     endpoint = args.endpoint or _endpoint_default()
     model = args.model or os.getenv("FOUNDATION_SEC_MODEL_NAME", "Foundation-Sec-8B-Reasoning")
-    timeout = args.timeout if args.timeout is not None else _setting_float("LOCAL_REASONING_TIMEOUT_SECONDS", 30.0)
+    timeout = args.timeout if args.timeout is not None else _setting_float("LOCAL_REASONING_TIMEOUT_SECONDS", 180.0)
     poll_interval = args.poll_interval if args.poll_interval is not None else _setting_float("AI_EXPLAIN_POLL_INTERVAL_SECONDS", 1.0)
     stale_after = args.stale_after if args.stale_after is not None else _setting_float("AI_EXPLAIN_STALE_AFTER_SECONDS", timeout + 45.0)
     packets = _load_packets(args.packets)

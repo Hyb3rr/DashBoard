@@ -21,10 +21,12 @@ DEFAULT_LIMIT = 30
 
 
 def _canonical(value: Any) -> str:
+    """Serialize values deterministically for corpus fingerprinting."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _iso(value: Any, fallback: datetime) -> str:
+    """Normalize a timestamp to ISO format or use the snapshot fallback."""
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).isoformat()
     text = str(value or "")
@@ -32,6 +34,7 @@ def _iso(value: Any, fallback: datetime) -> str:
 
 
 def _rule_evidence(item: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    """Convert one persisted rule detection into unified evidence."""
     return UnifiedEvidence(
         source="rule",
         type="rule",
@@ -46,6 +49,7 @@ def _rule_evidence(item: dict[str, Any], observed_at: str) -> dict[str, Any]:
 
 
 def _evidence(row: dict[str, Any], ai_score: dict[str, Any] | None, snapshot_at: datetime) -> list[dict[str, Any]]:
+    """Collect deduplicated rule, rare-path, and persisted anomaly evidence."""
     observation = row.get("observation_payload") or {}
     observed_at = _iso(observation.get("evaluated_at_24h") or observation.get("evaluated_at"), snapshot_at)
     values: list[dict[str, Any]] = []
@@ -78,6 +82,7 @@ def _evidence(row: dict[str, Any], ai_score: dict[str, Any] | None, snapshot_at:
 
 
 def _reasons(row: dict[str, Any], evidence: list[dict[str, Any]], high_volume_threshold: int) -> list[str]:
+    """Derive reproducible corpus-selection reasons from state and evidence."""
     observation = row.get("observation_payload") or {}
     reasons = [f"classification_{str(row.get('label') or 'unknown').lower()}"]
     types = {item.get("type") for item in evidence}
@@ -96,6 +101,54 @@ def _reasons(row: dict[str, Any], evidence: list[dict[str, Any]], high_volume_th
     return reasons
 
 
+def _rank_candidates(rows: Iterable[dict[str, Any]], ai_scores: dict[str, dict[str, Any]],
+                     snapshot_at: datetime, high_volume_threshold: int) -> list[tuple]:
+    """Build and sort candidate records by reason count and stable IP order."""
+    candidates = []
+    for row in rows:
+        ip = str(row.get("identity_ip") or row.get("ip") or "")
+        if not ip:
+            continue
+        evidence = _evidence(row, ai_scores.get(ip), snapshot_at)
+        reasons = _reasons(row, evidence, high_volume_threshold)
+        candidates.append((len(reasons), ip, row, evidence, reasons))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates
+
+
+def _case_packet(ip: str, row: dict[str, Any], evidence: list[dict[str, Any]],
+                 traffic_for_ip: Callable, start: datetime, end: datetime) -> dict[str, Any]:
+    """Build one bounded CasePacket from classification, traffic, and evidence."""
+    traffic = traffic_for_ip(start, end, 3600, ip, settings.DATASET_LIVE_ID)
+    total = int(traffic.get("total_requests") or 0)
+    statuses = traffic.get("status_codes") or {}
+    return build_case_packet(
+        ip=ip,
+        classification={"label": row.get("label") or "unknown", "risk_score": row.get("classification_score") or 0, "confidence": row.get("classification_confidence") or 0},
+        window={"start": start.isoformat(), "end": end.isoformat()},
+        traffic_summary={"requests": total, "unique_paths": len(traffic.get("top_paths") or []), "status_4xx_ratio": round(int(statuses.get("4xx") or 0) / total, 4) if total else 0},
+        evidence=evidence,
+        representative_requests=traffic.get("recent_requests") or [],
+    )
+
+
+def _manifest(cases: list[dict[str, Any]], selection: dict[str, list[str]],
+              start: datetime, end: datetime) -> dict[str, Any]:
+    """Create the corpus provenance envelope and canonical content hash."""
+    corpus_hash = hashlib.sha256(_canonical(cases).encode("utf-8")).hexdigest()
+    return {
+        "manifest": {
+            "corpus_created_at": end.isoformat(),
+            "source_window": {"start": start.isoformat(), "end": end.isoformat()},
+            "corpus_sha256": corpus_hash,
+            "builder_version": BUILDER_VERSION,
+            "packet_count": len(cases),
+            "selection_reason": selection,
+        },
+        "cases": cases,
+    }
+
+
 def build_corpus(
     rows: Iterable[dict[str, Any]],
     traffic_for_ip: Callable[[datetime, datetime, int, str, str], dict[str, Any]],
@@ -107,37 +160,18 @@ def build_corpus(
     """Build deterministic packets from one PG snapshot and bounded CH reads."""
     end = snapshot_at.astimezone(timezone.utc)
     start = end - timedelta(hours=24)
-    candidates = []
-    for row in rows:
-        ip = str(row.get("identity_ip") or row.get("ip") or "")
-        if not ip:
-            continue
-        evidence = _evidence(row, (ai_scores or {}).get(ip), end)
-        reasons = _reasons(row, evidence, high_volume_threshold)
-        candidates.append((len(reasons), ip, row, evidence, reasons))
-    candidates.sort(key=lambda item: (-item[0], item[1]))
+    candidates = _rank_candidates(rows, ai_scores or {}, end, high_volume_threshold)
     selected = candidates[: max(1, min(int(limit), 30))]
     cases = []
     selection = {}
     for _, ip, row, evidence, reasons in selected:
-        observation = row.get("observation_payload") or {}
-        traffic = traffic_for_ip(start, end, 3600, ip, settings.DATASET_LIVE_ID)
-        total = int(traffic.get("total_requests") or 0)
-        statuses = traffic.get("status_codes") or {}
-        cases.append(build_case_packet(
-            ip=ip,
-            classification={"label": row.get("label") or "unknown", "risk_score": row.get("classification_score") or 0, "confidence": row.get("classification_confidence") or 0},
-            window={"start": start.isoformat(), "end": end.isoformat()},
-            traffic_summary={"requests": total, "unique_paths": len(traffic.get("top_paths") or []), "status_4xx_ratio": round(int(statuses.get("4xx") or 0) / total, 4) if total else 0},
-            evidence=evidence,
-            representative_requests=traffic.get("recent_requests") or [],
-        ))
+        cases.append(_case_packet(ip, row, evidence, traffic_for_ip, start, end))
         selection[ip] = reasons
-    corpus_hash = hashlib.sha256(_canonical(cases).encode("utf-8")).hexdigest()
-    return {"manifest": {"corpus_created_at": end.isoformat(), "source_window": {"start": start.isoformat(), "end": end.isoformat()}, "corpus_sha256": corpus_hash, "builder_version": BUILDER_VERSION, "packet_count": len(cases), "selection_reason": selection}, "cases": cases}
+    return _manifest(cases, selection, start, end)
 
 
 def main() -> int:
+    """Load live read models, build the corpus, and write its local artifact."""
     parser = argparse.ArgumentParser(description="Build an untracked real CasePacket corpus")
     parser.add_argument("--output", type=Path, default=Path("data/ai/corpora/foundation-sec-real.json"))
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)

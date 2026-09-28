@@ -16,15 +16,33 @@ logger = logging.getLogger(__name__)
 DEFAULT_STALE_AFTER_SECONDS = 75.0
 DEFAULT_PROVIDER_FAILURE_THRESHOLD = 3
 DEFAULT_PROVIDER_FAILURE_BACKOFF_SECONDS = 10.0
+_SAFE_PROVIDER_DIAGNOSTICS = {
+    "estimated_input_tokens",
+    "configured_input_budget_tokens",
+    "context_input_limit_tokens",
+}
 
 
 class ExplainJobRepository(Protocol):
-    def claim_pending(self) -> dict[str, Any] | None: ...
-    def persist_completed(self, job_id: str, analysis: dict[str, Any], validation: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any] | None: ...
-    def persist_failed(self, job_id: str, failure_code: str, validation_status: str, provider_status: str, provenance: dict[str, Any]) -> dict[str, Any] | None: ...
+    def claim_pending(self) -> dict[str, Any] | None:
+        """Atomically claim one pending explanation job."""
+        ...
+
+    def persist_completed(self, job_id: str, analysis: dict[str, Any], validation: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a validated explanation and its provenance."""
+        ...
+
+    def persist_failed(self, job_id: str, failure_code: str, validation_status: str, provider_status: str, provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a failed explanation with structured failure status."""
+        ...
+
+    def persist_abstained(self, job_id: str, reason: str, provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist an intentional local-reasoning budget abstention."""
+        ...
 
 
 def _failure_status(result: ReasoningResult, report: dict[str, Any]) -> tuple[str, str]:
+    """Map provider and grounding failures to persisted job status values."""
     if result.status == "too_large":
         return "too_large", "too_large"
     if result.status == "timeout":
@@ -49,6 +67,7 @@ class AiExplainWorker:
         provider_failure_threshold: int = DEFAULT_PROVIDER_FAILURE_THRESHOLD,
         provider_failure_backoff_seconds: float = DEFAULT_PROVIDER_FAILURE_BACKOFF_SECONDS,
     ) -> None:
+        """Configure dependencies, polling policy, and provider backoff state."""
         self.repository = repository
         self.provider = provider
         self.packet_loader = packet_loader
@@ -64,6 +83,7 @@ class AiExplainWorker:
         self._stop = False
 
     def _provenance(self, job: Mapping[str, Any], latency_ms: float = 0.0) -> dict[str, Any]:
+        """Build stable model and evidence provenance for one job attempt."""
         result = dict(self.provenance)
         result.setdefault("provider", "local_reasoning")
         result.setdefault("model", "unknown")
@@ -73,10 +93,22 @@ class AiExplainWorker:
         result["latency_ms"] = round(max(0.0, latency_ms), 2)
         return result
 
+    def _merge_provider_diagnostics(self, provenance: dict[str, Any], result: ReasoningResult) -> None:
+        """Copy only bounded numeric calibration metadata from the provider."""
+        diagnostics = result.diagnostics
+        if not isinstance(diagnostics, Mapping):
+            return
+        for key in _SAFE_PROVIDER_DIAGNOSTICS:
+            value = diagnostics.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                provenance[key] = value
+
     def stop(self) -> None:
+        """Signal the polling loop to finish after its current operation."""
         self._stop = True
 
     def run_once(self) -> bool:
+        """Claim and process at most one explanation job."""
         job = self.repository.claim_pending()
         if not job:
             return False
@@ -94,6 +126,10 @@ class AiExplainWorker:
             result = self.provider.explain(packet)
             latency_ms = (perf_counter() - started) * 1000
             provenance = self._provenance(job, latency_ms)
+            self._merge_provider_diagnostics(provenance, result)
+            if result.status == "abstained":
+                self.repository.persist_abstained(job_id, "local_reasoning_budget_exceeded", provenance)
+                return True
             report = evaluate_case(dict(packet), result, latency_ms, include_analysis=True)
             self._record_provider_result(result.status)
             if result.status == "received" and report["grounded"] and report["analysis"] is not None:
@@ -106,6 +142,7 @@ class AiExplainWorker:
         return True
 
     def _record_provider_result(self, status: str) -> None:
+        """Update consecutive provider failure count and backoff deadline."""
         if status in {"timeout", "unavailable", "http_error"}:
             self._consecutive_provider_failures += 1
             if self._consecutive_provider_failures >= self.provider_failure_threshold:
@@ -116,6 +153,7 @@ class AiExplainWorker:
             self._provider_backoff_until = 0.0
 
     def run_forever(self) -> None:
+        """Poll jobs, recover stale work, and back off after provider failures."""
         while not self._stop:
             now = time.monotonic()
             if now < self._provider_backoff_until:

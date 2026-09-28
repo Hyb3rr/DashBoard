@@ -21,10 +21,12 @@ FIREHOL_SOURCES = {
 
 
 def list_url(name: str) -> str:
+    """Return the configured FireHOL URL or derive its standard feed URL."""
     return FIREHOL_SOURCES.get(name, {}).get("url") or f"https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/{name}{'.netset' if name in NETSET_LISTS else '.ipset'}"
 
 
 def refresh_list(conn, name: str, category: str | None = None, url: str | None = None, cache_dir: Path | None = None) -> dict:
+    """Refresh one FireHOL list through the PostgreSQL intelligence adapter."""
     from .pg_intel import refresh_firehol
 
     return refresh_firehol(conn, name, category=category, url=url, cache_dir=cache_dir)

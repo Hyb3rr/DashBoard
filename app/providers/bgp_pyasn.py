@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 def lookup(ip: str, snapshot: str | Path | None = None) -> dict:
+    """Look up an IP's ASN from the configured local pyasn snapshot."""
     path = Path(snapshot or os.getenv("GEO_PYASN_DB_PATH", "data/geo/pyasn.dat"))
     if not path.is_file():
         return {}

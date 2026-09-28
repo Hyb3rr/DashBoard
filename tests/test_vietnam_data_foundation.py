@@ -1,3 +1,6 @@
+from urllib.error import HTTPError
+
+from scripts.market import vietnam_data_foundation as foundation
 from scripts.market.vietnam_data_foundation import PX_TABLES, PX_INDUSTRY_TABLES, HS6_PRODUCT_MAP, _all_query
 
 
@@ -26,3 +29,28 @@ def test_hs6_mapping_covers_fourteen_sellable_products_without_furniture_proxy()
 
 def test_current_momentum_uses_official_nso_iip_tables():
     assert PX_INDUSTRY_TABLES == {"E07.01.px": "national_iip_by_industry", "E07.02.px": "province_iip"}
+
+
+def test_px_source_collection_preserves_order_and_reports_independent_failures(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_download(table, output, **kwargs):
+        calls.append((table, kwargs.get("base", foundation.PX_BASE)))
+        if table == "E05.03.px":
+            raise HTTPError("https://example.test", 503, "unavailable", {}, None)
+        return {"dataset": kwargs.get("dataset") or PX_TABLES.get(table), "table": table}
+
+    monkeypatch.setattr(foundation, "download_px", fake_download)
+
+    reports = foundation._download_px_sources(tmp_path)
+
+    assert [table for table, _ in calls] == [*PX_TABLES, *PX_INDUSTRY_TABLES]
+    assert reports[0]["status"] == "failed"
+    assert reports[0]["rows"] is None
+    assert reports[0]["limitation"] == "Source fetch failed; row count is unknown."
+    assert reports[-1] == {
+        "dataset": "province_iip",
+        "table": "E07.02.px",
+        "status": "loaded",
+    }
+    assert calls[-1][1] == foundation.PX_INDUSTRY_BASE

@@ -24,6 +24,7 @@ class RetentionDecision:
     object_keys: tuple[str, ...]
 
     def as_dict(self) -> dict:
+        """Serialize the retention decision using JSON-compatible values."""
         return {
             "backup_set_id": self.backup_set_id,
             "decision": self.decision,
@@ -34,11 +35,13 @@ class RetentionDecision:
 
 
 def _timestamp(value: str) -> datetime:
+    """Parse an ISO timestamp and assume UTC when it has no timezone."""
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _valid_completed_set(manifest: dict, as_of: datetime) -> bool:
+    """Check that a backup set and both component manifests are complete."""
     if manifest.get("status") != "completed" or not manifest.get("backup_set_id"):
         return False
     try:
@@ -66,6 +69,7 @@ def _valid_completed_set(manifest: dict, as_of: datetime) -> bool:
 
 
 def _component_keys(manifest: dict) -> tuple[str, ...]:
+    """Return every blob key owned by a valid backup-set manifest."""
     keys = [manifest["_set_manifest_object_key"]] if manifest.get("_set_manifest_object_key") else []
     for name in ("postgres", "clickhouse"):
         component = manifest[name]
@@ -77,9 +81,24 @@ def plan_retention(manifests: list[dict], as_of: datetime | None = None,
                    daily_days: int = 7, weekly_weeks: int = 4,
                    monthly_months: int = 3) -> list[RetentionDecision]:
     """Return a deterministic plan. This function has no Azure mutation path."""
+    as_of = _utc_as_of(as_of)
+    valid, invalid = _partition_manifests(manifests, as_of)
+    keep_reasons = _retention_keep_reasons(
+        valid, as_of, daily_days, weekly_weeks, monthly_months
+    )
+    decisions = _decisions_for_valid_sets(valid, keep_reasons)
+    decisions.extend(_decisions_for_invalid_sets(invalid))
+    return sorted(decisions, key=lambda item: (item.completed_at or "", item.backup_set_id), reverse=True)
+
+
+def _utc_as_of(as_of: datetime | None) -> datetime:
+    """Return the planning time as a timezone-aware UTC datetime."""
     as_of = as_of or datetime.now(timezone.utc)
-    if as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=timezone.utc)
+    return as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+
+
+def _partition_manifests(manifests: list[dict], as_of: datetime) -> tuple[list, list[dict]]:
+    """Separate valid completed sets from manifests that must be protected."""
     valid, invalid = [], []
     for manifest in manifests:
         if not _valid_completed_set(manifest, as_of):
@@ -87,7 +106,12 @@ def plan_retention(manifests: list[dict], as_of: datetime | None = None,
             continue
         valid.append((manifest, _timestamp(manifest["completed_at"])))
     valid.sort(key=lambda item: (item[1], item[0]["backup_set_id"]), reverse=True)
+    return valid, invalid
 
+
+def _retention_keep_reasons(valid: list, as_of: datetime, daily_days: int,
+                            weekly_weeks: int, monthly_months: int) -> dict[str, set[str]]:
+    """Choose daily, completed-week, and completed-month backup representatives."""
     daily_by_day: dict[date, tuple[dict, datetime]] = {}
     weekly_by_week: dict[tuple[int, int], tuple[dict, datetime]] = {}
     monthly_by_month: dict[tuple[int, int], tuple[dict, datetime]] = {}
@@ -112,6 +136,11 @@ def plan_retention(manifests: list[dict], as_of: datetime | None = None,
         for _, (manifest, _) in records:
             keep_reasons.setdefault(manifest["backup_set_id"], set()).add(label)
 
+    return keep_reasons
+
+
+def _decisions_for_valid_sets(valid: list, keep_reasons: dict[str, set[str]]) -> list[RetentionDecision]:
+    """Create keep or delete-candidate decisions for validated backup sets."""
     decisions = []
     for manifest, _ in valid:
         backup_set_id = manifest["backup_set_id"]
@@ -123,6 +152,12 @@ def plan_retention(manifests: list[dict], as_of: datetime | None = None,
             completed_at=manifest["completed_at"],
             object_keys=_component_keys(manifest),
         ))
+    return decisions
+
+
+def _decisions_for_invalid_sets(invalid: list[dict]) -> list[RetentionDecision]:
+    """Protect invalid or incomplete manifests from retention deletion."""
+    decisions = []
     for manifest in invalid:
         decisions.append(RetentionDecision(
             backup_set_id=str(manifest.get("backup_set_id") or "unknown"),
@@ -131,10 +166,11 @@ def plan_retention(manifests: list[dict], as_of: datetime | None = None,
             completed_at=manifest.get("completed_at"),
             object_keys=(),
         ))
-    return sorted(decisions, key=lambda item: (item.completed_at or "", item.backup_set_id), reverse=True)
+    return decisions
 
 
 def _request(settings: BackupSettings, method: str, path: str) -> bytes:
+    """Make one authenticated read-only Azure Blob REST request."""
     endpoint = urlsplit(settings.endpoint)
     token = _credential(settings).get_token("https://storage.azure.com/.default").token
     connection = http.client.HTTPSConnection(endpoint.netloc, timeout=30)
@@ -180,6 +216,7 @@ def load_set_manifests(settings: BackupSettings) -> list[dict]:
 
 
 def main() -> None:
+    """Load backup manifests and print a dry-run retention plan."""
     parser = argparse.ArgumentParser(description="Plan Azure backup retention without deleting objects")
     parser.add_argument("--as-of", help="UTC ISO timestamp for deterministic planning")
     args = parser.parse_args()

@@ -12,12 +12,14 @@ _fixed_now: ContextVar[datetime | None] = ContextVar("fixed_now", default=None)
 
 
 def utcnow() -> datetime:
+    """Return the frozen test time or the current timezone-aware UTC time."""
     value = _fixed_now.get()
     return value or datetime.now(timezone.utc)
 
 
 @contextmanager
 def freeze(value: datetime) -> Iterator[None]:
+    """Temporarily override UTC time within the current context."""
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     token = _fixed_now.set(value.astimezone(timezone.utc))

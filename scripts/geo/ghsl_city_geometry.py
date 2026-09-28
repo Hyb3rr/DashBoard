@@ -12,6 +12,7 @@ GHSL_GEOMETRY_VERSION = "ghsl_ucdb_r2024a"
 _TO_MOLLWEIDE = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
 
 def country_name(iso3: str) -> str:
+    """Map an ISO3 code to the country label used by the GHSL dataset."""
     # GHSL uses the short English name for Vietnam while ISO/pycountry uses
     # the formal spelling "Viet Nam".
     if iso3.upper() == "VNM":
@@ -20,18 +21,21 @@ def country_name(iso3: str) -> str:
     return item.name if item else iso3.upper()
 
 def _gpkg_wkb(blob: bytes):
+    """Decode a GeoPackage geometry blob into a Shapely geometry."""
     if not blob or len(blob) < 8 or blob[:2] != b"GP":
         return None
     envelope = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get((blob[3] >> 1) & 7, 0)
     return from_wkb(blob[8 + envelope:])
 
 def h3_polygon_mollweide(cell_id: str) -> Polygon:
+    """Project one H3 cell boundary into Mollweide coordinates."""
     import h3
     boundary = h3.cell_to_boundary(cell_id)
     points = [_TO_MOLLWEIDE.transform(lon, lat) for lat, lon in boundary]
     return Polygon(points + [points[0]])
 
 def iter_city_polygons(path: Path, iso3: str, city_ids: set[str] | None = None) -> Iterator[dict[str, Any]]:
+    """Yield valid GHSL urban-centre polygons for one country."""
     wanted = {str(value) for value in city_ids} if city_ids is not None else None
     with sqlite3.connect(path) as conn:
         rows = conn.execute('SELECT ID_UC_G0,GC_UCN_MAI_2025,geom FROM "GHSL_UCDB_THEME_GEOGRAPHY_GLOBE_R2024A" WHERE GC_CNT_GAD_2025=?', (country_name(iso3),))

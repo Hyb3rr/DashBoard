@@ -30,7 +30,7 @@ for _ in $(seq 1 "${FOUNDATION_SEC_READY_ATTEMPTS:-180}"); do
   if curl --fail --silent "http://127.0.0.1:${LOCAL_REASONING_PORT}/health" >/dev/null 2>&1; then
     exec python3 -m scripts.ai.explain_case "$PACKET_PATH" --endpoint "$ENDPOINT" \
       --model "${FOUNDATION_SEC_MODEL_NAME:-Foundation-Sec-8B-Reasoning}" \
-      --timeout "${LOCAL_REASONING_TIMEOUT_SECONDS:-30}"
+      --timeout "${LOCAL_REASONING_TIMEOUT_SECONDS:-180}"
   fi
   sleep 1
 done

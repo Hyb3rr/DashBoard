@@ -15,10 +15,12 @@ _pool_lock = RLock()
 
 
 def configured() -> bool:
+    """Return whether a PostgreSQL DSN is configured for this process."""
     return bool(os.getenv("POSTGRES_DSN"))
 
 
 def connect():
+    """Open a PostgreSQL connection using the configured DSN and row mapping."""
     try:
         import psycopg
     except ImportError as exc:  # pragma: no cover - optional deployment extra
@@ -86,6 +88,7 @@ def open_pool() -> Any:
 
 
 def close_pool() -> None:
+    """Close and clear the process-local PostgreSQL connection pool."""
     global _pool, _pool_dsn, _pool_open
     with _pool_lock:
         if _pool is not None:
@@ -97,12 +100,14 @@ def close_pool() -> None:
 
 @contextmanager
 def transaction() -> Iterator[Any]:
+    """Yield a pooled connection inside a transaction scope."""
     with open_pool().connection() as conn:
         with conn.transaction():
             yield conn
 
 
 def health() -> dict[str, Any]:
+    """Check PostgreSQL reachability and return a bounded status result."""
     finish = metrics.timed("postgres.health_latency_ms")
     try:
         with transaction() as conn:
@@ -117,11 +122,7 @@ def health() -> dict[str, Any]:
 
 
 def ensure_schema() -> None:
-    """Apply schema during explicit deployment/test preparation only.
-
-    Application lifespan must not call this function: DDL can wait on live
-    ingest or intelligence transactions and create a lock convoy.
-    """
+    """Apply schema and seeds only during explicit bootstrap, never app startup."""
     schema_path = Path(__file__).resolve().parents[2] / "infra" / "postgres" / "001_initial.sql"
     sql = schema_path.read_text(encoding="utf-8")
     with transaction() as conn:

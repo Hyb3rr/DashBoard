@@ -12,10 +12,12 @@ class RealtimeBus:
     """Fan out notifications; durable change rows remain the source of truth."""
 
     def __init__(self) -> None:
+        """Create the process-local subscriber registry and synchronization lock."""
         self._subscriptions: set[_RealtimeSubscription] = set()
         self._lock = asyncio.Lock()
 
     async def publish(self, event: str, payload: dict[str, Any]) -> None:
+        """Fan out an event while coalescing pending durable cursor wake-ups."""
         async with self._lock:
             for subscription in tuple(self._subscriptions):
                 if event == "ip_changes" and subscription.ip_changes_pending:
@@ -30,12 +32,14 @@ class RealtimeBus:
                     subscription.ip_changes_pending = True
 
     async def open_subscription(self) -> "_RealtimeSubscription":
+        """Register and return a queue-backed realtime subscription."""
         subscription = _RealtimeSubscription(self)
         async with self._lock:
             self._subscriptions.add(subscription)
         return subscription
 
     async def subscribe(self):
+        """Yield bus events and acknowledge each one after consumer delivery."""
         subscription = await self.open_subscription()
         try:
             while True:
@@ -48,15 +52,18 @@ class RealtimeBus:
 
 class _RealtimeSubscription:
     def __init__(self, bus: RealtimeBus) -> None:
+        """Initialize a bounded queue and coalesced IP-change state."""
         self.bus = bus
         self.queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=100)
         self.ip_changes_pending = False
         self.latest_ip_changes: dict[str, Any] | None = None
 
     async def get(self) -> tuple[str, dict[str, Any]]:
+        """Wait for and return the next queued event."""
         return await self.queue.get()
 
     async def ack(self, event: str) -> None:
+        """Release or enqueue the latest cursor after an IP-change delivery."""
         if event != "ip_changes":
             return
         async with self.bus._lock:
@@ -68,5 +75,6 @@ class _RealtimeSubscription:
                 self.queue.put_nowait(("ip_changes", latest))
 
     async def close(self) -> None:
+        """Remove this subscription from the bus registry."""
         async with self.bus._lock:
             self.bus._subscriptions.discard(self)

@@ -1,3 +1,4 @@
+from scripts.geo import area_membership_refresh as membership
 from scripts.geo.area_membership_refresh import _load_boundaries, map_point_to_area
 
 
@@ -29,3 +30,42 @@ def test_boundary_loader_uses_only_persisted_adaptive_levels(tmp_path):
     )
     boundaries, _ = _load_boundaries("KOR", "KR", tmp_path, {1})
     assert boundaries == []
+
+
+def test_refresh_isolates_country_failures_and_clears_unmapped_membership(monkeypatch):
+    class Repository:
+        def __init__(self):
+            self.states = []
+            self.received_updates = []
+
+        def country_iso3(self, country):
+            return "AAA" if country == "AA" else None
+
+        def administrative_levels(self, _country):
+            return {2}
+
+        def get_job_state(self, _key):
+            return None
+
+        def list_local_cells_for_mapping(self, _country):
+            return [{"h3_cell_id": "cell-a", "area_id": "stale-area"}]
+
+        def update_local_area_membership(self, updates):
+            self.received_updates.extend(updates)
+            return 1
+
+        def upsert_job_state(self, state):
+            self.states.append(state)
+
+    repo = Repository()
+    monkeypatch.setattr(membership, "_load_boundaries", lambda *_args: ([], "source-hash"))
+    monkeypatch.setattr(membership, "h3_centroid", lambda _cell: (0.0, 0.0))
+    monkeypatch.setattr(membership, "map_point_to_area", lambda _point, _boundaries: None)
+
+    result = membership.refresh_area_membership(repo, countries=["AA", "BB"])
+
+    assert result["status"] == "partial"
+    assert result["countries"]["AA"]["status"] == "updated"
+    assert result["countries"]["BB"]["status"] == "failed"
+    assert repo.received_updates == [{"h3_cell_id": "cell-a", "area_id": None}]
+    assert [state["status"] for state in repo.states] == ["processing", "done", "failed"]

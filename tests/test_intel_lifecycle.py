@@ -91,3 +91,22 @@ def test_provider_success_status_behavior_is_unchanged(monkeypatch):
     assert connection.commits == 1
     assert connection.rollbacks == 0
     assert any("intel_source_status" in args[0] for args in connection.executed)
+
+
+def test_logical_provider_rejection_rolls_back_before_failure_status(monkeypatch):
+    provider_conn = _Connection()
+    status_conn = _Connection()
+    connections = iter((provider_conn, status_conn))
+    monkeypatch.setattr(intel_updater.postgres, "connect", lambda: next(connections))
+
+    def reject_after_write(conn):
+        conn.execute("UPDATE threat_indicators SET active=false")
+        return {"status": "failed", "error": "snapshot unexpectedly smaller", "records_upserted": 0}
+
+    result = intel_updater._run_provider_pg(reject_after_write, "test_source", None)
+
+    assert result["status"] == "failed"
+    assert provider_conn.rollbacks == 1
+    assert provider_conn.commits == 0
+    assert status_conn.commits == 1
+    assert any("intel_source_status" in args[0] for args in status_conn.executed)

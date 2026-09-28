@@ -10,6 +10,7 @@ _searchers = {}
 
 
 def lookup(ip: str) -> dict:
+    """Return local ip2region context for an IP without making network calls."""
     address = ipaddress.ip_address(ip)
     import ip2region.searcher as xdb
     import ip2region.util as util

@@ -7,23 +7,29 @@ from typing import Any
 
 from ..config.settings import TOR_EXIT_LIST
 from .evidence import UnifiedEvidence
+from .enrichment_geo import apply_geo_resolution as _apply_geo_resolution
+from .enrichment_geo import normalize_geo_candidates as _normalize_geo_candidates
+from .enrichment_policy import (
+    abuse_reputation_state,
+    anonymization_summary as _anonymization_summary,
+    append_geo_configuration_warning as _append_geo_configuration_warning,
+    enrichment_statuses as _enrichment_statuses,
+    identity_confidence as _identity_confidence,
+    intel_tags_for_abuse,
+    network_flags as _network_flags,
+    risk as _risk,
+    status_from_fields as _status_from_fields,
+)
 from ..services.geo_bounds import bounds_for
-from ..services.geo_normalization import normalize_geoip, normalize_geofeed, normalize_ip2region, normalize_rir, normalize_sapics_country
 from ..services.geo_resolution import resolve_geo_records
 from ..services.geo_validation import validate_records
 from ..services.geonames_hierarchy import GeoNamesHierarchy
 
 
-def resolve_network_location(*args, **kwargs):
+def resolve_network_location(ip: str, vendor: dict | None = None, force_refresh: bool = False) -> dict:
+    """Resolve an IP through the PostgreSQL-backed network location store."""
     from ..db.pg_intelligence import resolve_network_location as resolve_pg
-    force_refresh = kwargs.get("force_refresh", False)
-    if len(args) >= 2 and isinstance(args[0], (str, ipaddress.IPv4Address, ipaddress.IPv6Address)):
-        return resolve_pg(str(args[0]), args[1] if len(args) > 1 else kwargs.get("vendor"), force_refresh=force_refresh)
-    if len(args) >= 2:  # legacy (conn, ip, vendor) signature
-        return resolve_pg(str(args[1]), args[2] if len(args) > 2 else kwargs.get("vendor"), force_refresh=force_refresh)
-    if len(args) == 1:
-        return resolve_pg(str(args[0]), kwargs.get("vendor"), force_refresh=force_refresh)
-    return resolve_pg(kwargs.get("ip", ""), kwargs.get("vendor"), force_refresh=force_refresh)
+    return resolve_pg(str(ip), vendor, force_refresh=force_refresh)
 
 
 try:
@@ -39,10 +45,12 @@ _geo_hierarchy_cache: dict[str, GeoNamesHierarchy | None] = {}
 
 
 def _now() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _address_scope(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Classify an IP address by its special-use or public scope."""
     if address.is_loopback:
         return "loopback"
     if address.is_link_local:
@@ -67,6 +75,7 @@ def _address_scope(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> st
 
 
 def _geo_hierarchy() -> GeoNamesHierarchy | None:
+    """Load and cache the optional GeoNames administrative hierarchy."""
     path_text = os.getenv("GEONAMES_HIERARCHY_PATH", "data/geonames/hierarchy.json").strip()
     if not path_text:
         return None
@@ -81,6 +90,7 @@ def _geo_hierarchy() -> GeoNamesHierarchy | None:
 
 
 def _present(value) -> bool:
+    """Return whether an enrichment value is available."""
     return value is not None and value != ""
 
 
@@ -116,6 +126,7 @@ def build_enrichment_evidence(data: dict[str, Any], observed_at: str | None = No
 
 
 def _reader(kind: str, path: str, factory):
+    """Reuse a local database reader for the same provider and path."""
     key = (kind, path)
     cached = _reader_cache.get(key)
     if cached is None:
@@ -125,6 +136,7 @@ def _reader(kind: str, path: str, factory):
 
 
 def _merge(base: dict, incoming: dict, provider: str, field_sources: dict) -> list[str]:
+    """Fill missing profile fields while recording their source."""
     filled = []
     for field, value in incoming.items():
         if _present(value) and not _present(base.get(field)):
@@ -135,6 +147,7 @@ def _merge(base: dict, incoming: dict, provider: str, field_sources: dict) -> li
 
 
 def _provider_state(status: dict, name: str, state: str, error: str | None = None) -> None:
+    """Record a configured provider's latest local lookup status."""
     if state == "not_configured":
         return
     status[name] = {"status": state, "checked_at": _now()}
@@ -142,37 +155,8 @@ def _provider_state(status: dict, name: str, state: str, error: str | None = Non
         status[name]["error"] = error
 
 
-def _status_from_fields(fields: tuple[str, ...], result: dict) -> str:
-    present = sum(1 for field in fields if _present(result.get(field)))
-    if present == 0:
-        return "failed"
-    if present == len(fields):
-        return "complete"
-    return "partial"
-
-
-def _network_flags(organization: str | None, isp: str | None) -> dict:
-    text = f"{organization or ''} {isp or ''}".lower()
-    hosting_words = ("hosting", "cloud", "data center", "datacenter", "server", "vps", "compute")
-    cdn_words = ("cloudflare", "akamai", "fastly", "cdn")
-    is_hosting = any(word in text for word in hosting_words)
-    if any(word in text for word in cdn_words):
-        network_type = "cdn"
-    elif is_hosting:
-        network_type = "hosting/datacenter"
-    elif text.strip():
-        network_type = "isp/unknown"
-    else:
-        network_type = "unknown"
-    return {
-        "is_hosting": is_hosting if text.strip() else None,
-        "is_vpn": None,
-        "is_proxy": None,
-        "network_type": network_type,
-    }
-
-
 def _anonymous_ip(ip: str) -> tuple[dict, list[str], str]:
+    """Read optional VPN, proxy, Tor, and hosting flags from MaxMind."""
     path = os.getenv("MAXMIND_ANONYMOUS_DB", "").strip()
     if not path:
         return {}, [], "not_configured"
@@ -197,6 +181,7 @@ def _anonymous_ip(ip: str) -> tuple[dict, list[str], str]:
 
 
 def _cidr_flag(ip: str, env_name: str, label: str) -> tuple[dict, list[str], str]:
+    """Check an IP against a configured local VPN or proxy CIDR list."""
     path = os.getenv(env_name, "").strip()
     if not path:
         return {}, [], "not_configured"
@@ -224,67 +209,6 @@ def _cidr_flag(ip: str, env_name: str, label: str) -> tuple[dict, list[str], str
         return {}, [f"{label}: {type(exc).__name__}: {exc}"], "failed"
 
 
-def _identity_confidence(organization: str | None, asn: str | int | None, network_type: str | None) -> tuple[int, list[str]]:
-    evidence = []
-    if organization:
-        evidence.append("Organization from local network database")
-    if asn:
-        evidence.append("ASN present")
-    if network_type:
-        evidence.append(f"Network type: {network_type}")
-    if not organization:
-        return 0, ["No organization signal in local databases"]
-    if network_type in ("hosting/datacenter", "cdn"):
-        return 80, evidence + ["Likely network owner, not visitor identity"]
-    if asn:
-        return 70, evidence + ["Network owner confidence only"]
-    return 45, evidence + ["Weak organization signal"]
-
-
-def _risk(data: dict) -> tuple[int, str, list[str]]:
-    # Local-only risk. No online reputation lookup is performed here.
-    score, evidence = 0, []
-    for field, points, label in (
-        ("is_tor", 55, "Tor exit node signal"),
-        ("is_proxy", 35, "Proxy signal from local database"),
-        ("is_vpn", 30, "VPN signal from local database"),
-        ("is_hosting", 20, "Hosting/datacenter signal"),
-    ):
-        if data.get(field):
-            score += points
-            evidence.append(label)
-    score = min(score, 100)
-    level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
-    return score, level, evidence
-
-
-def abuse_reputation_state(threat_indicators=None, provider_status=None) -> dict:
-    """Derive reputation visibility without contributing to detection score."""
-    sources = {
-        str(item.get("source"))
-        for item in (threat_indicators or [])
-        if isinstance(item, dict) and item.get("source")
-    }
-    sources.update(
-        str(source) for source in (provider_status or {})
-        if str(source) in {"firehol:abuseipdb_1d", "firehol:abuseipdb_30d"}
-    )
-    hit_1d = "firehol:abuseipdb_1d" in sources
-    hit_30d = "firehol:abuseipdb_30d" in sources
-    state = "persistent" if hit_1d and hit_30d else "recent" if hit_1d else "historical" if hit_30d else "none"
-    return {
-        "state": state,
-        "recent_hit": hit_1d,
-        "history_30d_hit": hit_30d,
-        "sources": [source for source in ("firehol:abuseipdb_1d", "firehol:abuseipdb_30d") if source in sources],
-    }
-
-
-def intel_tags_for_abuse(abuse_reputation: dict | None) -> list[str]:
-    state = (abuse_reputation or {}).get("state", "none")
-    return [f"intel:abuse_{state}"] if state in {"recent", "historical", "persistent"} else []
-
-
 def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
     """Read normalized intelligence snapshot from PostgreSQL."""
     from ..db.pg_intelligence import local_intelligence
@@ -292,6 +216,7 @@ def _local_intelligence(ip: str) -> tuple[dict, dict, dict, list[str]]:
 
 
 def _maxmind(ip: str) -> tuple[dict, list[str], str]:
+    """Read configured local MaxMind City and ASN databases."""
     city_path = os.getenv("MAXMIND_CITY_DB")
     asn_path = os.getenv("MAXMIND_ASN_DB")
     if not city_path and not asn_path:
@@ -343,6 +268,7 @@ def _maxmind(ip: str) -> tuple[dict, list[str], str]:
 
 
 def _tor_exit_list(ip: str) -> tuple[dict, list[str], str]:
+    """Check a local Tor exit list and cache its parsed contents."""
     path = os.getenv("TOR_EXIT_LIST_PATH")
     if not path:
         default = TOR_EXIT_LIST
@@ -369,102 +295,61 @@ def _tor_exit_list(ip: str) -> tuple[dict, list[str], str]:
         return {}, [f"Tor exit list: {type(exc).__name__}: {exc}"], "failed"
 
 
-async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
-    """Local-only IP enrichment.
+def _stale_hours() -> int:
+    """Read the configured enrichment freshness window with a safe default."""
+    try:
+        return max(1, int(os.getenv("STALE_HOURS", "72")))
+    except ValueError:
+        return 72
 
-    No HTTP requests, DNS lookups, Tor downloads or reputation APIs are used.
-    Priority is map data first: country/country_code/latitude/longitude.
-    """
-    address = ipaddress.ip_address(ip)
-    if not address.is_global:
-        fetched_at = _now()
-        try:
-            stale_hours = max(1, int(os.getenv("STALE_HOURS", "72")))
-        except ValueError:
-            stale_hours = 72
-        return {
-            "ip": str(address),
-            "is_private": True,
-            "address_scope": _address_scope(address),
-            "risk_score": 0,
-            "risk_level": "not_applicable",
-            "evidence": ["Non-public address"],
-            "sources": [],
-            "identity_evidence": ["Non-public address"],
-            "field_sources": {},
-            "provider_status": {},
-            "fetched_at": fetched_at,
-            "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=stale_hours)).isoformat(),
-            "organization_confidence": 0,
-            "reputation": [],
-            "provider_errors": [],
-            "enrichment_status": "complete",
-            "core_enrichment_status": "complete",
-            "privacy_enrichment_status": "unknown",
-            "threat_enrichment_status": "unknown",
-            "next_retry_at": None,
-            "enrichment_attempts": attempt,
-            "is_hosting": None,
-            "is_vpn": None,
-            "is_proxy": None,
-            "proxy_type": None,
-            "is_tor": None,
-            "abuse_score": None,
-            "abuse_reports": None,
-            "network_type": "private/non-public",
-            "network_location": None,
-            "location_confidence": 0,
-            "location_disputed": False,
-            "anonymization": {"is_vpn": None, "is_proxy": None, "is_hosting": None, "is_tor": None, "confidence": 0, "sources": []},
-        }
 
-    ip_text = str(address)
-    result = {
-        "ip": ip_text,
-        "is_private": False,
-        "address_scope": "public",
+def _non_public_result(address: ipaddress.IPv4Address | ipaddress.IPv6Address, attempt: int) -> dict:
+    """Build the stable enrichment response for non-public IP addresses."""
+    fetched_at = _now()
+    return {
+        "ip": str(address),
+        "is_private": True,
+        "address_scope": _address_scope(address),
+        "risk_score": 0,
+        "risk_level": "not_applicable",
+        "evidence": ["Non-public address"],
+        "sources": [],
+        "identity_evidence": ["Non-public address"],
+        "field_sources": {},
+        "provider_status": {},
+        "fetched_at": fetched_at,
+        "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=_stale_hours())).isoformat(),
+        "organization_confidence": 0,
+        "reputation": [],
+        "provider_errors": [],
+        "enrichment_status": "complete",
+        "core_enrichment_status": "complete",
+        "privacy_enrichment_status": "unknown",
+        "threat_enrichment_status": "unknown",
+        "next_retry_at": None,
+        "enrichment_attempts": attempt,
         "is_hosting": None,
         "is_vpn": None,
         "is_proxy": None,
         "proxy_type": None,
         "is_tor": None,
-        "reputation": [],
         "abuse_score": None,
         "abuse_reports": None,
-        "network_type": None,
-        "ip_prefix": None,
+        "network_type": "private/non-public",
+        "network_location": None,
+        "location_confidence": 0,
+        "location_disputed": False,
+        "anonymization": {"is_vpn": None, "is_proxy": None, "is_hosting": None, "is_tor": None, "confidence": 0, "sources": []},
     }
-    field_sources: dict[str, str] = {}
-    provider_status: dict[str, dict] = {}
-    errors: list[str] = []
-    sources: list[str] = []
 
-    local, local_status, local_fields, local_errors = await asyncio.to_thread(_local_intelligence, ip_text)
-    _merge(result, local, "local intelligence", field_sources)
-    field_sources.update(local_fields)
-    provider_status.update(local_status)
-    errors.extend(local_errors)
-    if local:
-        sources.append("local intelligence")
 
-    # 1) SAPICS local MMDB layer owns Geo/ASN data. No provider API or direct
-    # MaxMind/DB-IP download is used here.
-    # The _maxmind and _tor_exit_list calls are synchronous, blocking
-    # disk/mmap reads. Running each one via asyncio.to_thread means the event
-    # loop is free while the read happens, so when the caller (main.py) fires
-    # off several lookup(ip) coroutines at once with asyncio.gather, the actual
-    # file reads for *different IPs* genuinely overlap on OS threads instead of
-    # running one-IP-at-a-time. Reader objects are still cached/reused (see
-    # _reader_cache) so this doesn't reopen the mmap per call.
+async def _resolve_global_geo(ip_text: str, refresh: bool, result: dict, field_sources: dict, errors: list[str], sources: list[str]) -> None:
+    """Resolve local geo candidates and merge the canonical operational location."""
     mm = {}
-
-    # Prefix and ASN resolution is local-only. The updater populates the
-    # snapshots; this fallback lets MaxMind remain useful before the first
-    # global snapshot has been built.
     try:
         def resolve_local():
-            return resolve_network_location(None, ip_text, mm, force_refresh=refresh)
-
+            """Read the cached PostgreSQL network mapping for one IP."""
+            return resolve_network_location(ip_text, mm, force_refresh=refresh)
 
         geo = await asyncio.to_thread(resolve_local)
         sapics = {}
@@ -479,6 +364,7 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
             ip2region = await asyncio.to_thread(ip2region_lookup, ip_text)
         except Exception as exc:
             errors.append(f"ip2region local resolver: {type(exc).__name__}: {exc}")
+
         origin_asn = sapics.get("asn", {})
         if origin_asn.get("number") is not None:
             result["asn"] = origin_asn["number"]
@@ -486,156 +372,58 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         if origin_asn.get("organization"):
             result["organization"] = origin_asn["organization"]
             field_sources["organization"] = "SAPICS origin-asn"
-        owner_override = False
-        if geo.get("country_code") or sapics.get("country", {}).get("value"):
-            sap_country = sapics.get("country", {})
-            sap_city = sapics.get("city", {})
-            normalized = [
-                normalize_sapics_country(source, value)
-                for source, value in (sap_country.get("candidates") or {}).items()
-                if value
-            ]
-            normalized.extend(
-                normalize_geoip(source.removesuffix("_city"), value)
-                for source, value in (sap_city.get("candidates") or {}).items()
-                if value
-            )
-            if geo.get("country_code"):
-                owner_override = any("geofeed" in str(source).lower() for source in geo.get("sources", []))
-                normalized.append(normalize_geofeed(geo.get("country_code"), region=geo.get("region"), city=geo.get("city"), verified=True) if owner_override else normalize_geoip("global_geo", geo))
-            registration = geo.get("registration") or {}
-            if registration.get("country_code"):
-                normalized.append(normalize_rir(registration.get("source", "unknown"), registration.get("country_code")))
-            if ip2region:
-                normalized.append(normalize_ip2region(ip2region))
-            codes = {str(record.get("country_code")).upper() for record in normalized if record.get("country_code")}
-            validated = await asyncio.to_thread(validate_records, normalized, country_bounds=await asyncio.to_thread(bounds_for, codes))
-            hierarchy = await asyncio.to_thread(_geo_hierarchy)
-            resolve_kwargs = {
-                "registration_context": registration,
-                "evidence": [{"type": "context_validation", "source": "ip2region",
-                               "value": ip2region, "role": "supporting_context_only",
-                               "confidence": None}] if ip2region else [],
-            }
-            if hierarchy is not None:
-                resolve_kwargs["hierarchy"] = hierarchy
-            canonical = resolve_geo_records(validated, **resolve_kwargs)
-            resolved = canonical["resolved"]
-            selected_code = resolved.get("country_code")
-            selected_country = selected_code
-            selected_city = resolved.get("city")
-            selected_lat = resolved.get("latitude")
-            selected_lon = resolved.get("longitude")
-            status = canonical["status"]
-            location_status = "disputed" if "disputed" in status.values() else "resolved_with_conflict" if "probable" in status.values() else "resolved"
-            country_candidates = canonical["candidates"].get("country", [])
-            city_candidates = canonical["candidates"].get("city", [])
-            result["network_location"] = {
-                "country": selected_country,
-                "country_code": selected_code,
-                "city": selected_city,
-                "latitude": selected_lat,
-                "longitude": selected_lon,
-                "coordinate_granularity": "city" if selected_lat is not None and selected_lon is not None else "unknown",
-                "confidence": canonical["confidence"].get("country") or 0,
-                "disputed": location_status == "disputed",
-                "location_status": location_status,
-                "scope": "network",
-                "sources": [record.get("source") for record in validated if record.get("scope") == "network_operational"],
-                "confidence_breakdown": canonical["confidence"],
-                # See db-backed branch above: registration (RIR/WHOIS) is kept
-                # separate from operational country and is not itself a
-                # dispute signal - check allocation_pattern instead.
-                "registration": registration,
-                "allocation_pattern": geo.get("allocation_pattern", "unknown"),
-                "volatile_location": geo.get("volatile_location", False),
-                "geo": sapics,
-                "ip2region": ip2region,
-                "canonical_resolution": canonical,
-                "country_conflict": len(country_candidates) > 1,
-                "country_status": status.get("country", "unknown"),
-                "country_conflict_severity": sap_country.get("conflict_severity", "none"),
-                "city_conflict": len(city_candidates) > 1 or status.get("city") == "disputed",
-                "city_status": status.get("city", "unknown"),
-                "city_conflict_severity": sap_city.get("conflict_severity", "none"),
-                "coordinate_conflict": status.get("coordinates") == "disputed" or bool(sap_city.get("coordinate_conflict")),
-                "cross_region_infrastructure": sapics.get("infrastructure", {}).get("cross_region", False),
-            }
-            for field, value in (("country", selected_country), ("country_code", selected_code),
-                                 ("city", selected_city), ("latitude", selected_lat), ("longitude", selected_lon)):
-                if value is not None:
-                    result[field] = value
-                    field_sources[field] = "SAPICS" if not owner_override else "owner-declared + SAPICS"
-            for field in ("ip_prefix", "network_type"):
-                if geo.get(field) is not None:
-                    result[field] = geo[field]
-                    field_sources[field] = ", ".join(geo.get("sources", [])) or "geo resolver"
-            result["location_confidence"] = geo.get("confidence", 0)
-            result["location_disputed"] = bool(geo.get("disputed"))
-            result["location_scope"] = geo.get("scope", "network")
-            sources.append("global geo resolver")
+
+        if not (geo.get("country_code") or sapics.get("country", {}).get("value")):
+            return
+
+        normalized, registration, owner_override = _normalize_geo_candidates(geo, sapics, ip2region)
+        codes = {str(record.get("country_code")).upper() for record in normalized if record.get("country_code")}
+        country_bounds = await asyncio.to_thread(bounds_for, codes)
+        validated = await asyncio.to_thread(validate_records, normalized, country_bounds=country_bounds)
+        hierarchy = await asyncio.to_thread(_geo_hierarchy)
+        resolve_kwargs = {
+            "registration_context": registration,
+            "evidence": [{"type": "context_validation", "source": "ip2region", "value": ip2region,
+                          "role": "supporting_context_only", "confidence": None}] if ip2region else [],
+        }
+        if hierarchy is not None:
+            resolve_kwargs["hierarchy"] = hierarchy
+        canonical = resolve_geo_records(validated, **resolve_kwargs)
+        _apply_geo_resolution(canonical, validated, registration, geo, sapics, ip2region,
+                              owner_override, result, field_sources, sources)
     except Exception as exc:
         errors.append(f"Global geo resolver: {type(exc).__name__}: {exc}")
 
-    # 2) MaxMind City/ASN is a local fallback when the local resolver has no
-    # mapping. It never overrides SAPICS/global-geo fields selected above.
-    maxmind, maxmind_errors, maxmind_state = await asyncio.to_thread(_maxmind, ip_text)
-    errors.extend(maxmind_errors)
-    _provider_state(provider_status, "MaxMind City/ASN", maxmind_state, maxmind_errors[0] if maxmind_errors else None)
-    if _merge(result, maxmind, "MaxMind City/ASN", field_sources):
-        sources.append("MaxMind City/ASN")
 
-    # 3) Optional MaxMind Anonymous IP database provides real VPN/proxy flags.
-    anonymous, anonymous_errors, anonymous_state = await asyncio.to_thread(_anonymous_ip, ip_text)
-    errors.extend(anonymous_errors)
-    _provider_state(provider_status, "MaxMind Anonymous IP", anonymous_state, anonymous_errors[0] if anonymous_errors else None)
-    if _merge(result, anonymous, "MaxMind Anonymous IP", field_sources):
-        sources.append("MaxMind Anonymous IP")
+def _record_provider_result(name: str, data: dict, provider_errors: list[str], state: str, result: dict,
+                            field_sources: dict, provider_status: dict, errors: list[str], sources: list[str]) -> None:
+    """Merge one provider result and preserve its status and provenance."""
+    errors.extend(provider_errors)
+    _provider_state(provider_status, name, state, provider_errors[0] if provider_errors else None)
+    if _merge(result, data, name, field_sources):
+        sources.append(name)
 
-    # 4) Optional local CIDR lists are explicit, auditable VPN/proxy sources.
-    for env_name, label in (("VPN_NETWORKS_PATH", "VPN CIDR list"), ("PROXY_NETWORKS_PATH", "Proxy CIDR list")):
-        matched, matched_errors, matched_state = await asyncio.to_thread(_cidr_flag, ip_text, env_name, label)
-        errors.extend(matched_errors)
-        _provider_state(provider_status, label, matched_state, matched_errors[0] if matched_errors else None)
-        if _merge(result, matched, label, field_sources):
-            sources.append(label)
 
-    # 5) Tor remains a separate local privacy source.
-    tor, tor_errors, tor_state = await asyncio.to_thread(_tor_exit_list, ip_text)
-    errors.extend(tor_errors)
-    _provider_state(provider_status, "Tor exit list", tor_state, tor_errors[0] if tor_errors else None)
-    if _merge(result, tor, "Tor exit list", field_sources):
-        sources.append("Tor exit list")
-
+def _apply_network_flag_defaults(result: dict, field_sources: dict) -> None:
+    """Fill missing network flags from local organization heuristics."""
     flags = _network_flags(result.get("organization"), result.get("isp"))
     for field, value in flags.items():
         if result.get(field) is None and _present(value):
             result[field] = value
             field_sources[field] = "local heuristic"
 
+
+def _finalize_lookup(result: dict, attempt: int, field_sources: dict, provider_status: dict,
+                     errors: list[str], sources: list[str]) -> dict:
+    """Derive final status, confidence, risk, and freshness fields."""
+    _apply_network_flag_defaults(result, field_sources)
     confidence, identity_evidence = _identity_confidence(
         result.get("organization"), result.get("asn"), result.get("network_type")
     )
-
-    # Mapping completion requires only the fields necessary to put a point on a map.
-    core_status = _status_from_fields(
-        ("country", "country_code", "latitude", "longitude"), result
-    )
-
-    privacy_fields = ("is_vpn", "is_proxy", "is_hosting", "is_tor")
-    privacy_status = "complete" if all(result.get(f) is not None for f in privacy_fields) else "unknown"
-    if any(result.get(f) is True for f in ("is_vpn", "is_proxy", "is_hosting")):
-        privacy_status = "partial" if privacy_status == "unknown" else privacy_status
-    threat_status = "complete" if any(k == "threat_indicators" for k in result) else "unknown"
-    result["abuse_reputation"] = abuse_reputation_state(
-        result.get("threat_indicators"), provider_status
-    )
+    core_status, privacy_status, threat_status = _enrichment_statuses(result)
+    result["abuse_reputation"] = abuse_reputation_state(result.get("threat_indicators"), provider_status)
 
     fetched_at = _now()
-    try:
-        stale_hours = max(1, int(os.getenv("STALE_HOURS", "72")))
-    except ValueError:
-        stale_hours = 72
     result.update({
         "organization_confidence": confidence,
         "identity_evidence": identity_evidence + errors,
@@ -643,13 +431,13 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         "provider_status": provider_status,
         "sources": list(dict.fromkeys(sources)),
         "fetched_at": fetched_at,
-        "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=stale_hours)).isoformat(),
+        "privacy_recheck_due_at": (datetime.fromisoformat(fetched_at) + timedelta(hours=_stale_hours())).isoformat(),
         "provider_errors": errors,
         "core_enrichment_status": core_status,
         "privacy_enrichment_status": privacy_status,
         "threat_enrichment_status": threat_status,
         "enrichment_status": core_status,
-        "next_retry_at": None,  # local-only pass does not schedule online retries
+        "next_retry_at": None,
         "enrichment_attempts": attempt,
         "network_location": result.get("network_location"),
         "location_confidence": result.get("location_confidence", 0),
@@ -659,28 +447,54 @@ async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
         "asn_source": field_sources.get("asn"),
         "geo_sources": result.get("network_location", {}).get("sources", []),
         "geo_resolved_at": fetched_at,
-        "anonymization": {
-            "is_vpn": result.get("is_vpn"),
-            "is_proxy": result.get("is_proxy"),
-            "is_hosting": result.get("is_hosting"),
-            "is_tor": result.get("is_tor"),
-            "confidence": max(
-                (80 if result.get("is_tor") is not None else 0),
-                (70 if result.get("is_vpn") is not None or result.get("is_proxy") is not None else 0),
-                (60 if result.get("is_hosting") is not None else 0),
-            ),
-            "sources": [name for name in sources if "MaxMind Anonymous" in name or "Tor" in name or "local intelligence" in name or "VPN" in name or "Proxy" in name],
-        },
+        "anonymization": _anonymization_summary(result, sources),
     })
     result["risk_score"], result["risk_level"], result["evidence"] = _risk(result)
-
-    geo_provider_active = any(
-        provider_status.get(name, {}).get("status") in {"active", "partial"}
-        for name in ("MaxMind City/ASN",)
-    )
-    if core_status == "failed" and not geo_provider_active:
-        result["provider_errors"].append(
-            "No local GeoIP database configured. Run SAPICS release updater or configure MaxMind City/ASN."
-        )
-
+    _append_geo_configuration_warning(result, core_status, provider_status)
     return result
+
+
+async def lookup(ip: str, attempt: int = 1, refresh: bool = False) -> dict:
+    """Enrich an IP from local stores and datasets without network requests."""
+    address = ipaddress.ip_address(ip)
+    if not address.is_global:
+        return _non_public_result(address, attempt)
+
+    ip_text = str(address)
+    result = {
+        "ip": ip_text, "is_private": False, "address_scope": "public",
+        "is_hosting": None, "is_vpn": None, "is_proxy": None, "proxy_type": None,
+        "is_tor": None, "reputation": [], "abuse_score": None, "abuse_reports": None,
+        "network_type": None, "ip_prefix": None,
+    }
+    field_sources: dict[str, str] = {}
+    provider_status: dict[str, dict] = {}
+    errors: list[str] = []
+    sources: list[str] = []
+
+    local, local_status, local_fields, local_errors = await asyncio.to_thread(_local_intelligence, ip_text)
+    _merge(result, local, "local intelligence", field_sources)
+    field_sources.update(local_fields)
+    provider_status.update(local_status)
+    errors.extend(local_errors)
+    if local:
+        sources.append("local intelligence")
+
+    await _resolve_global_geo(ip_text, refresh, result, field_sources, errors, sources)
+
+    maxmind, maxmind_errors, maxmind_state = await asyncio.to_thread(_maxmind, ip_text)
+    _record_provider_result("MaxMind City/ASN", maxmind, maxmind_errors, maxmind_state,
+                            result, field_sources, provider_status, errors, sources)
+    anonymous, anonymous_errors, anonymous_state = await asyncio.to_thread(_anonymous_ip, ip_text)
+    _record_provider_result("MaxMind Anonymous IP", anonymous, anonymous_errors, anonymous_state,
+                            result, field_sources, provider_status, errors, sources)
+
+    for env_name, label in (("VPN_NETWORKS_PATH", "VPN CIDR list"), ("PROXY_NETWORKS_PATH", "Proxy CIDR list")):
+        matched, matched_errors, matched_state = await asyncio.to_thread(_cidr_flag, ip_text, env_name, label)
+        _record_provider_result(label, matched, matched_errors, matched_state,
+                                result, field_sources, provider_status, errors, sources)
+
+    tor, tor_errors, tor_state = await asyncio.to_thread(_tor_exit_list, ip_text)
+    _record_provider_result("Tor exit list", tor, tor_errors, tor_state,
+                            result, field_sources, provider_status, errors, sources)
+    return _finalize_lookup(result, attempt, field_sources, provider_status, errors, sources)

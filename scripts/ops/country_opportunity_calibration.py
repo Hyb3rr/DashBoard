@@ -16,11 +16,13 @@ METRICS = ("market_score", "country_demand_score", "demand_confidence", "opportu
 
 
 def _distribution(rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+    """Summarize the observed distribution for one opportunity metric."""
     values = sorted(float(row[metric]) for row in rows if isinstance(row.get(metric), (int, float)))
     return {"count": len(values), "min": round(values[0], 2) if values else None, "median": round(median(values), 2) if values else None, "mean": round(mean(values), 2) if values else None, "max": round(values[-1], 2) if values else None}
 
 
 def build_calibration_report(snapshots: dict[str, dict[str, Any] | None], market_scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build observational flags and distributions without changing policy."""
     report: dict[str, Any] = {"policy": {"market_weight": 0.60, "demand_weight": 0.40, "neutral_demand": 50.0}, "periods": {}, "flags": []}
     for period in PERIODS:
         result = build_country_opportunities(snapshots, market_scores, period=period)
@@ -38,6 +40,7 @@ def build_calibration_report(snapshots: dict[str, dict[str, Any] | None], market
 
 
 def collect_live_report() -> dict[str, Any]:
+    """Load persisted country inputs and return their calibration report."""
     market = MarketRepository()
     snapshots = {period: market.list_latest_country_demand_signals(period) for period in PERIODS}
     regions = RegionRepository().list(limit=250)

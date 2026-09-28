@@ -48,6 +48,7 @@ def compute_overlap(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def refresh_overlap(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Recompute and persist directional overlap by country and track."""
     selected = [str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", ",".join(PRIORITY_COUNTRIES)).split(",")) if str(code).strip()]
     reports = {}
     for country in selected:
@@ -69,6 +70,7 @@ def refresh_overlap(repo: MarketRepository, countries: Iterable[str] | None = No
 
 
 def main() -> int:
+    """Run overlap refresh and close the shared PostgreSQL pool."""
     try:
         print(json.dumps(refresh_overlap(MarketRepository()), indent=2, default=str))
         return 0

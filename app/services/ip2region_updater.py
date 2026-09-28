@@ -11,6 +11,7 @@ BASE = "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/"
 
 
 def refresh():
+    """Download, validate, and atomically replace local IPv4 and IPv6 xdb files."""
     import ip2region.util as util
     ROOT.mkdir(parents=True, exist_ok=True)
     updated, errors = [], []

@@ -20,6 +20,7 @@ SCORE_DIMENSIONS = REVIEW_RUBRIC[:-1]
 
 
 def _valid_capture(path: Path) -> dict[str, Any] | None:
+    """Load a completed capture only when its grounding validation passed."""
     if not path.is_file():
         return None
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -58,6 +59,7 @@ def select_earliest_validated(cases: Iterable[dict[str, Any]], capture_dirs: Ite
 
 
 def build_manual_review_packet(cases: list[dict[str, Any]], capture_dirs: list[Path], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Assemble validated model outputs into a human-review packet."""
     selected, unavailable = select_earliest_validated(cases, capture_dirs)
     return {
         "format_version": "ai-4c2-v1",

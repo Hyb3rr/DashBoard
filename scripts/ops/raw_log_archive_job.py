@@ -16,10 +16,12 @@ class RunLock:
     """Small cross-platform process lock using atomic directory creation."""
 
     def __init__(self, path: str | Path):
+        """Initialize a process lock at the requested directory path."""
         self.path = Path(path)
         self.acquired = False
 
     def acquire(self) -> bool:
+        """Atomically acquire the lock or recover one owned by a dead process."""
         try:
             self.path.mkdir(parents=True)
         except FileExistsError:
@@ -45,6 +47,7 @@ class RunLock:
         return True
 
     def release(self) -> None:
+        """Remove the lock directory only when this process owns it."""
         if not self.acquired:
             return
         try:
@@ -56,11 +59,13 @@ class RunLock:
             self.acquired = False
 
     def __enter__(self) -> "RunLock":
+        """Acquire the lock before entering a maintenance-job context."""
         if not self.acquire():
             raise RuntimeError("raw archive maintenance already running")
         return self
 
     def __exit__(self, *_: object) -> None:
+        """Release the process lock when the context exits."""
         self.release()
 
 
@@ -69,6 +74,7 @@ def run_once(
     lock_path: str | Path | None = None,
     archive_factory: Callable[..., RawLogArchive] = RawLogArchive,
 ) -> dict:
+    """Run archive maintenance once while preventing overlapping processes."""
     spool = Path(spool_dir)
     lock = RunLock(lock_path or spool / ".raw-archive-job.lock")
     if not lock.acquire():
@@ -82,6 +88,7 @@ def run_once(
 
 
 def main() -> int:
+    """Parse maintenance paths, run the job once, and print its result."""
     parser = argparse.ArgumentParser(description="Drain raw archive artifacts once")
     parser.add_argument("--spool-dir", default=str(DEFAULT_SPOOL_DIR))
     parser.add_argument("--lock")

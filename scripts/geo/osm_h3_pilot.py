@@ -1,13 +1,8 @@
-"""Phase 4A OSM/H3 pilot.
-
-Offline-only measurement tool. It never runs from FastAPI, never writes the
-production database, and never computes opportunity scores.
-"""
+"""Run offline OSM/H3 measurements and scheduler-owned bounded refreshes."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import resource
@@ -18,14 +13,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-import requests
-
 from app.config.market_sources import (
     OSM_SOURCE_URLS,
     PRIORITY_SOURCE_URLS,
     SUPPORTED_OSM_COUNTRIES,
     WAVE_1_COUNTRIES,
     resolve_osm_source,
+)
+from scripts.geo.osm_source_cache import (
+    apply_cache_retention,
+    cache_bytes,
+    cache_retention_plan,
+    download_snapshot,
+    preflight_osm_source,
+    preflight_osm_sources,
+    remove_superseded_sources,
+    sha256_file,
+    source_size,
 )
 
 PILOTS = ("SG", "VN", "DE")
@@ -40,6 +44,7 @@ RETENTION_BUSY_STATUSES = frozenset({"downloading", "prefiltering", "processing"
 
 
 def production_resolution() -> int:
+    """Require the production H3 resolution to remain fixed at seven."""
     value = int(os.getenv("MARKET_H3_RESOLUTION", "7"))
     if value != 7:
         raise ValueError("Phase 4B production H3 resolution must be 7")
@@ -77,15 +82,18 @@ class PilotMetrics:
 
     @property
     def rejection_rate(self) -> float:
+        """Return the fraction of tagged candidate entities rejected by policy."""
         return (self.rejected_by_tag / self.candidates_seen) if self.candidates_seen else 0.0
 
     def as_dict(self) -> dict[str, Any]:
+        """Serialize pilot measurements and their derived rejection rate."""
         result = dict(self.__dict__)
         result["rejection_rate"] = round(self.rejection_rate, 6)
         return result
 
 
 def _feature_counts(tags: dict[str, str], sector: str) -> dict[str, int]:
+    """Map one classified OSM feature to its evidence counters."""
     counts = {"industrial_area_count": 0, "works_count": 0, "sawmill_count": 0,
               "furniture_evidence_count": 0, "wood_processing_count": 0,
               "metal_evidence_count": 0, "machinery_evidence_count": 0, "osm_feature_count": 1}
@@ -102,11 +110,13 @@ def _feature_counts(tags: dict[str, str], sector: str) -> dict[str, int]:
 
 
 def _rss_bytes() -> int:
+    """Return process peak resident memory in bytes across supported platforms."""
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value if os.sys.platform == "darwin" else value * 1024)
 
 
 def classify_tags(tags: dict[str, str] | Iterable[tuple[str, str]]) -> set[str]:
+    """Return every manufacturing sector matched by an OSM tag set."""
     pairs = set(tags.items()) if isinstance(tags, dict) else set(tags)
     return {sector for sector, rules in SECTOR_TAGS.items() if pairs & rules}
 
@@ -145,6 +155,7 @@ def native_prefilter(path: Path, destination: Path, budget_seconds: float = 600.
 
 
 def _cell(lat: float, lon: float, resolution: int) -> str:
+    """Resolve one latitude-longitude point to an H3 cell identifier."""
     try:
         import h3
     except ImportError as exc:
@@ -154,202 +165,13 @@ def _cell(lat: float, lon: float, resolution: int) -> str:
     return str(h3.geo_to_h3(lat, lon, resolution))
 
 
-def download_snapshot(url: str, destination: Path, timeout: float = 60.0) -> tuple[Path, int]:
-    """Download atomically, resuming an interrupted ``.part`` when supported."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and destination.stat().st_size:
-        return destination, 0
-    temporary = destination.with_suffix(destination.suffix + ".part")
-    offset = temporary.stat().st_size if temporary.exists() else 0
-    headers = {"User-Agent": "IPIntel-OSM-Pilot/1.0"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
-    bytes_written = 0
-    with requests.get(url, stream=True, timeout=timeout, headers=headers) as response:
-        if response.status_code == 416:
-            raise RuntimeError("download range is unsatisfiable for existing partial source")
-        response.raise_for_status()
-        resumed = bool(offset and response.status_code == 206)
-        if resumed:
-            content_range = response.headers.get("Content-Range", "")
-            if not content_range.startswith(f"bytes {offset}-"):
-                raise RuntimeError("server returned an invalid content range for partial source")
-        mode = "ab" if resumed else "wb"
-        with temporary.open(mode) as output:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    output.write(chunk)
-                    bytes_written += len(chunk)
-    temporary.replace(destination)
-    return destination, bytes_written
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def remove_superseded_sources(source_dir: Path, country: str, current: Path) -> list[str]:
-    removed = []
-    for candidate in source_dir.glob(f"{country.lower()}*.osm.pbf"):
-        if candidate != current and candidate.is_file():
-            candidate.unlink()
-            removed.append(str(candidate))
-    return removed
-
-
-def cache_bytes(path: Path) -> int:
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file()) if path.exists() else 0
-
-
-def cache_retention_plan(cache_dir: Path, active_countries: Iterable[str],
-                         busy_countries: Iterable[str] = (), target_bytes: int = 3 * 1024 ** 3) -> dict[str, Any]:
-    """Plan deterministic, fail-closed eviction of reconstructible OSM cache files."""
-    cache_dir = cache_dir.resolve()
-    active = {str(country).strip().upper() for country in active_countries}
-    busy = {str(country).strip().upper() for country in busy_countries}
-    current = cache_bytes(cache_dir)
-    eligible: list[dict[str, Any]] = []
-    protected: list[dict[str, Any]] = []
-    source_dir = cache_dir / "sources"
-    candidate_dir = cache_dir / "candidates"
-    for path in sorted(cache_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(cache_dir)
-        if path.suffix == ".part" or path.name.endswith((".partial", ".tmp", ".lock")):
-            protected.append({"path": str(relative), "bytes": path.stat().st_size, "reason": "incomplete_or_lock_file"})
-            continue
-        if candidate_dir in path.parents:
-            eligible.append({"path": str(relative), "bytes": path.stat().st_size, "reason": "completed_candidate"})
-            continue
-        if source_dir in path.parents and path.suffix == ".pbf":
-            country = path.stem.split(".", 1)[0].upper()
-            if country in active and country not in busy:
-                eligible.append({"path": str(relative), "bytes": path.stat().st_size,
-                                 "reason": "active_snapshot_provenance_persisted"})
-            else:
-                reason = "source_in_use" if country in busy else "no_verified_active_snapshot"
-                protected.append({"path": str(relative), "bytes": path.stat().st_size, "reason": reason})
-            continue
-        protected.append({"path": str(relative), "bytes": path.stat().st_size, "reason": "not_a_reconstructible_osm_source"})
-    needed = max(0, current - max(0, target_bytes))
-    selected: list[dict[str, Any]] = []
-    reclaimed = 0
-    for item in sorted(eligible, key=lambda value: (-value["bytes"], value["path"])):
-        if reclaimed >= needed:
-            break
-        selected.append(item)
-        reclaimed += item["bytes"]
-    return {
-        "status": "ready" if reclaimed >= needed else "blocked_insufficient_eligible_cache",
-        "cache_dir": str(cache_dir), "cache_before_bytes": current,
-        "target_bytes": max(0, target_bytes), "required_reclaim_bytes": needed,
-        "eligible_bytes": sum(item["bytes"] for item in eligible),
-        "selected_bytes": reclaimed, "projected_after_bytes": current - reclaimed,
-        "deletions": selected, "protected": protected,
-    }
-
-
-def apply_cache_retention(plan: dict[str, Any]) -> dict[str, Any]:
-    """Apply only the exact validated paths from a retention plan."""
-    if plan.get("status") != "ready":
-        raise RuntimeError(f"retention plan is not applicable: {plan.get('status')}")
-    cache_dir = Path(plan["cache_dir"]).resolve()
-    removed = []
-    for item in plan["deletions"]:
-        path = (cache_dir / item["path"]).resolve()
-        if cache_dir not in path.parents or not path.is_file():
-            raise RuntimeError(f"retention target changed or escaped cache directory: {path}")
-        path.unlink()
-        removed.append({"path": item["path"], "bytes": item["bytes"]})
-    return {"status": "applied", "removed": removed, "cache_after_bytes": cache_bytes(cache_dir)}
-
-
-def _disk_limit_bytes(name: str, default_gib: float) -> int:
-    try:
-        return max(0, int(float(os.getenv(name, str(default_gib))) * 1024 ** 3))
-    except (TypeError, ValueError):
-        return int(default_gib * 1024 ** 3)
-
-
-def preflight_osm_source(country: str, cache_dir: Path) -> dict[str, Any]:
-    """Resolve one registered source and estimate disk impact using HEAD only."""
-    country = str(country).strip().upper()
-    source_url, source_kind = resolve_osm_source(country)
-    source_path = cache_dir / "sources" / f"{country.lower()}.osm.pbf"
-    disk_before = cache_bytes(cache_dir)
-    existing_bytes = source_path.stat().st_size if source_path.exists() else 0
-    content_length = source_size(source_url, float(os.getenv("OSM_HEAD_TIMEOUT", "10")))
-    estimated_download = max(0, (content_length or 0) - existing_bytes)
-    soft_limit = _disk_limit_bytes("OSM_CACHE_SOFT_LIMIT_GIB", 9.0)
-    hard_limit = _disk_limit_bytes("OSM_CACHE_HARD_LIMIT_GIB", 10.0)
-    projected = disk_before + estimated_download
-    if content_length is None:
-        status = "resolved_size_unavailable"
-        retention_action = "capture_size_before_download"
-    elif projected > hard_limit:
-        status = "blocked_disk_hard_limit"
-        retention_action = "cleanup_candidates_and_superseded_sources_before_download"
-    elif projected > soft_limit:
-        status = "ready_after_retention"
-        retention_action = "cleanup_candidates_and_superseded_sources_before_download"
-    else:
-        status = "ready"
-        retention_action = "retain_current_source"
-    return {
-        "country": country,
-        "source_url": source_url,
-        "source_kind": source_kind,
-        "source_resolved": True,
-        "content_length_bytes": content_length,
-        "disk_before_bytes": disk_before,
-        "estimated_download_bytes": estimated_download,
-        "projected_disk_bytes": projected,
-        "soft_limit_bytes": soft_limit,
-        "hard_limit_bytes": hard_limit,
-        "retention_action": retention_action,
-        "status": status,
-    }
-
-
-def preflight_osm_sources(countries: Iterable[str], cache_dir: Path) -> dict[str, Any]:
-    """Run source/disk preflight without creating files or touching PostgreSQL."""
-    reports: dict[str, Any] = {}
-    for raw_country in countries:
-        country = str(raw_country).strip().upper()
-        try:
-            reports[country] = preflight_osm_source(country, cache_dir)
-        except Exception as exc:
-            reports[country] = {
-                "country": country,
-                "source_resolved": False,
-                "status": "blocked_source",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-    blocked = [country for country, item in reports.items() if item["status"].startswith("blocked")]
-    return {"status": "blocked" if blocked else "ready", "countries": reports, "blocked": blocked}
-
-
 def percentile(values: list[float], ratio: float) -> float | None:
+    """Return the bounded nearest-rank percentile for a non-empty sample."""
     if not values:
         return None
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * ratio)))
     return ordered[index]
-
-
-def source_size(url: str, timeout: float = 30.0) -> int | None:
-    response = requests.head(url, allow_redirects=True, timeout=timeout, headers={"User-Agent": "IPIntel-OSM-Scale/1.0"})
-    response.raise_for_status()
-    content_type = response.headers.get("content-type", "").lower()
-    if "text/html" in content_type:
-        raise ValueError(f"OSM source endpoint returned HTML, not PBF: {response.url}")
-    value = response.headers.get("content-length")
-    return int(value) if value and value.isdigit() else None
 
 
 def run_scale_benchmark(countries: Iterable[str] = SCALE_COUNTRIES, cache_dir: Path = Path("data/geography/osm/scale"),
@@ -402,11 +224,13 @@ def run_scale_benchmark(countries: Iterable[str] = SCALE_COUNTRIES, cache_dir: P
 
 
 def _entity_tags(entity: Any) -> dict[str, str]:
+    """Return an OSM entity's tags as a plain dictionary."""
     tags = getattr(entity, "tags", {})
     return dict(tags) if tags else {}
 
 
 def _entity_points(entity: Any) -> list[tuple[float, float]]:
+    """Return one representative valid coordinate for a node or way entity."""
     if hasattr(entity, "location") and entity.location.valid():
         return [(float(entity.location.lat), float(entity.location.lon))]
     points = []
@@ -436,6 +260,7 @@ def scan_pbf(path: Path, country: str, resolutions: tuple[int, ...] = DEFAULT_RE
 
     class Handler(osmium.SimpleHandler):
         def _visit(self, entity: Any) -> None:
+            """Update counters and H3 evidence for one streamed OSM entity."""
             metrics.entities_seen += 1
             tags = _entity_tags(entity)
             if not tags:
@@ -465,9 +290,11 @@ def scan_pbf(path: Path, country: str, resolutions: tuple[int, ...] = DEFAULT_RE
                                 feature[name] += value
 
         def node(self, entity: Any) -> None:
+            """Process one node through the shared entity handler."""
             self._visit(entity)
 
         def way(self, entity: Any) -> None:
+            """Track way geometry availability and process its tags and points."""
             metrics.way_entities += 1
             self._visit(entity)
             if _entity_points(entity):
@@ -486,6 +313,7 @@ def scan_pbf(path: Path, country: str, resolutions: tuple[int, ...] = DEFAULT_RE
 
 def run_native_pipeline(path: Path, country: str, cache_dir: Path, resolutions: tuple[int, ...] = DEFAULT_RESOLUTIONS,
                         budget_seconds: float = 600.0) -> dict[str, Any]:
+    """Filter one PBF natively, then scan its bounded candidate file."""
     candidate = cache_dir / f"{country.lower()}-{FILTER_VERSION}.osm.pbf"
     native = native_prefilter(path, candidate, budget_seconds)
     metrics = scan_pbf(candidate, country, resolutions)
@@ -599,12 +427,14 @@ def safe_snapshot_activation(active: dict[str, str], incoming: dict[str, str], f
 
 
 def run_pilot(paths: dict[str, Path], resolutions: tuple[int, ...] = DEFAULT_RESOLUTIONS) -> dict[str, Any]:
+    """Measure provided PBF files without persistence or source downloads."""
     started = time.perf_counter()
     reports = [scan_pbf(path, country, resolutions) for country, path in paths.items()]
     return {"phase": "4A", "status": "completed", "countries": [item.country for item in reports], "wall_seconds": time.perf_counter() - started, "reports": [item.as_dict() for item in reports], "scope": {"sectors": sorted(SECTOR_TAGS), "resolutions": list(resolutions), "scores": False}}
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI contract for pilot, preflight, benchmark, and retention modes."""
     parser = argparse.ArgumentParser(description="Run offline OSM/H3 Phase 4A pilot")
     parser.add_argument("--country", action="append", choices=PILOTS, dest="countries")
     parser.add_argument("--pbf", action="append", nargs=2, metavar=("ISO2", "PATH"))
@@ -630,72 +460,105 @@ def main() -> None:
     parser.add_argument("--source-url", default="local://operator-provided-pbf")
     parser.add_argument("--source-version", default="operator-provided")
     parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    if args.retention_dry_run or args.retention_apply:
-        cache_dir = args.cache_dir or Path(os.getenv("OSM_CACHE_DIR", "data/geography/osm/scale"))
-        from app.db.market_repository import MarketRepository
-        from app.db.postgres import close_pool
-        repository = MarketRepository()
-        try:
-            active, busy = [], []
-            for country in SUPPORTED_OSM_COUNTRIES:
-                snapshot = repository.active_osm_snapshot(country)
-                job = repository.get_job_state(f"osm:{country}")
-                if snapshot and snapshot.get("active"):
-                    active.append(country)
-                if job and job.get("status") in RETENTION_BUSY_STATUSES:
-                    busy.append(country)
-            plan = cache_retention_plan(cache_dir, active, busy, int(args.retention_target_gib * 1024 ** 3))
-            report = {"plan": plan}
-            if args.retention_apply:
-                report["apply"] = apply_cache_retention(plan)
-        finally:
-            close_pool()
-        encoded = json.dumps(report, indent=2, sort_keys=True)
-        if args.output:
-            args.output.write_text(encoded + "\n", encoding="utf-8")
-        print(encoded)
-        return
-    if args.source_preflight:
-        cache_dir = args.cache_dir or Path(os.getenv("OSM_CACHE_DIR", "data/geography/osm/scale"))
-        report = preflight_osm_sources(args.preflight_countries or WAVE_1_COUNTRIES, cache_dir)
-        encoded = json.dumps(report, indent=2, sort_keys=True)
-        if args.output:
-            args.output.write_text(encoded + "\n", encoding="utf-8")
-        print(encoded)
-        return
-    if args.scale_benchmark:
-        scale_cache_dir = args.cache_dir or Path("data/geography/osm/scale")
-        report = run_scale_benchmark(args.scale_country or SCALE_COUNTRIES, scale_cache_dir,
-                                     int(args.disk_budget_gib * 1024 ** 3), args.budget_seconds, args.retain_sources)
-        encoded = json.dumps(report, indent=2, sort_keys=True)
-        if args.output:
-            args.output.write_text(encoded + "\n", encoding="utf-8")
-        print(encoded)
-        return
+    return parser
+
+
+def _write_cli_report(args: argparse.Namespace, report: dict[str, Any]) -> None:
+    """Serialize, optionally save, and print one CLI mode's report."""
+    encoded = json.dumps(report, indent=2, sort_keys=True, default=str)
+    if args.output:
+        args.output.write_text(encoded + "\n", encoding="utf-8")
+    print(encoded)
+
+
+def _run_retention(args: argparse.Namespace) -> dict[str, Any]:
+    """Plan or apply cache retention using persisted active-snapshot metadata."""
+    cache_dir = args.cache_dir or Path(os.getenv("OSM_CACHE_DIR", "data/geography/osm/scale"))
+    from app.db.market_repository import MarketRepository
+    from app.db.postgres import close_pool
+
+    repository = MarketRepository()
+    try:
+        active, busy = [], []
+        for country in SUPPORTED_OSM_COUNTRIES:
+            snapshot = repository.active_osm_snapshot(country)
+            job = repository.get_job_state(f"osm:{country}")
+            if snapshot and snapshot.get("active"):
+                active.append(country)
+            if job and job.get("status") in RETENTION_BUSY_STATUSES:
+                busy.append(country)
+        plan = cache_retention_plan(cache_dir, active, busy, int(args.retention_target_gib * 1024 ** 3))
+        report = {"plan": plan}
+        if args.retention_apply:
+            report["apply"] = apply_cache_retention(plan)
+        return report
+    finally:
+        close_pool()
+
+
+def _run_source_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Run registered source and disk checks without downloading any data."""
+    cache_dir = args.cache_dir or Path(os.getenv("OSM_CACHE_DIR", "data/geography/osm/scale"))
+    return preflight_osm_sources(args.preflight_countries or WAVE_1_COUNTRIES, cache_dir)
+
+
+def _run_scale_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the bounded multi-country benchmark using the selected budgets."""
+    cache_dir = args.cache_dir or Path("data/geography/osm/scale")
+    return run_scale_benchmark(
+        args.scale_country or SCALE_COUNTRIES,
+        cache_dir,
+        int(args.disk_budget_gib * 1024 ** 3),
+        args.budget_seconds,
+        args.retain_sources,
+    )
+
+
+def _run_pilot_mode(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate pilot inputs and run offline scanning or native prefiltering."""
     if not args.pbf:
         raise SystemExit("--pbf is required unless --scale-benchmark is set")
     countries = set(args.countries or PILOTS)
     paths = {country.upper(): Path(path) for country, path in args.pbf if country.upper() in countries}
     if set(paths) != countries:
-        raise SystemExit(f"PBF path required for each selected pilot country: {sorted(countries - set(paths))}")
+        missing = sorted(countries - set(paths))
+        raise SystemExit(f"PBF path required for each selected pilot country: {missing}")
     resolutions = tuple(args.resolutions or DEFAULT_RESOLUTIONS)
-    if args.native_prefilter:
-        pilot_cache_dir = args.cache_dir or Path("data/geography/osm/candidates")
-        reports = [run_native_pipeline(path, country, pilot_cache_dir, resolutions, args.budget_seconds)
-                   for country, path in paths.items()]
-        report = {"phase": "4A.1", "status": "completed", "countries": list(paths), "reports": reports,
-                  "scope": {"filter_version": FILTER_VERSION, "sectors": sorted(SECTOR_TAGS), "resolutions": list(resolutions), "scores": False}}
-        if args.persist:
-            from app.db.market_repository import MarketRepository
-            report["persistence"] = [persist_report(MarketRepository(), item, args.source_url, args.source_version)
-                                      for item in reports]
+    if not args.native_prefilter:
+        return run_pilot(paths, resolutions)
+
+    cache_dir = args.cache_dir or Path("data/geography/osm/candidates")
+    reports = [
+        run_native_pipeline(path, country, cache_dir, resolutions, args.budget_seconds)
+        for country, path in paths.items()
+    ]
+    report = {
+        "phase": "4A.1", "status": "completed", "countries": list(paths), "reports": reports,
+        "scope": {"filter_version": FILTER_VERSION, "sectors": sorted(SECTOR_TAGS),
+                  "resolutions": list(resolutions), "scores": False},
+    }
+    if args.persist:
+        from app.db.market_repository import MarketRepository
+        report["persistence"] = [
+            persist_report(MarketRepository(), item, args.source_url, args.source_version)
+            for item in reports
+        ]
+    return report
+
+
+def main() -> None:
+    """Parse CLI options and dispatch exactly one OSM/H3 operating mode."""
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.retention_dry_run or args.retention_apply:
+        report = _run_retention(args)
+    elif args.source_preflight:
+        report = _run_source_preflight(args)
+    elif args.scale_benchmark:
+        report = _run_scale_benchmark(args)
     else:
-        report = run_pilot(paths, resolutions)
-    encoded = json.dumps(report, indent=2, sort_keys=True, default=str)
-    if args.output:
-        args.output.write_text(encoded + "\n", encoding="utf-8")
-    print(encoded)
+        report = _run_pilot_mode(args)
+    _write_cli_report(args, report)
 
 
 if __name__ == "__main__":

@@ -14,11 +14,7 @@ _NUMERIC_SEGMENT = re.compile(r"^[0-9]+$")
 
 
 def canonicalize_path(path: str | None) -> str:
-    """Return stable path shape without changing case or raw event data.
-
-    Query strings are removed. Repeated slashes collapse. Complete dynamic
-    path segments become ``{uuid}``, ``{hash}``, or ``{id}``.
-    """
+    """Remove query and fragment data and normalize dynamic path segments without changing case."""
 
     if not path:
         return ""

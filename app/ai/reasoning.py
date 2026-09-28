@@ -12,6 +12,7 @@ class ReasoningResult:
     evidence_fingerprint: str | None = None
     raw_response: Mapping[str, Any] | None = None
     error: str | None = None
+    diagnostics: Mapping[str, Any] | None = None
 
 
 class LocalReasoningProvider(Protocol):

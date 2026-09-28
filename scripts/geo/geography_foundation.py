@@ -54,11 +54,13 @@ def _boundary_artifacts_available(iso3: str, state: dict[str, Any]) -> bool:
 
 
 def _properties(feature: dict[str, Any]) -> dict[str, Any]:
+    """Return a feature's properties only when they form an object."""
     value = feature.get("properties") or {}
     return value if isinstance(value, dict) else {}
 
 
 def _number(value: Any) -> float | None:
+    """Parse a geographic coordinate within the valid latitude-longitude range."""
     try:
         result = float(value)
     except (TypeError, ValueError):
@@ -67,6 +69,7 @@ def _number(value: Any) -> float | None:
 
 
 def _point(feature: dict[str, Any]) -> tuple[float, float] | None:
+    """Extract a latitude-longitude point from geometry or feature properties."""
     geometry = feature.get("geometry") or {}
     if geometry.get("type") == "Point" and len(geometry.get("coordinates") or []) >= 2:
         lon, lat = geometry["coordinates"][:2]
@@ -79,8 +82,10 @@ def _point(feature: dict[str, Any]) -> tuple[float, float] | None:
 
 
 def _bbox(coordinates: Any) -> tuple[float, float, float, float] | None:
+    """Calculate the minimum bounding rectangle for nested GeoJSON coordinates."""
     points: list[tuple[float, float]] = []
     def visit(value: Any) -> None:
+        """Collect coordinate pairs while recursively walking geometry arrays."""
         if isinstance(value, (list, tuple)) and len(value) >= 2 and all(isinstance(x, (int, float)) for x in value[:2]):
             points.append((float(value[1]), float(value[0])))
         elif isinstance(value, (list, tuple)):
@@ -113,6 +118,7 @@ def _polygon_parts(geometry: dict[str, Any]) -> list[list[list[tuple[float, floa
 
 
 def _inside_ring(point: tuple[float, float], ring: list[tuple[float, float]]) -> bool:
+    """Test whether a point lies inside a polygon ring using ray casting."""
     lat, lon = point
     inside = False
     for index, (y1, x1) in enumerate(ring):
@@ -124,6 +130,7 @@ def _inside_ring(point: tuple[float, float], ring: list[tuple[float, float]]) ->
 
 
 def _inside(feature: dict[str, Any], point: tuple[float, float]) -> bool:
+    """Test polygon containment while excluding any interior holes."""
     for polygon in _polygon_parts(feature.get("geometry") or {}):
         if _inside_ring(point, polygon[0]) and not any(_inside_ring(point, hole) for hole in polygon[1:]):
             return True
@@ -131,6 +138,7 @@ def _inside(feature: dict[str, Any], point: tuple[float, float]) -> bool:
 
 
 def _bbox_candidates(boundaries: list[dict[str, Any]], point: tuple[float, float]) -> list[dict[str, Any]]:
+    """Return boundaries whose cached bounding boxes contain the point."""
     lat, lon = point
     return [
         area for area in boundaries
@@ -140,6 +148,7 @@ def _bbox_candidates(boundaries: list[dict[str, Any]], point: tuple[float, float
 
 
 def _feature_collection(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize a GeoJSON feature or feature collection to feature rows."""
     if payload.get("type") == "FeatureCollection":
         return [item for item in payload.get("features", []) if isinstance(item, dict)]
     if payload.get("type") == "Feature":
@@ -178,6 +187,7 @@ def normalize_boundaries(payload: dict[str, Any], country_code: str, admin_level
 
 
 def normalize_cities(payload: dict[str, Any], country_code: str, source: str = "ghsl") -> list[dict[str, Any]]:
+    """Normalize city point features into canonical market-area records."""
     result = []
     for index, feature in enumerate(_feature_collection(payload)):
         point = _point(feature)
@@ -215,6 +225,7 @@ def choose_adaptive_level(cities: list[dict[str, Any]], adm1: list[dict[str, Any
 
 
 def assign_city_parents(cities: list[dict[str, Any]], boundaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign each city the containing administrative boundary, if proven."""
     for city in cities:
         point = (city["centroid_lat"], city["centroid_lon"])
         candidates = _bbox_candidates(boundaries, point)
@@ -239,6 +250,7 @@ def assign_boundary_parents(children: list[dict[str, Any]], parents: list[dict[s
 
 def persist_country(repo: MarketRepository, country_code: str, cities: list[dict[str, Any]],
                     adm1: list[dict[str, Any]], adm2: list[dict[str, Any]], source_version: str = "unknown") -> dict[str, Any]:
+    """Persist normalized country, boundary, city, and provenance records."""
     level = choose_adaptive_level(cities, adm1, adm2)
     selected = adm2 if level == 2 else adm1
     if level == 2:
@@ -258,6 +270,7 @@ def persist_country(repo: MarketRepository, country_code: str, cities: list[dict
 
 
 def load_json(url: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """Fetch and validate one JSON object from a geography source."""
     request = Request(url, headers={"User-Agent": "IPIntel-Geography/1.0"})
     with urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -334,6 +347,7 @@ def refresh_country(repo: MarketRepository, country_code: str, iso3: str, cities
 
 
 def _download_global_archive(url: str, path: Path, timeout: float = DEFAULT_TIMEOUT) -> Path:
+    """Download and atomically cache the global GHSL archive after ZIP validation."""
     if path.exists() and zipfile.is_zipfile(path):
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,6 +376,7 @@ def _download_global_archive(url: str, path: Path, timeout: float = DEFAULT_TIME
 
 
 def _field(row: dict[str, Any], names: tuple[str, ...]) -> Any:
+    """Read the first populated field matching a case-insensitive alias."""
     normalized = {str(key).strip().lower(): value for key, value in row.items()}
     for name in names:
         if name.lower() in normalized and normalized[name.lower()] not in (None, ""):
@@ -370,6 +385,7 @@ def _field(row: dict[str, Any], names: tuple[str, ...]) -> Any:
 
 
 def _city_from_row(row: dict[str, Any], country_code: str, source_id: str) -> dict[str, Any] | None:
+    """Convert a GHSL-like attribute row into a city record when coordinates exist."""
     iso3 = str(_field(row, ("SC_CNT_GAD_2025", "SC_CNT_GAD_2020", "iso3", "country_iso3", "country_code")) or "").upper()
     name = _field(row, ("SC_UCN_MAI_2025", "SC_UCN_MAI_2020", "city_name", "name", "uc_name"))
     lat = _number(_field(row, ("latitude", "lat", "centroid_lat", "y_lat")))
@@ -387,6 +403,7 @@ def _city_from_row(row: dict[str, Any], country_code: str, source_id: str) -> di
 
 
 def _cities_from_csv(handle: io.TextIOBase, country_code: str, iso3: str) -> list[dict[str, Any]]:
+    """Read and country-filter city records from a GHSL CSV stream."""
     result = []
     for index, row in enumerate(csv.DictReader(handle)):
         row_iso3 = str(_field(row, ("SC_CNT_GAD_2025", "SC_CNT_GAD_2020", "iso3", "country_iso3")) or "").upper()
@@ -399,6 +416,7 @@ def _cities_from_csv(handle: io.TextIOBase, country_code: str, iso3: str) -> lis
 
 
 def _wkb_point(blob: bytes) -> tuple[float, float] | None:
+    """Decode a WKB or GeoPackage point into latitude and longitude."""
     if not blob:
         return None
     offset = 0
@@ -416,6 +434,7 @@ def _wkb_point(blob: bytes) -> tuple[float, float] | None:
 
 
 def _country_names(iso3: str) -> set[str]:
+    """Return normalized display-name aliases for a three-letter country code."""
     country = pycountry.countries.get(alpha_3=iso3.upper())
     if not country:
         return {iso3.upper()}
@@ -437,6 +456,7 @@ def _mollweide_to_wgs84(x: float, y: float) -> tuple[float, float]:
 
 
 def _cities_from_gpkg(path: Path, country_code: str, iso3: str) -> list[dict[str, Any]]:
+    """Extract country-matched GHSL city points from a GeoPackage archive."""
     result = []
     country_names = _country_names(iso3)
     with sqlite3.connect(path) as conn:
@@ -482,6 +502,7 @@ def _cities_from_gpkg(path: Path, country_code: str, iso3: str) -> list[dict[str
 
 
 def _global_cities(path: Path, country_code: str, iso3: str) -> list[dict[str, Any]]:
+    """Read the UCDB GeoPackage or CSV city layer from the GHSL ZIP archive."""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         gpkg_names = [name for name in names if name.lower().endswith(".gpkg") and "ucdb" in name.lower()]
@@ -520,6 +541,7 @@ def refresh_all(repo: MarketRepository, global_url: str, timeout: float = DEFAUL
         workers = 2
 
     def refresh_item(country_code: str, item: dict[str, Any]) -> dict[str, Any]:
+        """Load one country's GHSL cities and refresh its boundary records."""
         cities = _global_cities(archive, country_code, str(item["iso3_code"]))
         return refresh_country(repo, country_code, str(item["iso3_code"]), cities, timeout)
 
@@ -537,10 +559,12 @@ def refresh_all(repo: MarketRepository, global_url: str, timeout: float = DEFAUL
 
 
 def catalog_country_codes() -> list[str]:
+    """List active primary-market country codes from the canonical catalog."""
     return [str(item["country_code"]) for item in catalog_rows() if item["primary_market"] and item["active"]]
 
 
 def main() -> None:
+    """Validate the configured GHSL source and run the geography refresh job."""
     global_url = os.getenv("GHSL_CITY_GLOBAL_URL")
     if not global_url:
         raise SystemExit("GHSL_CITY_GLOBAL_URL is required; no geography source was contacted")

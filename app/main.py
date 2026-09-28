@@ -41,6 +41,7 @@ from .routers.raw_logs import router as raw_logs_router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """Start role-owned services and shut them down in dependency order."""
     postgres_store.open_pool()
     realtime_listener = PostgresRealtimeListener(bus.publish)
     _app.state.realtime_listener = realtime_listener
@@ -99,6 +100,7 @@ app.include_router(pages_router)
 
 @app.middleware("http")
 async def timing_middleware(request, call_next):
+    """Measure each HTTP request and attach its elapsed processing time."""
     started = time.perf_counter()
     try:
         response = await call_next(request)
@@ -114,6 +116,7 @@ async def timing_middleware(request, call_next):
 
 @app.middleware("http")
 async def request_context_middleware(request, call_next):
+    """Propagate or create a request ID for tracing the response lifecycle."""
     correlation_id = request_id(request.headers.get("X-Request-ID"))
     request.state.request_id = correlation_id
     response = await call_next(request)
@@ -123,6 +126,7 @@ async def request_context_middleware(request, call_next):
 
 @app.middleware("http")
 async def security_headers_middleware(request, call_next):
+    """Apply configured browser security headers to HTTP responses."""
     response = await call_next(request)
     if SECURITY_HEADERS_ENABLED:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -134,6 +138,7 @@ async def security_headers_middleware(request, call_next):
 
 @app.middleware("http")
 async def reverse_proxy_auth(request: Request, call_next):
+    """Enforce trusted-proxy identity and route-specific role authorization."""
     if not AUTH_REQUIRED or request.url.path == "/livez" or request.url.path.startswith("/static/"):
         return await call_next(request)
     peer = request.client.host if request.client else None

@@ -10,6 +10,7 @@ from scripts.geo.ghsl_city_geometry import GHSL_GEOMETRY_VERSION, h3_polygon_mol
 CITY_MEMBERSHIP_MODEL_VERSION = "lc2a-membership-v1"
 
 def build_memberships(cities: Iterable[dict[str, Any]], cells: Iterable[dict[str, Any]], country: str) -> list[dict[str, Any]]:
+    """Intersect city polygons with H3 cells to build membership evidence."""
     result = []
     for city in cities:
         for cell in cells:
@@ -26,6 +27,7 @@ def build_memberships(cities: Iterable[dict[str, Any]], cells: Iterable[dict[str
     return result
 
 def refresh_city_memberships(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Refresh and persist GHSL-to-H3 memberships for selected countries."""
     selected = [str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", "DE,NL,BE").split(",")) if str(code).strip()]
     path = Path(os.getenv("GHSL_GEOMETRY_PATH", "data/geography/GHS_UCDB_GLOBE_R2024A.gpkg"))
     reports = {}

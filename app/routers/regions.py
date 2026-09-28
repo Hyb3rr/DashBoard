@@ -10,16 +10,19 @@ router = APIRouter()
 
 @router.get("/api/regions")
 def region_list(limit: int = 50):
+    """Return stored country region profiles up to the requested limit."""
     return RegionRepository().list(limit=min(max(limit, 1), 250))
 
 
 @router.get("/api/regions/demand-signal")
 def region_demand_signal(limit: int = 50):
+    """Return country demand signals derived from qualified observed traffic."""
     return RegionRepository().demand_signal(min(max(limit, 1), 200))
 
 
 @router.get("/api/country-demand-signals")
 def country_demand_signals(period: str = "30d"):
+    """Return the published country-demand snapshot for a supported period."""
     if period not in {"7d", "30d", "90d"}:
         raise HTTPException(400, "unsupported country demand period")
     snapshot = MarketRepository().list_latest_country_demand_signals(period)
@@ -31,6 +34,7 @@ def country_demand_signals(period: str = "30d"):
 
 @router.get("/api/country-opportunities")
 def country_opportunities(period: str = "30d"):
+    """Combine country market scores with published demand snapshots."""
     if period not in {"7d", "30d", "90d"}:
         raise HTTPException(400, "unsupported country demand period")
     snapshots = {period: MarketRepository().list_latest_country_demand_signals(period) for period in ("7d", "30d", "90d")}
@@ -43,6 +47,7 @@ def country_opportunities(period: str = "30d"):
 
 @router.get("/api/regions/{country_code}")
 def region_details(country_code: str):
+    """Return country context, local opportunity layers, and published snapshots."""
     code = country_code.upper()
     data = RegionRepository().get(code)
     if not data:

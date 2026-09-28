@@ -23,10 +23,12 @@ LOGGER = logging.getLogger("ai_trigger")
 
 
 def _enabled() -> bool:
+    """Return whether automatic semantic AI triggering is enabled."""
     return os.getenv("AI_TRIGGER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _packet_loader(ip: str) -> dict:
+    """Build a bounded CasePacket from persisted IP state and recent traffic."""
     row = StateRepository().get(ip)
     if not row:
         raise LookupError(f"IP snapshot unavailable: {ip}")
@@ -37,6 +39,7 @@ def _packet_loader(ip: str) -> dict:
 
 
 def main() -> int:
+    """Run the opt-in change-feed consumer until stopped or failed."""
     load_dotenv()
     parser = argparse.ArgumentParser(description="Run semantic AI change-feed trigger consumer")
     parser.add_argument("--enabled", action="store_true", help="Explicitly enable automatic job creation")
@@ -53,6 +56,7 @@ def main() -> int:
     stopping = False
 
     def stop(*_signals):
+        """Request a graceful exit from the polling loop."""
         nonlocal stopping
         stopping = True
 

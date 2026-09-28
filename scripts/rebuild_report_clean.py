@@ -13,12 +13,15 @@ ET.register_namespace("r", NS_R)
 
 
 def xml_root(name):
+    """Create an XML element to serve as a package-part root."""
     return ET.Element(name)
 
 
 def styles_xml():
+    """Build the minimal WordprocessingML paragraph style definitions."""
     root = ET.Element(f"{{{W}}}styles")
     def style(style_id, name, based=None, size=24, bold=False):
+        """Append a paragraph style with font and emphasis settings."""
         s = ET.SubElement(root, f"{{{W}}}style", {f"{{{W}}}type": "paragraph", f"{{{W}}}styleId": style_id})
         ET.SubElement(s, f"{{{W}}}name", {f"{{{W}}}val": name})
         if based: ET.SubElement(s, f"{{{W}}}basedOn", {f"{{{W}}}val": based})
@@ -35,6 +38,7 @@ def styles_xml():
 
 
 def document_xml():
+    """Build the WordprocessingML document part from the shared report body."""
     root = ET.Element(f"{{{W}}}document")
     body = ET.Element(f"{{{W}}}body")
     dummy = ET.Element(f"{{{W}}}body")

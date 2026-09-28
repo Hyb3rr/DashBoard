@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 def main() -> None:
+    """Apply storage schemas and seed the market catalog."""
     from app.core.market_catalog import catalog_rows
     from app.db import clickhouse
     from app.db import migrations

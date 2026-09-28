@@ -24,6 +24,7 @@ def estimate_prompt_tokens(*parts: str) -> int:
 
 
 def _evidence_priority(item: Mapping[str, Any]) -> int:
+    """Rank evidence categories for deterministic inclusion in a bounded prompt."""
     value = " ".join(str(item.get(key) or "").lower() for key in ("source", "type", "detector", "rule_id"))
     if any(term in value for term in ("rule", "sensitive", "brute", "scan", "burst")):
         return 0
@@ -39,6 +40,7 @@ def _evidence_priority(item: Mapping[str, Any]) -> int:
 
 
 def _bounded_evidence(case_packet: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Select evidence within configured item and serialized-size limits."""
     original = [item for item in case_packet.get("evidence", []) if isinstance(item, Mapping)]
     indexed = list(enumerate(original))
     indexed.sort(key=lambda pair: (_evidence_priority(pair[1]), pair[0], str(pair[1].get("evidence_id") or "")))

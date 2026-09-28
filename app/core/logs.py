@@ -45,6 +45,7 @@ SENSITIVE_PATHS = (
 
 
 def _parse_ts(value: str) -> str | None:
+    """Parse an Apache timestamp and normalize it to UTC ISO format."""
     try:
         return datetime.strptime(value, "%d/%b/%Y:%H:%M:%S %z").astimezone(timezone.utc).isoformat()
     except ValueError:
@@ -52,11 +53,13 @@ def _parse_ts(value: str) -> str | None:
 
 
 def parse_apache_combined(line: str) -> dict | None:
+    """Parse one Apache Combined line and return its event when valid."""
     event, _code, _message = parse_apache_combined_diagnostic(line)
     return event
 
 
 def parse_apache_combined_diagnostic(line: str) -> tuple[dict | None, str | None, str | None]:
+    """Parse a log line and return either its event or a stable rejection reason."""
     match = APACHE_COMBINED.match(line.strip())
     if not match:
         return None, "INVALID_APACHE_COMBINED_FORMAT", "line does not match Apache Combined format"
@@ -85,11 +88,7 @@ def parse_apache_combined_diagnostic(line: str) -> tuple[dict | None, str | None
 
 
 def import_apache_lines(lines: Iterable[str], source: str) -> dict:
-    """Parse Apache log lines and return a list of parsed event dicts.
-
-    This is a pure function — no DB writes. Callers are responsible for
-    persisting the returned events via PgDetectionRepository or similar.
-    """
+    """Parse lines into deterministic events without persisting them."""
     parsed_events: list[dict] = []
     parsed = 0
     skipped = 0
@@ -123,6 +122,7 @@ def import_apache_lines(lines: Iterable[str], source: str) -> dict:
 
 
 def effective_risk(profile_score: int | None, behavior_score: int | None) -> tuple[int, str]:
+    """Combine profile and behavior scores into a capped score and risk tier."""
     score = min((profile_score or 0) + (behavior_score or 0), 100)
     level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
     return score, level

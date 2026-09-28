@@ -28,6 +28,7 @@ class TriggerEvent:
 
 
 def is_meaningful_trigger(event: TriggerEvent) -> bool:
+    """Return whether an event represents a configured escalation transition."""
     if event.reason != "classification":
         return False
     transition = ((event.old_label or "unknown").lower(), (event.new_label or "").lower())

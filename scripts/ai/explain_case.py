@@ -10,6 +10,7 @@ from app.ai.providers.llama_cpp import LlamaCppHttpProvider
 
 
 def main() -> int:
+    """Explain one CasePacket with the configured local model endpoint."""
     parser = argparse.ArgumentParser(description="Send one CasePacket to local llama.cpp")
     parser.add_argument("case_packet", type=Path)
     parser.add_argument("--endpoint", default="http://127.0.0.1:8080/v1/chat/completions")

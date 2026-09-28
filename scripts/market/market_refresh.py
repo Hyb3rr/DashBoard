@@ -56,6 +56,7 @@ WB_LABELS = {
 
 
 def _open_csv(path: Path):
+    """Open a CSV using supported encodings without changing its contents."""
     data = path.read_bytes()
     for encoding in ("utf-8-sig", "cp1252"):
         try:
@@ -85,6 +86,7 @@ def parse_world_bank_metadata() -> dict[str, dict]:
 
 
 def _iso2(iso3: str) -> str | None:
+    """Convert an ISO alpha-3 country code to alpha-2 when recognized."""
     value = (iso3 or "").strip().upper()
     if value == "XKX":
         return "XK"
@@ -93,6 +95,7 @@ def _iso2(iso3: str) -> str | None:
 
 
 def _number(value: str | None) -> float | None:
+    """Parse a finite numeric value while treating source placeholders as missing."""
     if value is None or value.strip().lower() in {"", "..", "null", "na", "n/a"}:
         return None
     try:
@@ -103,6 +106,7 @@ def _number(value: str | None) -> float | None:
 
 
 def _percentile(values: dict[str, float], key: str) -> float:
+    """Return a tie-aware percentile rank for one member of a cohort."""
     if len(values) == 1:
         return 50.0
     ordered = sorted(values.values())
@@ -112,16 +116,19 @@ def _percentile(values: dict[str, float], key: str) -> float:
 
 
 def _points(percentile: float) -> int:
+    """Map a percentile band to its display points."""
     return 25 if percentile < 25 else 50 if percentile < 50 else 75 if percentile < 75 else 100
 
 
 def _level(score: float | None) -> str:
+    """Map an optional 0–100 score to its qualitative level."""
     if score is None:
         return "unknown"
     return "low" if score < 25 else "medium" if score < 50 else "high" if score < 75 else "very_high"
 
 
 def _weighted(signals: list[tuple[str, float | None, float]], raw: dict, source: str) -> tuple[float | None, list[dict]]:
+    """Blend available signals and retain their normalized evidence weights."""
     present = [(name, value, weight) for name, value, weight in signals if value is not None]
     if not present:
         return None, []
@@ -137,6 +144,7 @@ def _weighted(signals: list[tuple[str, float | None, float]], raw: dict, source:
 
 
 def parse_world_bank() -> tuple[dict[str, dict], dict]:
+    """Parse the latest available World Bank indicators by country."""
     if not WB_DATA.exists() or not WB_METADATA.exists():
         raise FileNotFoundError("World Bank Data.csv or Series _Metadata.csv is missing")
     metadata = parse_world_bank_metadata()
@@ -165,9 +173,20 @@ def parse_world_bank() -> tuple[dict[str, dict], dict]:
 
 
 def parse_comtrade() -> tuple[dict[str, dict[str, dict[int, float]]], dict]:
+    """Parse reporter and mirror Comtrade files with reporter data taking precedence."""
     files = sorted(COMTRADE_DIR.glob("*.csv"))
     if not files:
         raise FileNotFoundError("No Comtrade CSV files found")
+
+    trade, reporter_parent_years, reporter_child_years, rows_seen = _read_reporter_files(files)
+    mirror_countries, mirror_provenance = _merge_mirror_cache(trade)
+    _attach_reporter_coverage(trade, mirror_provenance, reporter_parent_years, reporter_child_years)
+    diagnostics = _comtrade_diagnostics(files, trade, mirror_countries, mirror_provenance, rows_seen)
+    return {country: dict(products) for country, products in trade.items()}, diagnostics
+
+
+def _read_reporter_files(files: list[Path]) -> tuple[defaultdict, defaultdict, defaultdict, int]:
+    """Read eligible reporter-side imports and track parent/child year coverage."""
     trade = defaultdict(lambda: defaultdict(dict))
     reporter_parent_years = defaultdict(set)
     reporter_child_years = defaultdict(lambda: defaultdict(set))
@@ -191,6 +210,12 @@ def parse_comtrade() -> tuple[dict[str, dict[str, dict[int, float]]], dict]:
                     reporter_parent_years[country].add(year)
                 else:
                     reporter_child_years[country][hs].add(year)
+
+    return trade, reporter_parent_years, reporter_child_years, rows_seen
+
+
+def _merge_mirror_cache(trade: defaultdict) -> tuple[int, dict]:
+    """Fill missing reporter observations from the mirror cache without overwriting them."""
     mirror_countries = 0
     mirror_provenance = {}
     if MIRROR_CACHE.exists():
@@ -204,6 +229,14 @@ def parse_comtrade() -> tuple[dict[str, dict[str, dict[int, float]]], dict]:
                 for year, value in (years or {}).items():
                     # Reporter-side observations always win for the same country/year.
                     trade[country][hs].setdefault(int(year), float(value))
+
+    return mirror_countries, mirror_provenance
+
+
+def _attach_reporter_coverage(trade: defaultdict, mirror_provenance: dict,
+                              reporter_parent_years: defaultdict,
+                              reporter_child_years: defaultdict) -> None:
+    """Add reporter-versus-mirror year provenance for every observed country."""
     for country in set(trade) | set(mirror_provenance):
         entry = mirror_provenance.get(country)
         if isinstance(entry, str):
@@ -212,14 +245,20 @@ def parse_comtrade() -> tuple[dict[str, dict[str, dict[int, float]]], dict]:
         entry["reporter_parent_years"] = sorted(reporter_parent_years.get(country, set()))
         entry["reporter_child_years"] = {hs: sorted(years) for hs, years in reporter_child_years.get(country, {}).items()}
         mirror_provenance[country] = entry
+
+
+def _comtrade_diagnostics(files: list[Path], trade: defaultdict, mirror_countries: int,
+                          mirror_provenance: dict, rows_seen: int) -> dict:
+    """Build file, country, year, and source-provenance diagnostics."""
     diagnostics = {"files": len(files), "years": sorted({year for c in trade.values() for h in c.values() for year in h}),
                    "countries": len(trade), "mirror_countries": mirror_countries,
                    "mirror_provenance": mirror_provenance,
                    "rows_seen": rows_seen, "latest_complete_year": COMPLETE_YEAR}
-    return {c: dict(hs) for c, hs in trade.items()}, diagnostics
+    return diagnostics
 
 
 def _growth(series: dict[int, float], latest: int) -> float | None:
+    """Calculate annualized growth from the latest value and a usable prior year."""
     end = series.get(latest)
     for span in (3, 2):
         start = series.get(latest - span)
@@ -259,6 +298,7 @@ def _resolved_parent(trade: dict[str, dict[int, float]], provenance: dict | str 
 
 
 def _trade_scores(trade: dict[str, dict[str, dict[int, float]]], provenance: dict[str, dict | str] | None = None) -> dict[str, dict]:
+    """Score country-level machinery demand and product opportunities."""
     resolved = {country: _resolved_parent(hs, (provenance or {}).get(country)) for country, hs in trade.items()}
     trade_years = {c: max((year for year in series if COMPLETE_YEAR - MAX_TRADE_AGE_YEARS <= year <= COMPLETE_YEAR), default=None)
                    for c, (series, _) in resolved.items()}
@@ -322,61 +362,146 @@ def _trade_scores(trade: dict[str, dict[str, dict[int, float]]], provenance: dic
     return output
 
 
-def _build_market(wdi: dict[str, dict], trade: dict[str, dict[str, dict[int, float]]],
-                  trade_provenance: dict[str, str] | None = None) -> dict[str, dict]:
+def _indicator_percentiles(wdi: dict[str, dict]) -> dict[str, dict[str, float]]:
+    """Build peer-cohort percentile maps for each available economic indicator."""
     all_values = defaultdict(dict)
     for country, indicators in wdi.items():
         for name, item in indicators.items():
             all_values[name][country] = item["value"]
-    percentiles = {name: {country: _percentile(values, country) for country in values} for name, values in all_values.items()}
-    trade_scores = _trade_scores(trade, trade_provenance)
-    result = {}
-    for country in set(wdi) | set(trade):
-        indicators = wdi.get(country, {})
-        raw = {name: item["value"] for name, item in indicators.items()}
-        def p(name): return percentiles.get(name, {}).get(country)
-        capacity, cap_evidence = _weighted([("gdp_current_usd", p("gdp_current_usd"), .25),
-                                            ("gdp_per_capita", p("gdp_per_capita"), .25),
-                                            ("merchandise_imports", p("merchandise_imports"), .25),
-                                            ("population", p("population"), .25)], raw, "World Bank WDI")
-        forest = _weighted([("forest_area", p("forest_area"), .60), ("forest_share", p("forest_share"), .40)], raw, "World Bank WDI")[0]
-        fit, fit_evidence = _weighted([("manufacturing_value_added", p("manufacturing_value_added"), .30),
-                                       ("manufacturing_share", p("manufacturing_share"), .20),
-                                       ("manufacturing_growth", p("manufacturing_growth"), .15),
-                                       ("industry_value_added", p("industry_value_added"), .15),
-                                       ("industry_share", p("industry_share"), .15),
-                                       ("forest_proxy", forest, .05)], raw, "World Bank WDI")
-        demand = trade_scores.get(country)
-        parent_series, resolved_method = _resolved_parent(trade.get(country, {}), (trade_provenance or {}).get(country))
-        latest_trade_year = max((year for year in parent_series if year <= COMPLETE_YEAR), default=None)
-        trade_age = COMPLETE_YEAR - latest_trade_year if latest_trade_year is not None else None
-        trade_freshness = "current" if trade_age == 0 else "lagging" if trade_age is not None and trade_age <= MAX_TRADE_AGE_YEARS else "stale"
-        components = {"product_demand": demand["product_demand"] if demand else None,
-                      "industrial_fit": fit if len(fit_evidence) >= 3 else None,
-                      "market_capacity": capacity if len(cap_evidence) >= 2 else None}
-        economic_parts = [("market_capacity", components["market_capacity"], .40),
-                          ("industrial_fit", components["industrial_fit"], .60)]
-        economic_present = [(key, value, weight) for key, value, weight in economic_parts if value is not None]
-        economic_potential = (round(sum(value * weight for _, value, weight in economic_present) /
-                                    sum(weight for _, _, weight in economic_present), 2)
-                              if economic_present else None)
-        machine_demand = components["product_demand"]
-        score = (round(economic_potential * .40 + machine_demand * .60, 2)
-                 if economic_potential is not None and machine_demand is not None else None)
-        method = demand["trade_data_method"] if demand else resolved_method if parent_series else None
-        score_status = ("scored_with_mirror" if method == "mirror" else
-                        "scored_with_fallback_year" if score is not None and trade_age else
-                        "scored") if score is not None else (
-            "insufficient_economic_data" if economic_potential is None else "insufficient_trade_data"
+    return {
+        name: {country: _percentile(values, country) for country in values}
+        for name, values in all_values.items()
+    }
+
+
+def _economic_components(indicators: dict, percentiles: dict, country: str) -> tuple[dict, list[dict], list[dict]]:
+    """Calculate the capacity and industrial-fit components with their evidence."""
+    raw = {name: item["value"] for name, item in indicators.items()}
+    country_percentiles = {name: values.get(country) for name, values in percentiles.items()}
+    capacity, capacity_evidence = _weighted([
+        ("gdp_current_usd", country_percentiles.get("gdp_current_usd"), .25),
+        ("gdp_per_capita", country_percentiles.get("gdp_per_capita"), .25),
+        ("merchandise_imports", country_percentiles.get("merchandise_imports"), .25),
+        ("population", country_percentiles.get("population"), .25),
+    ], raw, "World Bank WDI")
+    forest = _weighted([
+        ("forest_area", country_percentiles.get("forest_area"), .60),
+        ("forest_share", country_percentiles.get("forest_share"), .40),
+    ], raw, "World Bank WDI")[0]
+    fit, fit_evidence = _weighted([
+        ("manufacturing_value_added", country_percentiles.get("manufacturing_value_added"), .30),
+        ("manufacturing_share", country_percentiles.get("manufacturing_share"), .20),
+        ("manufacturing_growth", country_percentiles.get("manufacturing_growth"), .15),
+        ("industry_value_added", country_percentiles.get("industry_value_added"), .15),
+        ("industry_share", country_percentiles.get("industry_share"), .15),
+        ("forest_proxy", forest, .05),
+    ], raw, "World Bank WDI")
+    components = {
+        "industrial_fit": fit if len(fit_evidence) >= 3 else None,
+        "market_capacity": capacity if len(capacity_evidence) >= 2 else None,
+    }
+    return components, capacity_evidence, fit_evidence
+
+
+def _trade_context(country: str, trade: dict, trade_scores: dict, provenance: dict) -> dict:
+    """Resolve one country's demand series, source method, and freshness."""
+    demand = trade_scores.get(country)
+    parent_series, method = _resolved_parent(trade.get(country, {}), provenance.get(country))
+    latest_year = max((year for year in parent_series if year <= COMPLETE_YEAR), default=None)
+    age = COMPLETE_YEAR - latest_year if latest_year is not None else None
+    freshness = "current" if age == 0 else "lagging" if age is not None and age <= MAX_TRADE_AGE_YEARS else "stale"
+    return {"demand": demand, "series": parent_series, "method": method,
+            "latest_year": latest_year, "age": age, "freshness": freshness}
+
+
+def _score_market(components: dict) -> tuple[float | None, float | None, float | None, str]:
+    """Calculate economic potential, overall market score, and score status."""
+    weighted_parts = [
+        (components["market_capacity"], .40),
+        (components["industrial_fit"], .60),
+    ]
+    available = [(value, weight) for value, weight in weighted_parts if value is not None]
+    economic_potential = (
+        round(sum(value * weight for value, weight in available) / sum(weight for _, weight in available), 2)
+        if available else None
+    )
+    machine_demand = components["product_demand"]
+    score = (
+        round(economic_potential * .40 + machine_demand * .60, 2)
+        if economic_potential is not None and machine_demand is not None else None
+    )
+    if score is None:
+        status = "insufficient_economic_data" if economic_potential is None else "insufficient_trade_data"
+    elif components["trade_method"] == "mirror":
+        status = "scored_with_mirror"
+    elif components["trade_age"]:
+        status = "scored_with_fallback_year"
+    else:
+        status = "scored"
+    return economic_potential, machine_demand, score, status
+
+
+def _build_country_market(country: str, indicators: dict, trade: dict, trade_scores: dict,
+                          percentiles: dict, provenance: dict) -> dict:
+    """Assemble a country's economic indicators, trade evidence, and market score."""
+    components, capacity_evidence, fit_evidence = _economic_components(indicators, percentiles, country)
+    trade_data = _trade_context(country, trade, trade_scores, provenance)
+    demand = trade_data["demand"]
+    components["product_demand"] = demand["product_demand"] if demand else None
+    economic_potential, machine_demand, score, status = _score_market({
+        **components, "trade_method": demand["trade_data_method"] if demand else (
+            trade_data["method"] if trade_data["series"] else None
+        ), "trade_age": trade_data["age"],
+    })
+    components["economic_potential"] = economic_potential
+    components["machine_demand"] = machine_demand
+    return {
+        "schema_version": 1,
+        "indicators": indicators,
+        "trade": {"woodworking_machinery": {
+            "hs_code": HS_PARENT,
+            "latest_complete_year": COMPLETE_YEAR,
+            "series": demand["series"] if demand else [],
+            "sub_hs": demand["sub_hs"] if demand else {},
+        }},
+        "market_components": components,
+        "economic_potential": economic_potential,
+        "machine_demand": machine_demand,
+        "market_score": score,
+        "market_level": _level(score),
+        "market_evidence": (demand["product_evidence"] if demand else []) + capacity_evidence + fit_evidence,
+        "product_opportunities": demand["opportunities"] if demand else [],
+        "trade_data_method": demand["trade_data_method"] if demand else (
+            trade_data["method"] if trade_data["series"] else None
+        ),
+        "trade_confidence": demand["trade_confidence"] if demand else (
+            "medium" if trade_data["method"] == "mirror" else None
+        ),
+        "trade_data_year": demand["trade_data_year"] if demand else trade_data["latest_year"],
+        "trade_data_age_years": demand["trade_data_age_years"] if demand else trade_data["age"],
+        "trade_freshness": demand["trade_freshness"] if demand else trade_data["freshness"],
+        "score_status": status,
+        "missing_reason": None if score is not None else status,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_market(wdi: dict[str, dict], trade: dict[str, dict[str, dict[int, float]]],
+                  trade_provenance: dict[str, str] | None = None) -> dict[str, dict]:
+    """Build country market read models from economic and trade evidence."""
+    provenance = trade_provenance or {}
+    percentiles = _indicator_percentiles(wdi)
+    trade_scores = _trade_scores(trade, provenance)
+    return {
+        country: _build_country_market(
+            country, wdi.get(country, {}), trade, trade_scores, percentiles, provenance
         )
-        components["economic_potential"] = economic_potential
-        components["machine_demand"] = machine_demand
-        economic = {"schema_version": 1, "indicators": indicators, "trade": {"woodworking_machinery": {"hs_code": HS_PARENT, "latest_complete_year": COMPLETE_YEAR, "series": demand["series"] if demand else [], "sub_hs": demand["sub_hs"] if demand else {}}}, "market_components": components, "economic_potential": economic_potential, "machine_demand": machine_demand, "market_score": score, "market_level": _level(score), "market_evidence": (demand["product_evidence"] if demand else []) + cap_evidence + fit_evidence, "product_opportunities": demand["opportunities"] if demand else [], "trade_data_method": method, "trade_confidence": demand["trade_confidence"] if demand else ("medium" if method == "mirror" else None), "trade_data_year": demand["trade_data_year"] if demand else latest_trade_year, "trade_data_age_years": demand["trade_data_age_years"] if demand else trade_age, "trade_freshness": demand["trade_freshness"] if demand else trade_freshness, "score_status": score_status, "missing_reason": None if score is not None else ("insufficient_economic_data" if economic_potential is None else "insufficient_trade_data"), "refreshed_at": datetime.now(timezone.utc).isoformat()}
-        result[country] = economic
-    return result
+        for country in set(wdi) | set(trade)
+    }
 
 
 def refresh(seed_path: Path = REGION_SEED_PATH) -> dict:
+    """Rebuild and atomically publish the canonical country-region seed."""
     existing = json.loads(seed_path.read_text(encoding="utf-8")) if seed_path.exists() else []
     if not isinstance(existing, list):
         raise ValueError("region seed must be a JSON array")
@@ -411,6 +536,7 @@ def refresh(seed_path: Path = REGION_SEED_PATH) -> dict:
 
 
 def main() -> None:
+    """Run the market refresh command and print its report."""
     report = refresh()
     print(json.dumps(report, indent=2, ensure_ascii=False))
 

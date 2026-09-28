@@ -67,12 +67,14 @@ FDI_ALIASES.update({"TP. Hà Nội": "Hà Nội", "Thành phố Hồ Chí Minh":
 
 
 def _request(url: str) -> bytes:
+    """Fetch one official source page with the collector's user agent."""
     req = urllib.request.Request(url, headers={"User-Agent": "IPIntel-VN-Province-Context/1.0"})
     with urllib.request.urlopen(req, timeout=90) as response:
         return response.read()
 
 
 def _number(value: object) -> float | None:
+    """Parse a Vietnamese or English formatted number while preserving direction."""
     text = "" if value is None else str(value).strip()
     if not text or text.lower() in {"nan", "none", "-", "–", "—"}:
         return None
@@ -102,16 +104,13 @@ def _number(value: object) -> float | None:
 
 
 def _province_name(value: object) -> str:
+    """Normalize HTML entities and known official province aliases."""
     text = html.unescape(str(value or "")).strip()
     return FDI_ALIASES.get(text, text)
 
 
 def parse_fdi_html(raw: bytes, source_url: str, reference_period: str, retrieved_at: str) -> list[dict]:
-    """Parse FIA's province ranking table when present.
-
-    FIA publishes a ranking table rather than a complete 34-province panel;
-    records absent from that table remain null in the output.
-    """
+    """Parse FIA's published province ranking while preserving absent values."""
     try:
         import pandas as pd
         tables = pd.read_html(raw)
@@ -194,12 +193,7 @@ def _stock_rows(raw: bytes):
 
 
 def parse_fdi_stock_attachment(raw: bytes, source_url: str, reference_period: str, retrieved_at: str) -> list[dict]:
-    """Parse a complete FIA cumulative-stock table.
-
-    A stock snapshot is publishable only when every current 34-unit province
-    appears exactly once. Summary rows or a top-10 table are rejected rather
-    than being treated as zero or allocated to the omitted provinces.
-    """
+    """Parse cumulative FDI only from a complete one-row-per-province table."""
     rows_by_code = {}
     for table in _stock_rows(raw):
         if getattr(table, "shape", (0, 0))[1] < 3:
@@ -286,6 +280,7 @@ def parse_fdi_stock_pdf_text(text: str, source_url: str, retrieved_at: str) -> l
 
 
 def build_unavailable_fdi_stock(retrieved_at: str) -> dict:
+    """Build a null-valued stock snapshot when the official attachment is absent."""
     return {"records": [{
         "geo_unit_id": unit["code"], "province_name": unit["name"],
         "source_geography": None, "reference_period": "cumulative_to_2026-07-31",
@@ -360,6 +355,7 @@ def validate_industrial_presence_records(records: list[dict], *, expected_total:
 
 
 def build_unavailable_industrial_presence(retrieved_at: str) -> dict:
+    """Build an explicit unavailable payload instead of inferring NSO values."""
     return {"records": [{
         "geo_unit_id": unit["code"], "province_name": unit["name"],
         "reference_period": "2025-07-01", "communes_with_industrial_park": None,
@@ -374,6 +370,7 @@ def build_unavailable_industrial_presence(retrieved_at: str) -> dict:
 
 
 def build_kcn_context(retrieved_at: str) -> list[dict]:
+    """Build the current-province KCN panel with unsupported values left null."""
     records = []
     for unit in PROVINCES:
         records.append({
@@ -402,6 +399,7 @@ def build_kcn_context(retrieved_at: str) -> list[dict]:
 
 
 def parse_hung_yen_kcn_html(raw: bytes, retrieved_at: str) -> dict:
+    """Parse operating-park count and published area from the Hưng Yên page."""
     text = re.sub(r"<[^>]+>", " ", html.unescape(raw.decode("utf-8", errors="ignore")))
     text = re.sub(r"\s+", " ", text)
     areas = [_number(value) for value in re.findall(r"Total area\s*:\s*([0-9.,]+)", text, flags=re.I)]
@@ -426,11 +424,7 @@ def parse_hung_yen_kcn_html(raw: bytes, retrieved_at: str) -> dict:
 
 
 def parse_investvietnam_kcn_html(raw: bytes, source: dict, retrieved_at: str) -> dict:
-    """Parse explicitly published province KCN context from an official page.
-
-    This parser accepts only explicit counts/areas/occupancy in the page text;
-    it never counts directory cards or treats a planning target as operating.
-    """
+    """Extract only explicit industrial-park counts and metrics from the page."""
     text = re.sub(r"<[^>]+>", " ", html.unescape(raw.decode("utf-8", errors="ignore")))
     text = re.sub(r"\s+", " ", text)
     count_match = re.search(r"(\d+)\s+khu công nghiệp\s+đang hoạt động", text, flags=re.I)
@@ -456,21 +450,23 @@ def parse_investvietnam_kcn_html(raw: bytes, source: dict, retrieved_at: str) ->
 
 
 def coverage_gate(records: list[dict], fields: tuple[str, ...], threshold: int = 20) -> dict:
+    """Report field coverage without enabling rankings from sparse evidence."""
     coverage = {field: sum(row.get(field) is not None for row in records) for field in fields}
     return {"coverage": coverage, "threshold": threshold, "eligible_for_province_comparison": {field: count >= threshold for field, count in coverage.items()}, "ranking_enabled": False}
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build CLI options for local attachments, network refresh, and output paths."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("data/market/vietnam_province_enrichment"))
     parser.add_argument("--skip-network", action="store_true")
     parser.add_argument("--fdi-stock-source", type=Path, help="local FIA Appendix III attachment (HTML/XLS/XLSX)")
     parser.add_argument("--industrial-presence-source", type=Path, help="local NSO industrial-presence attachment (HTML/XLS/XLSX)")
-    args = parser.parse_args()
-    if args.skip_network:
-        print(json.dumps({"status": "skipped", "published": False}, ensure_ascii=False))
-        return
-    retrieved_at = datetime.now(timezone.utc).isoformat()
+    return parser
+
+
+def _fetch_fdi_batch(retrieved_at: str) -> tuple[list[dict], dict, bool]:
+    """Fetch all configured FDI periods and fail the batch if any period fails."""
     fdi_records = []
     fetch_status = {}
     refresh_ok = True
@@ -481,12 +477,12 @@ def main() -> None:
         except Exception as exc:
             fetch_status[period] = {"status": "failed", "error": type(exc).__name__}
             refresh_ok = False
-    # Keep the last complete snapshot when any source in this batch fails.
-    output = args.output
-    output.mkdir(parents=True, exist_ok=True)
-    kcn_records = build_kcn_context(retrieved_at)
+    return fdi_records, fetch_status, refresh_ok
+
+
+def _load_fdi_stock(args: argparse.Namespace, retrieved_at: str) -> dict:
+    """Load a supplied FIA stock attachment or return its unavailable payload."""
     stock_payload = build_unavailable_fdi_stock(retrieved_at)
-    presence_payload = build_unavailable_industrial_presence(retrieved_at)
     if args.fdi_stock_source:
         stock_bytes = args.fdi_stock_source.read_bytes()
         if args.fdi_stock_source.suffix.lower() == ".pdf":
@@ -499,8 +495,20 @@ def main() -> None:
         else:
             stock_records = parse_fdi_stock_attachment(stock_bytes, FDI_STOCK_ATTACHMENT_URL, "cumulative_to_2026-07-31", retrieved_at)
         stock_payload = {"records": stock_records, "fetch_status": "loaded_complete", "source_url": FDI_STOCK_REPORT_SOURCE}
+    return stock_payload
+
+
+def _load_industrial_presence(args: argparse.Namespace, retrieved_at: str) -> dict:
+    """Load a supplied NSO attachment or preserve explicit unavailable status."""
+    presence_payload = build_unavailable_industrial_presence(retrieved_at)
     if args.industrial_presence_source:
         presence_payload = {"records": parse_industrial_presence_attachment(args.industrial_presence_source.read_bytes(), NSO_IP_PRESENCE_SOURCE, retrieved_at), "fetch_status": "loaded_complete", "source_url": NSO_IP_PRESENCE_SOURCE}
+    return presence_payload
+
+
+def _fetch_kcn_context(retrieved_at: str) -> tuple[list[dict], dict | None]:
+    """Fetch the supported official KCN pages and report a batch failure."""
+    kcn_records = build_kcn_context(retrieved_at)
     try:
         kcn_records = [parse_hung_yen_kcn_html(_request(HUNG_YEN_KCN_SOURCE), retrieved_at) if row["geo_unit_id"] == "33" else row for row in kcn_records]
         for code, source in OFFICIAL_PROVINCE_KCN_SOURCES.items():
@@ -509,22 +517,60 @@ def main() -> None:
             parsed = parse_investvietnam_kcn_html(_request(source["url"]), source, retrieved_at)
             kcn_records = [parsed if row["geo_unit_id"] == code else row for row in kcn_records]
     except Exception as exc:
-        fetch_status["kcn"] = {"status": "failed", "error": type(exc).__name__}
-        refresh_ok = False
+        return kcn_records, {"status": "failed", "error": type(exc).__name__}
+    return kcn_records, None
 
+
+def _publish_payloads(output: Path, fdi_records: list[dict], fetch_status: dict,
+                      stock_payload: dict, presence_payload: dict,
+                      kcn_records: list[dict]) -> None:
+    """Atomically replace the four province-context snapshots after a full refresh."""
+    payloads = {
+        output / "province_fdi_context.json": {"records": fdi_records, "fetch_status": fetch_status},
+        output / "province_fdi_stock_context.json": stock_payload,
+        output / "province_industrial_presence_context.json": presence_payload,
+        output / "province_industrial_park_context.json": {
+            "records": kcn_records,
+            "coverage_gate": coverage_gate(kcn_records, (
+                "industrial_park_count", "operating_industrial_park_count", "total_area_ha",
+                "occupancy_rate_pct", "tenant_count", "leased_land_ha",
+            )),
+        },
+    }
+    for path, payload in payloads.items():
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            temp_path = handle.name
+        os.replace(temp_path, path)
+
+
+def _run_refresh(args: argparse.Namespace) -> dict:
+    """Collect configured sources and publish only a complete refresh batch."""
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    fdi_records, fetch_status, refresh_ok = _fetch_fdi_batch(retrieved_at)
+    args.output.mkdir(parents=True, exist_ok=True)
+    stock_payload = _load_fdi_stock(args, retrieved_at)
+    presence_payload = _load_industrial_presence(args, retrieved_at)
+    kcn_records, kcn_failure = _fetch_kcn_context(retrieved_at)
+    if kcn_failure:
+        fetch_status["kcn"] = kcn_failure
+        refresh_ok = False
     if refresh_ok:
-        payloads = {
-            output / "province_fdi_context.json": {"records": fdi_records, "fetch_status": fetch_status},
-            output / "province_fdi_stock_context.json": stock_payload,
-            output / "province_industrial_presence_context.json": presence_payload,
-            output / "province_industrial_park_context.json": {"records": kcn_records, "coverage_gate": coverage_gate(kcn_records, ("industrial_park_count", "operating_industrial_park_count", "total_area_ha", "occupancy_rate_pct", "tenant_count", "leased_land_ha"))},
-        }
-        for path, payload in payloads.items():
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                temp_path = handle.name
-            os.replace(temp_path, path)
-    print(json.dumps({"fdi_records": len(fdi_records), "kcn_records": len(PROVINCES), "fetch_status": fetch_status, "published": refresh_ok}, ensure_ascii=False))
+        _publish_payloads(args.output, fdi_records, fetch_status, stock_payload, presence_payload, kcn_records)
+    return {
+        "fdi_records": len(fdi_records), "kcn_records": len(PROVINCES),
+        "fetch_status": fetch_status, "published": refresh_ok,
+    }
+
+
+def main() -> None:
+    """Parse CLI options and run or skip the province-context source refresh."""
+    args = build_parser().parse_args()
+    if args.skip_network:
+        print(json.dumps({"status": "skipped", "published": False}, ensure_ascii=False))
+        return
+    result = _run_refresh(args)
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ if str(PROJECT) not in sys.path:
 
 
 def pg_value(dsn: str, query: str, params: tuple = ()):
+    """Return the first scalar value from a PostgreSQL query."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         return conn.execute(query, params).fetchone()[0]
 
@@ -44,6 +45,7 @@ def pg_ip_change(dsn: str, cursor: int, ip: str) -> dict | None:
 
 
 def cleanup_pg(dsn: str, source_id: str, ip: str) -> None:
+    """Remove only the PostgreSQL rows created by the synthetic probe."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DELETE FROM ip_change_log WHERE ip = %s::inet", (ip,))
         conn.execute("DELETE FROM ip_observations_state WHERE ip = %s::inet", (ip,))
@@ -53,6 +55,7 @@ def cleanup_pg(dsn: str, source_id: str, ip: str) -> None:
 
 
 def cleanup_ch(source_id: str) -> None:
+    """Remove the synthetic probe events from ClickHouse."""
     from app.db import clickhouse
 
     client = clickhouse.connect()
@@ -63,6 +66,7 @@ def cleanup_ch(source_id: str) -> None:
 
 
 def ch_count(source_id: str, ip: str) -> int:
+    """Count ClickHouse events belonging to the probe source and IP."""
     from app.db import clickhouse
 
     client = clickhouse.connect()
@@ -77,6 +81,7 @@ def ch_count(source_id: str, ip: str) -> int:
 
 
 async def wait_http(url: str, timeout: float = 30.0) -> None:
+    """Wait until the local API responds to a health request."""
     deadline = time.monotonic() + timeout
     async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
         while time.monotonic() < deadline:
@@ -90,23 +95,15 @@ async def wait_http(url: str, timeout: float = 30.0) -> None:
     raise RuntimeError(f"runtime did not become reachable: {url}")
 
 
-async def run_probe(args: argparse.Namespace) -> dict:
-    dsn = os.environ["POSTGRES_DSN"]
-    source_id = f"e2e-probe-{uuid.uuid4().hex[:12]}"
+def _fixture_log() -> tuple[str, str, int]:
+    """Build the deterministic raw log, fixture IP, and final source offset."""
     ip = "192.0.2.241"
     line = f'192.0.2.241 - - [15/Sep/2026:17:00:00 +0000] "GET /e2e-probe HTTP/1.1" 200 17 "-" "sentinel-e2e-probe"'
-    final_offset = len(line.encode("utf-8")) + 1
-    released = asyncio.Event()
-    connected = asyncio.Event()
+    return line, ip, len(line.encode("utf-8")) + 1
 
-    async def ws_handler(websocket):
-        connected.set()
-        await released.wait()
-        await websocket.send(json.dumps({"type": "backlog_done"}))
-        await websocket.send(json.dumps({"type": "lines", "items": [line]}))
-        await websocket.send(json.dumps({"type": "offset", "value": final_offset}))
-        await asyncio.sleep(3)
 
+def _server_environment(args: argparse.Namespace, source_id: str) -> dict[str, str]:
+    """Create the isolated local collector configuration for the probe."""
     env = os.environ.copy()
     env.update({
         "APP_ROLE": "all",
@@ -119,40 +116,111 @@ async def run_probe(args: argparse.Namespace) -> dict:
         "LOG_WS_FLUSH_MS": "50",
         "TRUSTED_HOSTS": "127.0.0.1,localhost",
     })
-    process = subprocess.Popen(
+    return env
+
+
+def _start_probe_server(args: argparse.Namespace, source_id: str) -> subprocess.Popen:
+    """Start a local all-role FastAPI process configured for the fixture."""
+    return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(args.http_port)],
         cwd=PROJECT,
-        env=env,
+        env=_server_environment(args, source_id),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+async def _send_fixture(websocket, released: asyncio.Event, connected: asyncio.Event,
+                        line: str, final_offset: int) -> None:
+    """Send the ordered synthetic log, backlog marker, and source offset."""
+    connected.set()
+    await released.wait()
+    await websocket.send(json.dumps({"type": "backlog_done"}))
+    await websocket.send(json.dumps({"type": "lines", "items": [line]}))
+    await websocket.send(json.dumps({"type": "offset", "value": final_offset}))
+    await asyncio.sleep(3)
+
+
+async def _capture_fixture_changes(dsn: str, url: str, baseline: int, ip: str,
+                                   timeout: float) -> tuple[list[dict], dict | None]:
+    """Capture post-baseline SSE cursors and bind one to the fixture IP."""
+    deadline = time.monotonic() + timeout
+    captured: list[dict] = []
+    bound_change: dict | None = None
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5, read=5, write=5, pool=5), trust_env=False
+    ) as client:
+        async with client.stream("GET", url, headers={"Accept": "text/event-stream"}) as response:
+            response.raise_for_status()
+            event_name = None
+            async for raw_line in response.aiter_lines():
+                if time.monotonic() >= deadline:
+                    break
+                if raw_line.startswith("event: "):
+                    event_name = raw_line[7:]
+                elif raw_line.startswith("data: ") and event_name == "ip_changes":
+                    payload = json.loads(raw_line[6:])
+                    if int(payload.get("cursor", 0)) > baseline:
+                        captured.append(payload)
+                        bound_change = pg_ip_change(dsn, int(payload["cursor"]), ip)
+                        if bound_change is not None:
+                            break
+                elif not raw_line:
+                    event_name = None
+    return captured, bound_change
+
+
+def _validate_probe_result(result: dict, fixture_ip: str) -> None:
+    """Fail unless every durable stage and the SSE cursor match the fixture."""
+    binding = result["source_binding"]
+    cursor_bound_to_fixture = (
+        result["bound_ip_change"] is not None
+        and result["bound_ip_change"]["ip"] == fixture_ip
+    )
+    if (
+        result["checkpoint"] != result["expected_checkpoint"]
+        or result["pg_observation_rows"] < 1
+        or result["clickhouse_events"] < 1
+        or not result["captured_sse_events"]
+        or not cursor_bound_to_fixture
+        or not binding["checkpoint_matches_fixture"]
+        or not binding["observation_matches_fixture"]
+    ):
+        raise RuntimeError(json.dumps(result, sort_keys=True))
+
+
+def _stop_probe_server(process: subprocess.Popen) -> None:
+    """Stop the probe API process, force-killing it only after timeout."""
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+async def run_probe(args: argparse.Namespace) -> dict:
+    """Exercise one synthetic event through durable storage, PG state, and SSE."""
+    dsn = os.environ["POSTGRES_DSN"]
+    source_id = f"e2e-probe-{uuid.uuid4().hex[:12]}"
+    line, ip, final_offset = _fixture_log()
+    released = asyncio.Event()
+    connected = asyncio.Event()
+
+    async def ws_handler(websocket):
+        """Wait for the baseline, then deliver the deterministic fixture."""
+        await _send_fixture(websocket, released, connected, line, final_offset)
+
+    process = _start_probe_server(args, source_id)
     try:
         async with websockets.serve(ws_handler, "127.0.0.1", args.websocket_port):
             await wait_http(f"http://127.0.0.1:{args.http_port}/health")
             await asyncio.wait_for(connected.wait(), timeout=30)
             baseline = int(pg_value(dsn, "SELECT COALESCE(MAX(seq), 0) FROM ip_change_log"))
             released.set()
-            deadline = time.monotonic() + args.timeout
-            captured: list[dict] = []
-            bound_change: dict | None = None
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=5, write=5, pool=5), trust_env=False) as client:
-                async with client.stream("GET", f"http://127.0.0.1:{args.http_port}/api/stream", headers={"Accept": "text/event-stream"}) as response:
-                    response.raise_for_status()
-                    event_name = None
-                    async for raw_line in response.aiter_lines():
-                        if time.monotonic() >= deadline:
-                            break
-                        if raw_line.startswith("event: "):
-                            event_name = raw_line[7:]
-                        elif raw_line.startswith("data: ") and event_name == "ip_changes":
-                            payload = json.loads(raw_line[6:])
-                            if int(payload.get("cursor", 0)) > baseline:
-                                captured.append(payload)
-                                bound_change = pg_ip_change(dsn, int(payload["cursor"]), ip)
-                                if bound_change is not None:
-                                    break
-                        elif not raw_line:
-                            event_name = None
+            captured, bound_change = await _capture_fixture_changes(
+                dsn, f"http://127.0.0.1:{args.http_port}/api/stream", baseline, ip, args.timeout
+            )
 
             checkpoint = int(pg_value(dsn, "SELECT last_offset FROM log_sources WHERE source_id = %s", (source_id,)))
             pg_ip_count = int(pg_value(dsn, "SELECT COUNT(*) FROM ip_observations_state WHERE ip = %s::inet", (ip,)))
@@ -172,28 +240,12 @@ async def run_probe(args: argparse.Namespace) -> dict:
                     "observation_matches_fixture": pg_ip_count >= 1,
                 },
             }
-            cursor_bound_to_fixture = (
-                bound_change is not None
-                and bound_change["ip"] == ip
-            )
-            if (
-                checkpoint != final_offset
-                or pg_ip_count < 1
-                or events_in_ch < 1
-                or not captured
-                or not cursor_bound_to_fixture
-            ):
-                raise RuntimeError(json.dumps(result, sort_keys=True))
+            _validate_probe_result(result, ip)
             print(json.dumps(result, indent=2, sort_keys=True))
             return result
     finally:
         released.set()
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        _stop_probe_server(process)
         try:
             cleanup_ch(source_id)
             cleanup_pg(dsn, source_id, ip)
@@ -202,6 +254,7 @@ async def run_probe(args: argparse.Namespace) -> dict:
 
 
 def main() -> int:
+    """Parse probe options, validate prerequisites, and run the native check."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--http-port", type=int, default=8011)
     parser.add_argument("--websocket-port", type=int, default=8791)

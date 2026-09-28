@@ -13,6 +13,7 @@ AREA_CALIBRATION_VERSION = "phase6b-area-cal-v1"
 
 
 def calibrate_area_summaries(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign tie-aware percentiles to area scores within each evidence group."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row.get("area_raw_score") is not None:
@@ -31,6 +32,7 @@ def calibrate_area_summaries(rows: Iterable[dict[str, Any]]) -> list[dict[str, A
 
 
 def refresh_area_calibration(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Load, calibrate, and persist selected area summary scores."""
     selected = {str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", "").split(",")) if str(code).strip()}
     rows = [row for row in repo.list_area_summaries_for_calibration() if not selected or row["country_code"] in selected]
     updates = calibrate_area_summaries(rows)

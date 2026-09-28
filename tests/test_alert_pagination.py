@@ -48,7 +48,7 @@ def test_alert_keyset_pages_have_no_duplicates_or_skips_with_equal_timestamps():
 
 
 def test_alert_list_keeps_filter_args_separate_from_cursor_args(monkeypatch):
-    import app.db.repositories as repositories
+    import app.db.alert_repository as alert_repository
 
     class Result:
         def __init__(self, rows):
@@ -82,7 +82,7 @@ def test_alert_list_keeps_filter_args_separate_from_cursor_args(monkeypatch):
         for status in (None, "new"):
             cursor = AlertRepository.encode_cursor("2026-09-12T10:00:00+00:00", 9)
             connection = Connection()
-            monkeypatch.setattr(repositories, "transaction", lambda: Scope(connection))
+            monkeypatch.setattr(alert_repository, "transaction", lambda: Scope(connection))
             result = AlertRepository().list(severity=severity, status=status, cursor=cursor, limit=2)
 
             count_sql, count_args = connection.calls[0]

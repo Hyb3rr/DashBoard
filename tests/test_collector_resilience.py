@@ -3,6 +3,8 @@ import asyncio
 import pytest
 
 from app.collectors.websocket_collector import CollectorConfig, WebSocketCollector
+from app.collectors import batching, session
+from app.collectors.websocket_collector import utc_now
 
 
 def _config() -> CollectorConfig:
@@ -27,17 +29,17 @@ async def test_supervisor_restarts_run_after_unexpected_failure(monkeypatch):
         calls += 1
         if calls == 1:
             raise ConnectionError("postgres unavailable")
-        collector._stop.set()
+        collector.stop_event.set()
 
     async def no_status():
         return None
 
-    monkeypatch.setattr(collector, "run", flaky_run)
+    monkeypatch.setattr(collector.session, "run", lambda *_args: flaky_run())
     monkeypatch.setattr(collector, "_publish_status", no_status)
-    collector._stop.clear()
-    collector._supervisor_backoff = 0
+    collector.stop_event.clear()
+    collector.session.supervisor_backoff = 0
 
-    await asyncio.wait_for(collector._supervise_run(), timeout=1)
+    await asyncio.wait_for(collector.session.supervise(utc_now), timeout=1)
 
     assert calls == 2
     assert collector.state == "retrying"
@@ -114,12 +116,12 @@ async def test_lease_loss_recycles_cycle_without_global_shutdown():
             nonlocal closed
             closed = True
 
-    collector._active_websocket = WebSocket()
+    collector.session.active_websocket = WebSocket()
 
-    await collector._signal_lease_loss("lease lost")
+    await collector.session.signal_lease_loss("lease lost")
 
-    assert collector._lease_lost.is_set()
-    assert not collector._stop.is_set()
+    assert collector.session.lease_lost.is_set()
+    assert not collector.stop_event.is_set()
     assert closed
     assert collector.state == "standby"
 
@@ -127,19 +129,19 @@ async def test_lease_loss_recycles_cycle_without_global_shutdown():
 @pytest.mark.asyncio
 async def test_lease_loss_resets_memory_to_durable_offset(monkeypatch):
     collector = WebSocketCollector(_config())
-    collector._storage_queue.put_nowait((['line'], 99, 50, "received"))
-    collector._pending = [("pending", "received")]
+    collector.storage_worker.queue.put_nowait((['line'], 99, 50, "received"))
+    collector.storage.pending = [("pending", "received")]
     collector.pending_lines = 1
-    collector._stream_offset = 99
+    collector.storage.stream_offset = 99
 
-    monkeypatch.setattr(collector, "_load_offset", lambda: 50)
+    monkeypatch.setattr(collector.session, "load_offset", lambda: 50)
 
-    await collector._reset_after_lease_loss()
+    await collector.session.reset_after_lease_loss()
 
-    assert collector._storage_queue.empty()
-    assert collector._storage_queue._unfinished_tasks == 0
-    assert collector._pending == []
-    assert collector._stream_offset == 50
+    assert collector.storage_worker.queue.empty()
+    assert collector.storage_worker.queue._unfinished_tasks == 0
+    assert collector.storage.pending == []
+    assert collector.storage.stream_offset == 50
     assert collector.last_offset == 50
 
 
@@ -158,22 +160,22 @@ async def test_checkpoint_rejection_restarts_storage_worker_for_next_batch(monke
         return 10, 1, set(), []
 
     async def mark_lease_lost(_error):
-        collector._lease_lost.set()
+        collector.session.lease_lost.set()
 
     monkeypatch.setattr(collector, "_commit_batch", commit)
-    monkeypatch.setattr(collector, "_signal_lease_loss", mark_lease_lost)
-    collector._ensure_storage_worker()
-    await collector._storage_queue.put((["first"], 10, 0, "stamp"))
+    monkeypatch.setattr(collector.session, "signal_lease_loss", mark_lease_lost)
+    collector.storage_worker.start()
+    await collector.storage_worker.queue.put((["first"], 10, 0, "stamp"))
     await asyncio.sleep(0)
-    await asyncio.wait_for(collector._storage_queue.join(), timeout=1)
-    assert collector._storage_task.done()
+    await asyncio.wait_for(collector.storage_worker.queue.join(), timeout=1)
+    assert collector.storage_worker.task.done()
 
-    await collector._enqueue_storage(["second"], 10, 0, "stamp")
-    await asyncio.wait_for(collector._storage_queue.join(), timeout=1)
+    await batching.enqueue_storage(collector, ["second"], 10, 0, "stamp")
+    await asyncio.wait_for(collector.storage_worker.queue.join(), timeout=1)
     assert calls == 2
-    assert not collector._storage_task.done()
-    collector._storage_task.cancel()
-    await asyncio.gather(collector._storage_task, return_exceptions=True)
+    assert not collector.storage_worker.task.done()
+    collector.storage_worker.task.cancel()
+    await asyncio.gather(collector.storage_worker.task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

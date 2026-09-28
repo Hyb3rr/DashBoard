@@ -21,6 +21,7 @@ AUTO_EXPLAIN_FEATURE = "critical_alert_auto_explain"
 
 class AiTriggerRepository:
     def auto_explain_enabled(self) -> bool:
+        """Return whether automatic critical-alert explanations are enabled."""
         with transaction() as conn:
             row = conn.execute(
                 "SELECT enabled FROM ai_feature_settings WHERE feature_key=%s",
@@ -60,6 +61,7 @@ class AiTriggerRepository:
         return desired
 
     def read_batch(self, after: int, limit: int = 50) -> tuple[list[TriggerEvent], int]:
+        """Read bounded change-feed events after a cursor and return the feed head."""
         bounded_limit = max(1, min(int(limit), 500))
         with transaction() as conn:
             bounds = conn.execute("SELECT COALESCE(MAX(seq),0) AS current, COALESCE(MIN(seq),0) AS oldest FROM ip_change_log").fetchone()
@@ -70,6 +72,7 @@ class AiTriggerRepository:
         return [TriggerEvent(int(r["seq"]), r["ip"], r["reason"], r["old_label"], r["new_label"]) for r in rows], current
 
     def get_cursor(self, consumer_name: str = TRIGGER_CONSUMER) -> int:
+        """Read the durable change-feed cursor for the named consumer."""
         with transaction() as conn:
             row = conn.execute("SELECT cursor_seq FROM ai_trigger_cursors WHERE consumer_name=%s", (consumer_name,)).fetchone()
         return int(row["cursor_seq"]) if row else 0
@@ -106,12 +109,14 @@ class AiTriggerRepository:
         return outcome
 
     def available_capacity(self, max_pending_jobs: int) -> int:
+        """Return remaining capacity after counting active explanation jobs."""
         limit = max(0, int(max_pending_jobs))
         with transaction() as conn:
             row = conn.execute("SELECT count(*) AS active FROM ai_explain_jobs WHERE status IN ('pending','running')").fetchone()
         return max(0, limit - int(row["active"] or 0))
 
     def deferred(self, limit: int = 1) -> list[dict[str, Any]]:
+        """List bounded deferred critical-classification triggers in feed order."""
         with transaction() as conn:
             rows = conn.execute(
                 """SELECT ip,event_seq,reason,old_label,new_label

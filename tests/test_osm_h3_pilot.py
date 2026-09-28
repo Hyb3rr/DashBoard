@@ -1,12 +1,15 @@
 from pathlib import Path
 import inspect
 
+import pytest
+
 from app.config.market_sources import UNSUPPORTED_OSM_COUNTRIES, WAVE_1_COUNTRIES, resolve_osm_source
 from app.db.market_repository import MarketRepository
+from scripts.geo import osm_source_cache
 from scripts.geo.osm_h3_pilot import (
     CLASSIFICATION_VERSION, FILTER_VERSION, PRIORITY_COUNTRIES, PilotMetrics, _entity_points, _feature_counts,
     classify_tags, download_snapshot, native_filter_args, percentile, persist_report, preflight_osm_source,
-    preflight_osm_sources, refresh_osm_pilot, safe_snapshot_activation,
+    preflight_osm_sources, refresh_osm_pilot, safe_snapshot_activation, build_parser, main,
     apply_cache_retention, cache_retention_plan,
 )
 
@@ -31,7 +34,7 @@ def test_download_snapshot_resumes_partial_with_http_range(monkeypatch, tmp_path
         assert kwargs["headers"]["Range"] == "bytes=4-"
         return Response()
 
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.requests.get", get)
+    monkeypatch.setattr("scripts.geo.osm_source_cache.requests.get", get)
     path, written = download_snapshot("https://example.test/fr.pbf", destination)
     assert path == destination
     assert written == len(b"content")
@@ -57,7 +60,7 @@ def test_download_snapshot_restarts_safely_when_range_is_unsupported(monkeypatch
         assert kwargs["headers"]["Range"] == "bytes=5-"
         return Response()
 
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.requests.get", get)
+    monkeypatch.setattr("scripts.geo.osm_source_cache.requests.get", get)
     path, written = download_snapshot("https://example.test/source.pbf", destination)
     assert path == destination
     assert written == len(b"fresh")
@@ -163,7 +166,7 @@ def test_scheduler_refresh_is_country_isolated_and_marks_job_failure(monkeypatch
         destination.write_bytes(b"pbf")
         return destination, 3
     monkeypatch.setattr("scripts.geo.osm_h3_pilot.download_snapshot", download)
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.source_size", lambda *_args: 3)
+    monkeypatch.setattr(osm_source_cache, "source_size", lambda *_args: 3)
     monkeypatch.setattr("scripts.geo.osm_h3_pilot.run_native_pipeline", lambda path, country, *args: (_ for _ in ()).throw(RuntimeError("DE failure")) if country == "DE" else {"country": country, "source_hash": "a" * 64, "cell_features": {}})
 
     class Repo:
@@ -236,7 +239,7 @@ def test_cell_feature_persistence_has_one_placeholder_per_field():
 
 
 def test_source_preflight_is_read_only_and_reports_disk_guard(monkeypatch, tmp_path):
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.source_size", lambda *_args: 123)
+    monkeypatch.setattr(osm_source_cache, "source_size", lambda *_args: 123)
     monkeypatch.setenv("OSM_CACHE_SOFT_LIMIT_GIB", "0")
     result = preflight_osm_source("IN", tmp_path)
     assert result["source_resolved"] is True
@@ -248,8 +251,8 @@ def test_source_preflight_is_read_only_and_reports_disk_guard(monkeypatch, tmp_p
 
 
 def test_source_preflight_reports_all_countries_and_blocks_hard_limit(monkeypatch, tmp_path):
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.source_size", lambda *_args: 2)
-    monkeypatch.setattr("scripts.geo.osm_h3_pilot.cache_bytes", lambda _path: 10 * 1024 ** 3)
+    monkeypatch.setattr(osm_source_cache, "source_size", lambda *_args: 2)
+    monkeypatch.setattr(osm_source_cache, "cache_bytes", lambda _path: 10 * 1024 ** 3)
     result = preflight_osm_sources(("IN", "XX"), tmp_path)
     assert result["status"] == "blocked"
     assert result["countries"]["IN"]["status"] == "blocked_disk_hard_limit"
@@ -285,3 +288,33 @@ def test_cache_retention_apply_is_exact_and_idempotent(tmp_path):
     assert not path.exists()
     second = cache_retention_plan(tmp_path, ("AA",), target_bytes=0)
     assert second["deletions"] == []
+
+
+def test_cli_parser_keeps_default_mode_arguments():
+    args = build_parser().parse_args([])
+
+    assert args.countries is None
+    assert args.resolutions is None
+    assert args.budget_seconds == 600.0
+    assert args.persist is False
+
+
+@pytest.mark.parametrize(
+    ("argv", "runner_name"),
+    [
+        (["--retention-dry-run", "--source-preflight", "--scale-benchmark"], "_run_retention"),
+        (["--source-preflight", "--scale-benchmark"], "_run_source_preflight"),
+        (["--scale-benchmark"], "_run_scale_benchmark"),
+        (["--pbf", "SG", "sg.pbf", "--pbf", "VN", "vn.pbf", "--pbf", "DE", "de.pbf"], "_run_pilot_mode"),
+    ],
+)
+def test_cli_dispatch_preserves_mode_priority(monkeypatch, argv, runner_name):
+    calls = []
+    monkeypatch.setattr("sys.argv", ["osm_h3_pilot", *argv])
+    for name in ("_run_retention", "_run_source_preflight", "_run_scale_benchmark", "_run_pilot_mode"):
+        monkeypatch.setattr(f"scripts.geo.osm_h3_pilot.{name}", lambda _args, name=name: calls.append(name) or {"mode": name})
+    monkeypatch.setattr("scripts.geo.osm_h3_pilot._write_cli_report", lambda _args, report: calls.append(report["mode"]))
+
+    main()
+
+    assert calls == [runner_name, runner_name]

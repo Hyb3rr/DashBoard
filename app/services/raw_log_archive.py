@@ -6,18 +6,27 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import time
 
 from ..core import metrics
 from app.config.backup import BackupSettings
-from .raw_archive_upload import azure_sdk_available, block_id, create_azure_uploader
+from .raw_archive_compression import (
+    RawArchiveCompressionError,
+    compress_and_verify,
+    write_compression_marker,
+)
+from .raw_archive_upload import (
+    RawArchiveUploadError,
+    azure_sdk_available,
+    create_azure_uploader,
+    remove_uploaded_artifacts,
+    upload_sealed,
+)
 
 
 DEFAULT_SPOOL_DIR = Path(__file__).resolve().parents[2] / "data" / "raw-log-spool"
@@ -33,14 +42,6 @@ DEFAULT_WRITE_BACKOFF_MAX_SECONDS = 10.0
 
 class RawArchivePressure(RuntimeError):
     """Admission refused so the caller can reconnect/replay instead of dropping."""
-
-
-class RawArchiveCompressionError(RuntimeError):
-    """Zstandard compression or lossless verification failed."""
-
-
-class RawArchiveUploadError(RuntimeError):
-    """Azure archival or remote verification failed."""
 
 
 class RawArchiveWriteError(RuntimeError):
@@ -86,6 +87,7 @@ class RawLogArchive:
                  max_queue_bytes: int = DEFAULT_QUEUE_MAX_BYTES,
                  max_write_attempts: int | None = None,
                  write_backoff_seconds: float | None = None) -> None:
+        """Initialize archive paths, bounded queues, counters, and receipt state."""
         if max_chunk_bytes <= 0:
             raise ValueError("raw archive max chunk bytes must be positive")
         if max_queue_lines <= 0 or max_queue_bytes <= 0:
@@ -134,6 +136,7 @@ class RawLogArchive:
         self._write_retry_count = 0
 
     async def start(self) -> None:
+        """Start archive writer and background compression/upload consumers."""
         if self._task and not self._task.done():
             return
         await asyncio.to_thread(self.spool_dir.mkdir, parents=True, exist_ok=True)
@@ -225,9 +228,11 @@ class RawLogArchive:
         return await receipt_future
 
     def pending_bytes(self) -> int:
+        """Return the total bytes currently waiting for archive persistence."""
         return self._pending_bytes
 
     def status(self) -> dict[str, int | str | None]:
+        """Expose archive health, backlog, spool, and upload status."""
         self._update_metrics()
         return {
             "pending_lines": self._queue.qsize(),
@@ -257,10 +262,12 @@ class RawLogArchive:
 
     @staticmethod
     def _fail_receipt(receipt: asyncio.Future | None, error: Exception) -> None:
+        """Complete a durability receipt with its associated write failure."""
         if receipt is not None and not receipt.done():
             receipt.set_exception(error)
 
     def _fail_queued_items(self, error: Exception, current: _RawArchiveItem | None = None) -> None:
+        """Fail every queued durability receipt after writer termination."""
         self._fail_receipt(current.receipt if current else None, error)
         if current:
             self._receipt_groups.pop(current.group_id, None)
@@ -277,18 +284,22 @@ class RawLogArchive:
         self._pending_bytes = 0
 
     def _oldest_queued_age_seconds(self) -> float:
+        """Measure the age of the oldest queued archive item."""
         if not self._queued_stamps:
             return 0.0
         return round(max(0.0, time.time() - self._queued_stamps[0].timestamp()), 3)
 
     def _source_name(self) -> str:
+        """Return the normalized archive source identifier."""
         return _SAFE_SOURCE.sub("_", self.source_id).strip("._") or "source"
 
     def _directory(self, stamp: datetime) -> Path:
+        """Resolve and create the archive directory for a data category."""
         day = stamp.astimezone(timezone.utc)
         return self.spool_dir / self._source_name() / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
 
     def _new_active(self, stamp: datetime) -> _ActiveChunk:
+        """Create a new active raw-log chunk and its metadata state."""
         stamp = stamp.astimezone(timezone.utc)
         hour = stamp.strftime("%Y%m%dT%H0000Z")
         chunk_id = f"{hour}-{self._next_sequence:06d}"
@@ -301,6 +312,7 @@ class RawLogArchive:
         )
 
     def _recover_active(self) -> None:
+        """Recover or quarantine an unfinished active chunk after restart."""
         candidates = sorted(self.spool_dir.rglob("*.active.json"))
         if not candidates:
             return
@@ -330,6 +342,7 @@ class RawLogArchive:
             self._last_error = f"cannot recover active raw archive chunk: {candidate.name}"
 
     def _advance_sequence(self) -> None:
+        """Advance the source sequence using the accepted raw lines."""
         for path in self.spool_dir.rglob("*"):
             if path.suffix not in {".log", ".active"}:
                 continue
@@ -338,6 +351,7 @@ class RawLogArchive:
                 self._next_sequence = max(self._next_sequence, int(match.group("sequence")) + 1)
 
     def _write_active_metadata(self) -> None:
+        """Persist the active chunk manifest and sequence metadata."""
         assert self._active
         metadata = {
             "source": self.source_id, "chunk_id": self._active.chunk_id,
@@ -350,6 +364,7 @@ class RawLogArchive:
         temporary.replace(self._active.metadata_path)
 
     def _seal_active(self, ended_at: datetime) -> None:
+        """Flush and seal a completed active chunk for compression."""
         active = self._active
         if not active:
             return
@@ -375,6 +390,7 @@ class RawLogArchive:
         self._active = None
 
     def _write_line(self, line: str, received_at: datetime) -> None:
+        """Append one raw line and update its chunk integrity metadata."""
         stamp = received_at.astimezone(timezone.utc)
         payload = line.encode("utf-8") + b"\n"
         if self._active and (self._active.hour != stamp.strftime("%Y%m%dT%H0000Z") or
@@ -393,12 +409,14 @@ class RawLogArchive:
         self._written_bytes += len(payload)
 
     def _sync_active(self) -> None:
+        """Flush and fsync the active chunk before acknowledging durability."""
         if not self._active:
             return
         self._sync_path(self._active.path)
 
     @staticmethod
     def _sync_path(path: Path) -> None:
+        """Fsync a file path when the platform supports it."""
         descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)
@@ -407,6 +425,7 @@ class RawLogArchive:
 
     @staticmethod
     def _sync_directory(path: Path) -> None:
+        """Fsync a directory so archive metadata changes are durable."""
         descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)
@@ -414,6 +433,7 @@ class RawLogArchive:
             os.close(descriptor)
 
     def _write_parse_failures(self, records: list[dict]) -> None:
+        """Persist parser rejection evidence as a separate archive artifact."""
         if not records:
             return
         active = self._active
@@ -438,9 +458,11 @@ class RawLogArchive:
             os.fsync(stream.fileno())
 
     def write_parse_failures(self, records: list[dict]) -> None:
+        """Queue parse-failure evidence for durable archive persistence."""
         self._write_parse_failures(records)
 
     async def _writer_loop(self) -> None:
+        """Persist queued raw lines and resolve receipts after fsync."""
         while not self._stop or not self._queue.empty():
             try:
                 item = await asyncio.wait_for(self._queue.get(), timeout=0.5)
@@ -495,6 +517,7 @@ class RawLogArchive:
                 self._update_metrics()
 
     def _sealed_paths(self) -> list[Path]:
+        """List sealed archive chunks that are ready for processing."""
         return sorted(
             path for path in self.spool_dir.rglob("*.log")
             if _CHUNK_ID.fullmatch(path.stem) and not path.with_suffix(".log.zst").exists()
@@ -502,60 +525,11 @@ class RawLogArchive:
 
     @staticmethod
     def _compress_and_verify(path: Path) -> dict:
-        zstd = shutil.which("zstd")
-        if not zstd:
-            raise RawArchiveCompressionError("zstd executable is unavailable")
-        compressed = path.with_suffix(".log.zst")
-        temporary = path.with_suffix(".log.zst.tmp")
-        try:
-            result = subprocess.run(
-                [zstd, "-q", "-3", "-f", str(path), "-o", str(temporary)],
-                capture_output=True, text=True, check=False,
-            )
-            if result.returncode:
-                raise RawArchiveCompressionError(f"zstd failed with exit {result.returncode}")
-            original_digest = hashlib.sha256()
-            compressed_digest = hashlib.sha256()
-            original_size = compressed_size = 0
-            with path.open("rb") as original, temporary.open("rb") as encoded:
-                while chunk := original.read(1024 * 1024):
-                    original_digest.update(chunk)
-                    original_size += len(chunk)
-                while chunk := encoded.read(1024 * 1024):
-                    compressed_digest.update(chunk)
-                    compressed_size += len(chunk)
-            process = subprocess.Popen(
-                [zstd, "-q", "-d", "-c", str(temporary)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            verified_size = 0
-            with path.open("rb") as original:
-                assert process.stdout
-                while expected := original.read(1024 * 1024):
-                    actual = process.stdout.read(len(expected))
-                    if actual != expected:
-                        process.kill()
-                        process.wait()
-                        raise RawArchiveCompressionError("zstd decompression differs from original")
-                    verified_size += len(actual)
-                trailing = process.stdout.read(1)
-            code = process.wait()
-            if trailing or code or verified_size != original_size:
-                raise RawArchiveCompressionError("zstd decompression verification failed")
-            temporary.replace(compressed)
-            path.unlink()
-            return {
-                "original_bytes": original_size,
-                "compressed_bytes": compressed_size,
-                "original_sha256": original_digest.hexdigest(),
-                "compressed_sha256": compressed_digest.hexdigest(),
-                "compressed_path": str(compressed),
-            }
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
+        """Compress a sealed chunk and verify its checksum and line count."""
+        return compress_and_verify(path)
 
     async def _compression_loop(self) -> None:
+        """Compress sealed chunks from the bounded background queue."""
         while True:
             paths = await asyncio.to_thread(self._sealed_paths)
             if not paths:
@@ -585,63 +559,15 @@ class RawLogArchive:
     @staticmethod
     def _upload_sealed(path: Path, spool_dir: Path, source_id: str,
                        settings: BackupSettings, uploader, verifier) -> dict:
-        object_key = f"{settings.prefix}/raw-logs/{path.relative_to(spool_dir).as_posix()}"
-        archive_source = path.relative_to(spool_dir).parts[0]
-        digest = hashlib.sha256()
-        size = 0
-        block_ids = []
-        buffer = bytearray()
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-                buffer.extend(chunk)
-                while len(buffer) >= settings.part_size:
-                    current_block_id = block_id(len(block_ids) + 1)
-                    uploader.put_block(object_key, current_block_id, bytes(buffer[:settings.part_size]))
-                    del buffer[:settings.part_size]
-                    block_ids.append(current_block_id)
-        if buffer or not block_ids:
-            if not buffer:
-                raise RawArchiveUploadError("sealed raw archive chunk is empty")
-            current_block_id = block_id(len(block_ids) + 1)
-            uploader.put_block(object_key, current_block_id, bytes(buffer))
-            block_ids.append(current_block_id)
-        uploader.put_block_list(object_key, block_ids)
-        remote_size, remote_digest = verifier(settings, object_key)
-        if (remote_size, remote_digest) != (size, digest.hexdigest()):
-            raise RawArchiveUploadError("remote raw archive verification mismatch")
-        manifest_key = f"{settings.prefix}/raw-logs/manifests/{archive_source}/{path.stem}.json"
-        manifest = {
-            "schema_version": 1, "source": archive_source, "chunk_id": path.stem,
-            "object_key": object_key, "bytes": size, "sha256": digest.hexdigest(),
-            "remote_bytes": remote_size, "remote_sha256": remote_digest,
-            "verified_at": datetime.now(timezone.utc).isoformat(), "status": "completed",
-        }
-        uploader.put_bytes(manifest_key, (json.dumps(manifest, indent=2) + "\n").encode(), content_type="application/json")
-        return manifest
+        """Upload a verified sealed chunk and write its remote manifest."""
+        return upload_sealed(path, spool_dir, source_id, settings, uploader, verifier)
 
     async def _upload_loop(self) -> None:
-        try:
-            settings = BackupSettings.from_env()
-            settings = BackupSettings(settings.account, settings.container, settings.auth,
-                                      settings.tenant_id, settings.client_id, settings.client_secret,
-                                      settings.prefix, settings.part_size, settings.endpoint)
-        except RuntimeError as exc:
-            self._upload_status = "UNAVAILABLE"
-            self._last_error = str(exc)[:240]
+        """Upload verified archive chunks from the background queue."""
+        dependencies = self._initialize_uploader()
+        if dependencies is None:
             return
-        if not azure_sdk_available():
-            self._upload_status = "UNAVAILABLE"
-            self._last_error = "Azure SDK is unavailable; raw archive upload is disabled"
-            return
-        try:
-            uploader, verifier = create_azure_uploader(settings)
-        except Exception as exc:
-            self._upload_status = "ERROR"
-            self._last_error = f"{type(exc).__name__}: {exc}"[:240]
-            self._upload_failures += 1
-            return
+        settings, uploader, verifier = dependencies
         try:
             while True:
                 paths = await asyncio.to_thread(self._upload_paths)
@@ -650,31 +576,61 @@ class RawLogArchive:
                         return
                     await asyncio.sleep(0.5)
                     continue
-                for path in paths:
-                    try:
-                        await asyncio.to_thread(
-                            self._upload_sealed, path, self.spool_dir, self.source_id,
-                            settings, uploader, verifier,
-                        )
-                        await asyncio.to_thread(self._remove_uploaded_artifacts, path)
-                        self._uploaded_chunks += 1
-                        self._upload_status = "READY"
-                    except Exception as exc:
-                        self._upload_failures += 1
-                        self._upload_status = "ERROR"
-                        self._last_error = f"{type(exc).__name__}: {exc}"[:240]
-                        metrics.increment("raw_archive.upload_failures")
-                        if not self._stop:
-                            await asyncio.sleep(1)
-                            break
-                    finally:
-                        self._update_metrics()
+                await self._upload_paths_once(paths, settings, uploader, verifier)
                 if self._stop:
                     return
         finally:
             uploader.close()
 
+    def _initialize_uploader(self):
+        """Load Azure upload dependencies and record unavailable startup states."""
+        try:
+            settings = BackupSettings.from_env()
+            settings = BackupSettings(settings.account, settings.container, settings.auth,
+                                      settings.tenant_id, settings.client_id, settings.client_secret,
+                                      settings.prefix, settings.part_size, settings.endpoint)
+        except RuntimeError as exc:
+            self._upload_status = "UNAVAILABLE"
+            self._last_error = str(exc)[:240]
+            return None
+        if not azure_sdk_available():
+            self._upload_status = "UNAVAILABLE"
+            self._last_error = "Azure SDK is unavailable; raw archive upload is disabled"
+            return None
+        try:
+            uploader, verifier = create_azure_uploader(settings)
+        except Exception as exc:
+            self._upload_status = "ERROR"
+            self._last_error = f"{type(exc).__name__}: {exc}"[:240]
+            self._upload_failures += 1
+            return None
+        return settings, uploader, verifier
+
+    async def _upload_paths_once(self, paths: list[Path], settings: BackupSettings,
+                                 uploader, verifier) -> None:
+        """Upload one discovered path batch and pause after the first failure."""
+        for path in paths:
+            try:
+                await asyncio.to_thread(
+                    self._upload_sealed, path, self.spool_dir, self.source_id,
+                    settings, uploader, verifier,
+                )
+                await asyncio.to_thread(self._remove_uploaded_artifacts, path)
+                self._uploaded_chunks += 1
+                self._upload_status = "READY"
+            except Exception as exc:
+                self._upload_failures += 1
+                self._upload_status = "ERROR"
+                self._last_error = f"{type(exc).__name__}: {exc}"[:240]
+                metrics.increment("raw_archive.upload_failures")
+                if not self._stop:
+                    await asyncio.sleep(1)
+                    break
+            finally:
+                self._update_metrics()
+
     def _upload_paths(self) -> list[Path]:
+        """Queue sealed archive paths for remote upload."""
         return sorted(
             path for path in self.spool_dir.rglob("*.log.zst")
             if path.with_name(path.name + ".json").is_file()
@@ -682,10 +638,11 @@ class RawLogArchive:
 
     @staticmethod
     def _remove_uploaded_artifacts(path: Path) -> None:
-        path.unlink()
-        path.with_name(path.name + ".json").unlink(missing_ok=True)
+        """Remove local artifacts only after successful remote upload."""
+        remove_uploaded_artifacts(path)
 
     def _update_metrics(self) -> None:
+        """Refresh observable counters and gauges for archive operations."""
         metrics.gauge("raw_archive.queue_lines", self._queue.qsize())
         metrics.gauge("raw_archive.queue_bytes", self._pending_bytes)
         ratio = max(self._queue.qsize() / self.max_queue_lines, self._pending_bytes / self.max_queue_bytes)
@@ -696,6 +653,7 @@ class RawLogArchive:
         metrics.gauge("raw_archive.writer_lag_seconds", self._oldest_queued_age_seconds())
 
     async def stop(self) -> None:
+        """Drain archive work and stop background consumers safely."""
         async with self._stop_lock:
             if self._stopped and not self._task and not self._compression_task and not self._upload_task:
                 return
@@ -731,16 +689,5 @@ class RawLogArchive:
         return self.status()
 
     def _write_compression_marker(self, path: Path, result: dict) -> None:
-        compressed = path.with_suffix(".log.zst")
-        marker = compressed.with_name(compressed.name + ".json")
-        original_metadata = {}
-        metadata_path = path.with_suffix(".json")
-        if metadata_path.exists():
-            original_metadata = json.loads(metadata_path.read_text())
-        marker.write_text(json.dumps({
-            "source": self.source_id, "chunk_id": path.stem,
-            "started_at": original_metadata.get("started_at"),
-            "ended_at": original_metadata.get("ended_at"),
-            "line_count": original_metadata.get("line_count"),
-            "original_path": str(path), **result, "status": "VERIFIED",
-        }, indent=2) + "\n")
+        """Record compression state for a sealed archive chunk."""
+        write_compression_marker(path, result, self.source_id)

@@ -61,6 +61,7 @@ HS6_PRODUCT_MAP = {
 
 
 def _request(url: str, payload: dict | None = None) -> bytes:
+    """Fetch one source response with the foundation client headers and timeout."""
     body = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(url, data=body, headers={"User-Agent": "IPIntel-VN-Foundation/1.0", "Content-Type": "application/json"} if body else {"User-Agent": "IPIntel-VN-Foundation/1.0"})
     with urllib.request.urlopen(request, timeout=120) as response:
@@ -68,10 +69,12 @@ def _request(url: str, payload: dict | None = None) -> bytes:
 
 
 def _metadata(table: str, base: str = PX_BASE) -> dict:
+    """Load PX-Web metadata for one table."""
     return json.loads(_request(f"{base}/{table}"))
 
 
 def _all_query(metadata: dict, year: str | None = None) -> dict:
+    """Build a PX-Web query selecting every dimension, optionally one year."""
     query = []
     for variable in metadata["variables"]:
         values = variable["values"]
@@ -84,6 +87,7 @@ def _all_query(metadata: dict, year: str | None = None) -> dict:
 
 
 def download_px(table: str, output: Path, year: str | None = None, base: str = PX_BASE, dataset: str | None = None) -> dict:
+    """Download one PX-Web table and return its provenance record."""
     metadata = _metadata(table, base)
     raw = _request(f"{base}/{table}", _all_query(metadata, year))
     output.mkdir(parents=True, exist_ok=True)
@@ -101,6 +105,7 @@ def download_px(table: str, output: Path, year: str | None = None, base: str = P
 
 
 def download_comtrade(output: Path, years: list[int]) -> list[dict]:
+    """Download annual Comtrade previews and report unavailable years explicitly."""
     output.mkdir(parents=True, exist_ok=True)
     reports = []
     for year in years:
@@ -132,6 +137,7 @@ def probe_comtrade_full(output: Path) -> dict:
 
 
 def _read_rows(path: Path) -> list[dict]:
+    """Read a UTF-8 CSV snapshot into row dictionaries."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
 
@@ -157,6 +163,22 @@ def build_national_profiles(output: Path) -> dict:
     return {"path": str(path), "tracks": list(profiles)}
 
 
+def _download_px_sources(output: Path) -> list[dict]:
+    """Download enterprise and industry PX-Web tables in their established order."""
+    reports = []
+    for table in PX_TABLES:
+        try:
+            reports.append({**download_px(table, output / "nso_pxweb"), "status": "loaded"})
+        except (HTTPError, URLError, TimeoutError) as exc:
+            reports.append({"dataset": PX_TABLES[table], "table": table, "rows": None, "status": "failed", "error": type(exc).__name__, "source_url": f"{PX_BASE}/{table}", "limitation": "Source fetch failed; row count is unknown."})
+    for table, dataset in PX_INDUSTRY_TABLES.items():
+        try:
+            reports.append({**download_px(table, output / "nso_pxweb", base=PX_INDUSTRY_BASE, dataset=dataset), "status": "loaded"})
+        except (HTTPError, URLError, TimeoutError) as exc:
+            reports.append({"dataset": dataset, "table": table, "rows": None, "status": "failed", "error": type(exc).__name__, "source_url": f"{PX_INDUSTRY_BASE}/{table}", "limitation": "Source fetch failed; row count is unknown."})
+    return reports
+
+
 def download_comtrade_2026_ytd(output: Path, through_month: int = 9) -> list[dict]:
     """Probe each available 2026 month; an empty response is unknown, not zero."""
     reports = []
@@ -175,34 +197,30 @@ def download_comtrade_2026_ytd(output: Path, through_month: int = 9) -> list[dic
     return reports
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("data/market/vietnam_foundation"))
-    parser.add_argument("--years", default="2021,2022,2023,2024,2025")
-    args = parser.parse_args()
-    retrieved = datetime.now(timezone.utc).isoformat()
-    reports = []
-    for table in PX_TABLES:
-        try:
-            reports.append({**download_px(table, args.output / "nso_pxweb"), "status": "loaded"})
-        except (HTTPError, URLError, TimeoutError) as exc:
-            reports.append({"dataset": PX_TABLES[table], "table": table, "rows": None, "status": "failed", "error": type(exc).__name__, "source_url": f"{PX_BASE}/{table}", "limitation": "Source fetch failed; row count is unknown."})
-    for table, dataset in PX_INDUSTRY_TABLES.items():
-        try:
-            reports.append({**download_px(table, args.output / "nso_pxweb", base=PX_INDUSTRY_BASE, dataset=dataset), "status": "loaded"})
-        except (HTTPError, URLError, TimeoutError) as exc:
-            reports.append({"dataset": dataset, "table": table, "rows": None, "status": "failed", "error": type(exc).__name__, "source_url": f"{PX_INDUSTRY_BASE}/{table}", "limitation": "Source fetch failed; row count is unknown."})
-    reports += download_comtrade(args.output / "comtrade", [int(item) for item in args.years.split(",")])
-    ytd = download_comtrade_2026_ytd(args.output / "comtrade")
-    profiles = build_national_profiles(args.output)
-    full_api = probe_comtrade_full(args.output)
-    manifest = {"scope": "VN", "retrieved_at": retrieved, "reports": reports, "comtrade_2026_ytd": ytd, "comtrade_full_api": full_api, "hs6_product_mapping": HS6_PRODUCT_MAP, "national_profiles": profiles, "current_indicator_inventory": [
+def _build_manifest(output: Path, years: list[int], retrieved: str) -> dict:
+    """Collect remaining source reports and assemble the reproducible manifest."""
+    reports = _download_px_sources(output)
+    reports += download_comtrade(output / "comtrade", years)
+    ytd = download_comtrade_2026_ytd(output / "comtrade")
+    profiles = build_national_profiles(output)
+    full_api = probe_comtrade_full(output)
+    return {"scope": "VN", "retrieved_at": retrieved, "reports": reports, "comtrade_2026_ytd": ytd, "comtrade_full_api": full_api, "hs6_product_mapping": HS6_PRODUCT_MAP, "national_profiles": profiles, "current_indicator_inventory": [
         {"indicator": "34-unit provincial socioeconomic context", "source": "NSO Statistical Yearbook 2025 · 34-province appendix", "status": "official source identified; appendix extraction is a separate refresh and must not be substituted for IIP", "geography": "34 current provinces", "source_url": "https://www.nso.gov.vn/default/2026/07/nien-giam-thong-ke-2025/"},
         {"indicator": "IIP/manufacturing growth", "source": "NSO Industry E07.01/E07.02", "taxonomy_version": "VSIC2018 where the table exposes industry labels", "status": "available through preliminary 2024; 2025–2026 not in current catalog snapshot", "geography": "national and province"},
         {"indicator": "new enterprises", "source": "NSO Enterprise E05.01/E05.02", "status": "available in national/province snapshots", "geography": "national and province"},
         {"indicator": "acting enterprises with outcomes", "source": "NSO Enterprise E05.07/E05.08", "status": "available in national/province snapshots", "geography": "national and province"},
         {"indicator": "returning enterprises", "source": "NSO statistical releases", "status": "not found in current machine-readable snapshot", "geography": "unknown"}
     ], "limitations": ["PX-Web publishes industry and province tables separately; no industry×province allocation was performed.", "Comtrade national imports are national context and are not assigned to provinces.", "Comtrade preview returned no rows for 2024-2025; this is recorded as no_rows_returned, never as zero imports.", "The authenticated Comtrade full endpoint requires a subscription key.", "NSO tables expose activity labels but not a complete VSIC code dimension in this snapshot."]}
+
+
+def main() -> None:
+    """Parse refresh options, build the manifest, and publish it to disk."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=Path("data/market/vietnam_foundation"))
+    parser.add_argument("--years", default="2021,2022,2023,2024,2025")
+    args = parser.parse_args()
+    retrieved = datetime.now(timezone.utc).isoformat()
+    manifest = _build_manifest(args.output, [int(item) for item in args.years.split(",")], retrieved)
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
 

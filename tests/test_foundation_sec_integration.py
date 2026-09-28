@@ -14,12 +14,22 @@ PACKETS = [
 ]
 
 
+def _configured_timeout_seconds() -> float:
+    """Use the normal runtime timeout when the environment omits an override."""
+    return float(os.getenv("LOCAL_REASONING_TIMEOUT_SECONDS", "180"))
+
+
+def test_foundation_sec_acceptance_timeout_defaults_to_normal_runtime(monkeypatch):
+    monkeypatch.delenv("LOCAL_REASONING_TIMEOUT_SECONDS", raising=False)
+    assert _configured_timeout_seconds() == 180
+
+
 @pytest.mark.integration
 def test_foundation_sec_acceptance_smoke():
     endpoint = os.getenv("LOCAL_REASONING_BASE_URL")
     if not endpoint or not os.getenv("FOUNDATION_SEC_MODEL_PATH"):
         pytest.skip("Set local reasoning endpoint and Foundation-Sec model path")
-    provider = LlamaCppHttpProvider(endpoint, os.getenv("FOUNDATION_SEC_MODEL_NAME", "Foundation-Sec-8B-Reasoning"), float(os.getenv("LOCAL_REASONING_TIMEOUT_SECONDS", "30")))
+    provider = LlamaCppHttpProvider(endpoint, os.getenv("FOUNDATION_SEC_MODEL_NAME", "Foundation-Sec-8B-Reasoning"), _configured_timeout_seconds())
     for packet in PACKETS:
         result = provider.explain(packet)
         assert result.status == "received"

@@ -9,16 +9,18 @@ from typing import Any
 from .postgres import transaction
 
 
-STATUSES = {"pending", "running", "completed", "failed"}
+STATUSES = {"pending", "running", "completed", "failed", "abstained"}
 _ALLOWED_TRANSITIONS = {
     "pending": {"running", "failed"},
-    "running": {"completed", "failed"},
+    "running": {"completed", "failed", "abstained"},
     "completed": set(),
     "failed": set(),
+    "abstained": set(),
 }
 
 
 def deterministic_job_id(case_id: str, evidence_fingerprint: str) -> str:
+    """Derive a stable job identifier from case and evidence identity."""
     if not case_id or not evidence_fingerprint:
         raise ValueError("AI job requires case_id and evidence_fingerprint")
     digest = hashlib.sha256(f"{case_id}:{evidence_fingerprint}".encode("utf-8")).hexdigest()[:32]
@@ -26,6 +28,7 @@ def deterministic_job_id(case_id: str, evidence_fingerprint: str) -> str:
 
 
 def _check_transition(current: str, target: str) -> None:
+    """Reject AI job state transitions outside the explicit lifecycle graph."""
     if current not in STATUSES or target not in STATUSES or target not in _ALLOWED_TRANSITIONS[current]:
         raise ValueError(f"invalid AI job transition: {current} -> {target}")
 
@@ -34,6 +37,7 @@ class AiExplainJobRepository:
     """Small transactional repository; no model or network dependency."""
 
     def create_or_get(self, case_id: str, evidence_fingerprint: str, case_packet: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Create one idempotent job or return its existing record."""
         job_id = deterministic_job_id(case_id, evidence_fingerprint)
         with transaction() as conn:
             conn.execute(
@@ -50,6 +54,7 @@ class AiExplainJobRepository:
         return dict(row)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
+        """Fetch a persisted explanation job by stable job identifier."""
         with transaction() as conn:
             row = conn.execute("SELECT * FROM ai_explain_jobs WHERE job_id=%s", (job_id,)).fetchone()
         return dict(row) if row else None
@@ -68,6 +73,7 @@ class AiExplainJobRepository:
         return int(result.rowcount or 0)
 
     def health_snapshot(self) -> dict[str, Any]:
+        """Summarize queued, running, failed, and oldest AI jobs."""
         with transaction() as conn:
             row = conn.execute(
                 """SELECT count(*) FILTER (WHERE status='pending') AS pending,
@@ -100,7 +106,10 @@ class AiExplainJobRepository:
         return dict(row) if row else None
 
     def transition(self, job_id: str, current_status: str, target_status: str, failure_code: str | None = None) -> dict[str, Any] | None:
+        """Apply one allowed status transition only when the current state matches."""
         _check_transition(current_status, target_status)
+        if target_status == "abstained":
+            return self.persist_abstained(job_id, failure_code or "", {})
         if target_status == "running":
             fields = "status='running',started_at=now(),failure_code=NULL"
         else:
@@ -118,7 +127,24 @@ class AiExplainJobRepository:
                 ).fetchone()
         return dict(row) if row else None
 
+    def persist_abstained(self, job_id: str, reason: str, provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a bounded intentional abstention for a currently running job."""
+        if not isinstance(reason, str) or not reason or len(reason) > 96 or not reason.replace("_", "").isalnum():
+            raise ValueError("abstention reason must be a bounded code")
+        with transaction() as conn:
+            row = conn.execute(
+                """UPDATE ai_explain_jobs
+                   SET status='abstained', completed_at=now(), validation_status='abstained',
+                       provider_status='not_called', failure_code=%s, provenance_json=%s::jsonb,
+                       analysis_json=NULL
+                   WHERE job_id=%s AND status='running'
+                   RETURNING *""",
+                (reason, json.dumps(provenance), job_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def persist_completed(self, job_id: str, analysis: dict[str, Any], validation: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Commit a validated analysis only for a currently running job."""
         with transaction() as conn:
             row = conn.execute(
                 """UPDATE ai_explain_jobs
@@ -132,6 +158,7 @@ class AiExplainJobRepository:
         return dict(row) if row else None
 
     def persist_failed(self, job_id: str, failure_code: str, validation_status: str, provider_status: str, provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Commit a structured failure result only for a running job."""
         if validation_status not in {"invalid", "unsupported_evidence", "unavailable", "timeout", "too_large"}:
             raise ValueError("unsupported AI failure validation status")
         with transaction() as conn:

@@ -5,6 +5,7 @@ from app.services.map_intelligence import MapIntelligenceService, _canonical_vn_
 
 
 def test_vietnam_traffic_attaches_to_canonical_province_and_preserves_unmapped():
+    """Attach proven Vietnam traffic by canonical province and retain unknown localities."""
     rows, unmapped = _canonical_vn_traffic({"cities": [
         {"city_key": "hanoi", "city_name": "Hà Nội", "observed_ips": 2, "requests": 188,
          "latitude": 21.0, "longitude": 105.8},
@@ -16,8 +17,10 @@ def test_vietnam_traffic_attaches_to_canonical_province_and_preserves_unmapped()
 
 
 def test_vietnam_country_contract_exposes_traffic_conservation():
+    """Expose canonical and unmapped Vietnam traffic with conserved totals."""
     class Regions:
         def get(self, code):
+            """Return a minimal country profile for the service test."""
             return {"country_code": code, "country_name": "Viet Nam", "market_score": 80}
 
     result = MapIntelligenceService(
@@ -35,8 +38,10 @@ def test_vietnam_country_contract_exposes_traffic_conservation():
 
 
 def test_world_contract_merges_opportunity_and_existing_threat_state():
+    """Merge persisted market and threat context into sorted country markers."""
     class Regions:
         def list(self, limit):
+            """Return country opportunity profiles for the requested page size."""
             assert limit == 1000
             return [
                 {"country_code": "DE", "country_name": "Germany", "market_score": "82.4", "updated_at": "2026-08-31T18:00:00"},
@@ -44,6 +49,7 @@ def test_world_contract_merges_opportunity_and_existing_threat_state():
             ]
 
     def threats(start, end):
+        """Return one pre-aggregated country threat row for the test window."""
         assert start.tzinfo and end.tzinfo
         return [{"country_code": "DE", "latitude": 51.16, "longitude": 10.45,
                  "critical_ips": 1, "medium_ips": 0, "low_ips": 0, "good_ips": 0, "unknown_ips": 2, "requests": 15,
@@ -63,8 +69,10 @@ def test_world_contract_merges_opportunity_and_existing_threat_state():
 
 
 def test_unresolved_country_is_not_assigned_and_missing_threat_is_zero():
+    """Skip unresolved threat rows and retain opportunity-only country profiles."""
     class Regions:
         def list(self, limit):
+            """Return one country opportunity profile."""
             return [{"country_code": "DE", "country_name": "Germany", "market_score": 101,
                      "updated_at": "2026-09-01T00:00:00+07:00"}]
 
@@ -78,17 +86,21 @@ def test_unresolved_country_is_not_assigned_and_missing_threat_is_zero():
 
 
 def test_timestamp_normalization_is_utc():
+    """Normalize an offset timestamp to its UTC representation."""
     assert _utc_iso("2026-09-01T02:00:00+07:00") == "2026-08-31T19:00:00Z"
 
 
 def test_world_accepts_custom_window():
+    """Pass validated custom time bounds to the threat reader."""
     captured = {}
 
     class Regions:
         def list(self, limit):
+            """Return no country opportunity rows for this window test."""
             return []
 
     def threats(start, end):
+        """Capture the normalized interval supplied to the threat reader."""
         captured["window"] = (start, end)
         return []
 
@@ -106,6 +118,7 @@ def test_world_accepts_custom_window():
 
 
 def test_map_threat_contract_keeps_classified_ips_even_without_window_features():
+    """Keep map threat counts scoped to profiles with features in the window."""
     # Threat severity counts must be scoped to the selected feature window.
     source = Path("app/services/map_intelligence.py").read_text(encoding="utf-8")
     assert "LEFT JOIN (" in source
@@ -115,8 +128,10 @@ def test_map_threat_contract_keeps_classified_ips_even_without_window_features()
 
 
 def test_country_contract_keeps_city_score_null_and_tracks_coverage():
+    """Keep unavailable city scores null while returning traffic coverage."""
     class Regions:
         def get(self, code):
+            """Return the requested country profile."""
             return {"country_code": code, "country_name": "Germany", "market_score": 80.22}
 
     result = MapIntelligenceService(
@@ -144,8 +159,11 @@ def test_country_contract_keeps_city_score_null_and_tracks_coverage():
 
 
 def test_country_omits_unresolved_city_without_coordinates():
+    """Omit city markers unless resolved coordinates are available."""
     class Regions:
-        def get(self, code): return {"country_code": code, "country_name": "Germany", "market_score": None}
+        def get(self, code):
+            """Return a country profile with an unavailable market score."""
+            return {"country_code": code, "country_name": "Germany", "market_score": None}
 
     result = MapIntelligenceService(
         Regions(), clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),

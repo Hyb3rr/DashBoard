@@ -29,3 +29,17 @@ def test_builder_does_not_assign_ground_truth_or_call_ai():
     assert "ground_truth" not in packet
     assert "raw_headers" not in packet
     assert "user_agent" not in packet
+
+
+def test_builder_keeps_stable_ip_tie_break_and_hard_packet_cap():
+    rows = [row(f"203.0.113.{index}") for index in range(1, 32)]
+    queried_ips = []
+
+    def recording_traffic(_start, _end, _bucket, ip, _dataset):
+        queried_ips.append(ip)
+        return traffic()
+
+    corpus = build_corpus(rows, recording_traffic, SNAPSHOT, limit=100)
+
+    assert corpus["manifest"]["packet_count"] == 30
+    assert queried_ips == sorted(record["identity_ip"] for record in rows)[:30]

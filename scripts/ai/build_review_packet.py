@@ -12,10 +12,12 @@ from scripts.ai.evaluate_cases import _load_corpus
 
 
 def _canonical(value: object) -> str:
+    """Serialize packet data deterministically for its content hash."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def main() -> int:
+    """Build and persist a validated manual-review packet artifact."""
     parser = argparse.ArgumentParser(description="Build manual review packet from validated AI captures")
     parser.add_argument("cases", type=Path)
     parser.add_argument("--capture-dir", type=Path, action="append", required=True, help="Capture attempt directory; order is earliest first")

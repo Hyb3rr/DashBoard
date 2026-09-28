@@ -18,14 +18,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def statements(sql: str) -> list[str]:
+    """Split a migration script into non-empty semicolon-delimited commands."""
     return [statement.strip() for statement in sql.split(";") if statement.strip()]
 
 
 def _driver_text(value: Any) -> str:
+    """Normalize ClickHouse driver string values, including fixed-string bytes."""
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
 def discover(directory: Path = MIGRATION_DIR) -> list[tuple[int, str, str, str]]:
+    """Load migrations in numeric order and reject version gaps."""
     migrations = []
     for path in sorted(directory.glob("*.sql")):
         match = _MIGRATION_RE.match(path.name)
@@ -44,7 +47,8 @@ def discover(directory: Path = MIGRATION_DIR) -> list[tuple[int, str, str, str]]
     return migrations
 
 
-def apply(client: Any, database: str = "ipintel", directory: Path = MIGRATION_DIR) -> None:
+def _ensure_migration_ledger(client: Any, database: str) -> None:
+    """Create the ClickHouse table that records applied migration checksums."""
     client.command(f"""
         CREATE TABLE IF NOT EXISTS {database}.schema_migrations (
             version UInt32,
@@ -53,30 +57,49 @@ def apply(client: Any, database: str = "ipintel", directory: Path = MIGRATION_DI
             applied_at DateTime64(3, 'UTC') DEFAULT now64(3)
         ) ENGINE = MergeTree ORDER BY version
     """)
+
+
+def _applied_migrations(client: Any, database: str) -> dict[int, tuple[str, str]]:
+    """Read applied migration filenames and checksums keyed by version."""
     rows = client.query(
         f"SELECT version, filename, checksum_sha256 FROM {database}.schema_migrations ORDER BY version"
     ).result_rows
-    applied = {
+    return {
         int(row[0]): (_driver_text(row[1]), _driver_text(row[2]))
         for row in rows
     }
-    for version, filename, checksum, sql in discover(directory):
+
+
+def _apply_migration(client: Any, database: str,
+                     migration: tuple[int, str, str, str]) -> None:
+    """Execute one migration and record its immutable checksum."""
+    version, filename, checksum, sql = migration
+    for statement in statements(sql):
+        client.command(statement)
+    client.insert(
+        f"{database}.schema_migrations",
+        [[version, filename, checksum]],
+        column_names=["version", "filename", "checksum_sha256"],
+    )
+
+
+def apply(client: Any, database: str = "ipintel", directory: Path = MIGRATION_DIR) -> None:
+    """Apply only unapplied migrations and reject changes to recorded files."""
+    _ensure_migration_ledger(client, database)
+    applied = _applied_migrations(client, database)
+    for migration in discover(directory):
+        version, filename, checksum, _sql = migration
         existing = applied.get(version)
         if existing:
             if existing != (filename, checksum):
                 raise RuntimeError(f"ClickHouse migration checksum mismatch for {filename}")
             continue
-        for statement in statements(sql):
-            client.command(statement)
-        client.insert(
-            f"{database}.schema_migrations",
-            [[version, filename, checksum]],
-            column_names=["version", "filename", "checksum_sha256"],
-        )
+        _apply_migration(client, database, migration)
         applied[version] = (filename, checksum)
 
 
 def apply_configured() -> None:
+    """Bootstrap the target database and apply its configured migrations."""
     from app.db.clickhouse import connect
     import os
 

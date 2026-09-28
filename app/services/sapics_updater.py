@@ -15,16 +15,19 @@ CHECKSUM = "https://github.com/sapics/ip-location-db/releases/download/checksum/
 
 
 def _fetch(url):
+    """Download one SAPICS asset or checksum using the updater user agent."""
     with urlopen(Request(url, headers={"User-Agent": "ip-intelligence/sapics-updater"}), timeout=60) as response:
         return response.read()
 
 
 def _expected(name):
+    """Fetch and parse the expected SHA-256 digest for an asset filename."""
     text = _fetch(CHECKSUM + name + ".sha256").decode("ascii", "replace").strip()
     return text.split()[0].lower()
 
 
 def refresh() -> dict:
+    """Download, verify, validate, and atomically replace configured GeoIP assets."""
     ROOT.mkdir(parents=True, exist_ok=True)
     updated, errors = [], []
     for key, (folder, filename, _kind) in FILES.items():

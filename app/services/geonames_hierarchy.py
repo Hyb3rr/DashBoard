@@ -13,6 +13,7 @@ from typing import Any
 
 class GeoNamesHierarchy:
     def __init__(self, payload: dict[str, Any]):
+        """Index GeoNames places and case-insensitive aliases from a payload."""
         self.version = str(payload.get("version") or "unknown")
         self._places = {str(item["id"]): item for item in payload.get("places", []) if item.get("id")}
         self._aliases = {
@@ -23,10 +24,12 @@ class GeoNamesHierarchy:
 
     @classmethod
     def from_path(cls, path: str | Path) -> "GeoNamesHierarchy":
+        """Load a versioned GeoNames hierarchy JSON file from disk."""
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
     def resolve(self, name: str, *, country_code: str | None = None,
                 parent_ids: set[str] | None = None) -> dict[str, Any] | None:
+        """Resolve an alias only when country and parent filters leave one place."""
         candidate_ids = list(self._aliases.get(str(name).strip().casefold()) or [])
         if country_code:
             candidate_ids = [place_id for place_id in candidate_ids
@@ -43,6 +46,7 @@ class GeoNamesHierarchy:
         return dict(place)
 
     def parents(self, place_id: str) -> list[dict[str, Any]]:
+        """Return known parent records for a GeoNames place identifier."""
         place = self._places.get(str(place_id))
         if not place:
             return []

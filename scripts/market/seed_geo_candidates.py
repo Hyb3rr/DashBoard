@@ -72,6 +72,7 @@ def select_candidates(cities: Iterable[dict[str, Any]], ranked_countries: Iterab
 
 
 def _ranked_countries() -> list[str]:
+    """Order countries by their latest coverage-adjusted product prior."""
     with transaction() as conn:
         rows = conn.execute(
             """
@@ -92,6 +93,7 @@ def _ranked_countries() -> list[str]:
 
 
 def seed_candidates(fetcher=urllib.request.urlopen, url: str = GEONAMES_URL) -> dict[str, Any]:
+    """Refresh reviewable city candidates from the public GeoNames dataset."""
     countries = _ranked_countries()
     if CANDIDATE_MODE == "global":
         selected_countries = countries[:MAX_COUNTRIES]

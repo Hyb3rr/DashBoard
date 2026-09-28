@@ -7,10 +7,11 @@ VALID = '{"summary":"scan","primary_evidence":[{"evidence_id":"ev_1","reason":"r
 
 
 class Repo:
-    def __init__(self): self.job = {"job_id": "job_1", "case_id": "case_1", "evidence_fingerprint": "fp_1"}; self.completed = None; self.failed = None
+    def __init__(self): self.job = {"job_id": "job_1", "case_id": "case_1", "evidence_fingerprint": "fp_1"}; self.completed = None; self.failed = None; self.abstained = None
     def claim_pending(self): job, self.job = self.job, None; return job
     def persist_completed(self, job_id, analysis, validation, provenance): self.completed = (job_id, analysis, validation, provenance); return {"status": "completed"}
     def persist_failed(self, job_id, failure_code, validation_status, provider_status, provenance): self.failed = (job_id, failure_code, validation_status, provider_status, provenance); return {"status": "failed"}
+    def persist_abstained(self, job_id, reason, provenance): self.abstained = (job_id, reason, provenance); return {"status": "abstained"}
 
 
 class Provider:
@@ -32,6 +33,49 @@ def test_worker_maps_timeout_without_retry():
     worker = AiExplainWorker(repo, provider, {"case_1": PACKET}.get)
     worker.run_once()
     assert repo.failed[2:4] == ("timeout", "timeout")
+    assert provider.calls == 1
+
+
+def test_worker_persists_budget_abstention_without_evaluation_or_failure(monkeypatch):
+    import app.services.ai_explain_worker as worker_module
+
+    monkeypatch.setattr(worker_module, "evaluate_case", lambda *args, **kwargs: pytest.fail("abstention must not be evaluated"))
+    diagnostics = {
+        "estimated_input_tokens": 321,
+        "configured_input_budget_tokens": 0,
+        "context_input_limit_tokens": 7552,
+        "raw_response": "must not be copied",
+        "prompt": "must not be copied",
+    }
+    repo = Repo()
+    provider = Provider(ReasoningResult("abstained", "fp_1", diagnostics=diagnostics))
+    worker = AiExplainWorker(repo, provider, {"case_1": PACKET}.get)
+
+    assert worker.run_once() is True
+
+    assert repo.abstained is not None
+    assert repo.abstained[0:2] == ("job_1", "local_reasoning_budget_exceeded")
+    assert repo.failed is None and repo.completed is None
+    assert provider.calls == 1
+    provenance = repo.abstained[2]
+    assert provenance["estimated_input_tokens"] == 321
+    assert provenance["configured_input_budget_tokens"] == 0
+    assert provenance["context_input_limit_tokens"] == 7552
+    assert "raw_response" not in provenance and "prompt" not in provenance
+
+
+def test_abstention_is_neutral_to_provider_backoff_state():
+    repo = Repo()
+    provider = Provider(ReasoningResult("abstained", "fp_1"))
+    worker = AiExplainWorker(repo, provider, {"case_1": PACKET}.get)
+    worker._consecutive_provider_failures = 2
+    worker._provider_backoff_until = 12345.0
+
+    worker.run_once()
+
+    assert worker._consecutive_provider_failures == 2
+    assert worker._provider_backoff_until == 12345.0
+    assert repo.failed is None and repo.completed is None
     assert provider.calls == 1
 
 

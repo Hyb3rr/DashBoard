@@ -19,12 +19,14 @@ INTEL_REFRESH_LOCK = "ip-intelligence:run-due-sources"
 
 
 def _positive_int(name: str, default: int, maximum: int = 32) -> int:
+    """Read a positive bounded integer setting with a safe default."""
     try:
         return max(1, min(int(os.getenv(name, str(default))), maximum))
     except (TypeError, ValueError):
         return default
 
 def _due(row, now, hours):
+    """Return whether a provider refresh is due or its last run failed."""
     if not row or not row["last_run_at"]:
         return True
     if row["last_status"] in {"failed", "unavailable"}:
@@ -45,6 +47,19 @@ def _run_provider_pg(factory, source_name, now):
     conn = postgres.connect()
     try:
         result = factory(conn)
+        if result.get("status") == "failed":
+            # A provider can reject a snapshot logically after it has already
+            # changed an earlier target.  Never commit a partial provider run.
+            conn.rollback()
+            status_conn = postgres.connect()
+            try:
+                _status_pg(status_conn, source_name, now, result)
+                status_conn.commit()
+            except Exception:
+                status_conn.rollback()
+            finally:
+                status_conn.close()
+            return result
         _status_pg(conn, source_name, now, result)
         conn.commit()
         return result
@@ -68,6 +83,7 @@ def _run_provider_pg(factory, source_name, now):
 
 
 def _status_pg(conn, name, now, result):
+    """Persist the latest outcome and metadata for one intelligence source."""
     conn.execute("""INSERT INTO intel_source_status
       (source_name,last_run_at,last_status,last_error,records_upserted,metadata)
       VALUES(%s,%s,%s,%s,%s,%s)
@@ -78,8 +94,92 @@ def _status_pg(conn, name, now, result):
        int(result.get("records_upserted", 0)), Jsonb(result)))
 
 
+def _refresh_sapics(_conn):
+    """Refresh the local SAPICS GeoIP database release."""
+    from ..services.sapics_updater import refresh
+    return refresh()
+
+
+def _geo_provider_jobs():
+    """Build enabled RIR and geofeed refresh jobs from environment settings."""
+    rir_urls = {
+        "APNIC": os.getenv("RIR_APNIC_URL", "https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest"),
+        "RIPE": os.getenv("RIR_RIPE_URL", "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"),
+        "ARIN": os.getenv("RIR_ARIN_URL", "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest"),
+        "LACNIC": os.getenv("RIR_LACNIC_URL", "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest"),
+        "AFRINIC": os.getenv("RIR_AFRINIC_URL", "https://ftp.afrinic.net/pub/stats/afrinic/delegated-afrinic-extended-latest"),
+    }
+    jobs = []
+    if os.getenv("GEO_RIR_REFRESH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        jobs.extend(
+            (f"rir:{rir.lower()}", 24, lambda conn, rir=rir, url=url: pg_intel.refresh_rir(conn, rir, url))
+            for rir, url in rir_urls.items()
+        )
+    for item in os.getenv("GEOFEED_SOURCES", "").split(","):
+        if "=" in item:
+            name, url = item.strip().split("=", 1)
+            jobs.append((f"geofeed:{name}", 168, lambda conn, name=name, url=url: pg_intel.refresh_geofeed(conn, name, url)))
+    jobs.append((
+        "geofeed:geolocatemuch", 24,
+        lambda conn: pg_intel.refresh_geofeed(
+            conn, "geolocatemuch",
+            os.getenv("GEOLOCATEMUCH_GEOFEED_URL", "https://geolocatemuch.com/geofeeds/validated-all.csv"),
+        ),
+    ))
+    return jobs
+
+
+def _firehol_provider_jobs():
+    """Build refresh jobs for the configured FireHOL intelligence lists."""
+    from ..providers import firehol
+    selected = os.getenv("FIREHOL_LISTS", ",".join(firehol.DEFAULT_LISTS)).split(",")
+    return [
+        (f"firehol:{name}", 24, lambda conn, name=name: pg_intel.refresh_firehol(conn, name))
+        for name in (item.strip() for item in selected)
+        if name
+    ]
+
+
+def _provider_jobs():
+    """Build the full intelligence refresh catalog and cadence."""
+    jobs = [
+        ("az0_vpn", 24, lambda conn: pg_intel.refresh_az0(conn)),
+        ("x4b_vpn", 24, lambda conn: pg_intel.refresh_cidr(
+            conn, "x4b_vpn", os.getenv("X4B_VPN_LIST_URL") or DEFAULT_X4B_URLS["x4b_vpn"], "vpn"
+        )),
+        ("x4b_datacenter", 24, lambda conn: pg_intel.refresh_cidr(
+            conn, "x4b_datacenter", os.getenv("X4B_DATACENTER_LIST_URL") or DEFAULT_X4B_URLS["x4b_datacenter"], "datacenter"
+        )),
+        ("cloudflare_datacenter", 24, lambda conn: pg_intel.refresh_cloudflare(conn)),
+        ("device_browser_proxy", 6, lambda conn: pg_intel.refresh_device_browser(conn)),
+        ("sapics_releases", _positive_int("SAPICS_REFRESH_HOURS", 24, 8760), _refresh_sapics),
+    ]
+    return jobs
+
+
+def _partition_due_jobs(rows, now, jobs):
+    """Separate due provider jobs from sources that remain unchanged."""
+    due, report = [], {}
+    for name, hours, task in jobs:
+        if _due(rows.get(name), now, hours):
+            due.append((name, task))
+        else:
+            report[name] = {"status": "not_due"}
+    return due, report
+
+
+def _execute_provider_jobs(due, now, report):
+    """Run due provider jobs concurrently and collect their outcomes."""
+    with ThreadPoolExecutor(max_workers=_positive_int("INTEL_UPDATE_CONCURRENCY", 6, 8)) as pool:
+        futures = {pool.submit(_run_provider_pg, task, name, now): name for name, task in due}
+        for future in as_completed(futures):
+            name, result = futures[future], future.result()
+            report[name] = result
+    return report
+
+
 def run_due_sources(now: datetime | None = None) -> dict:
-    """PostgreSQL-only intelligence updater."""
+    """Refresh due intelligence providers under one PostgreSQL advisory lock."""
     now = now or datetime.now(timezone.utc)
     status_conn = postgres.connect()
     lock_row = status_conn.execute(
@@ -91,15 +191,7 @@ def run_due_sources(now: datetime | None = None) -> dict:
         return {"status": "locked", "backend": "postgres"}
     try:
         rows = {r["source_name"]: r for r in status_conn.execute("SELECT * FROM intel_source_status")}
-        jobs = [
-            ("az0_vpn", 24, lambda c: pg_intel.refresh_az0(c)),
-            ("x4b_vpn", 24, lambda c: pg_intel.refresh_cidr(c, "x4b_vpn", os.getenv("X4B_VPN_LIST_URL") or DEFAULT_X4B_URLS["x4b_vpn"], "vpn")),
-            ("x4b_datacenter", 24, lambda c: pg_intel.refresh_cidr(c, "x4b_datacenter", os.getenv("X4B_DATACENTER_LIST_URL") or DEFAULT_X4B_URLS["x4b_datacenter"], "datacenter")),
-            ("cloudflare_datacenter", 24, lambda c: pg_intel.refresh_cloudflare(c)),
-            ("device_browser_proxy", 6, lambda c: pg_intel.refresh_device_browser(c)),
-            ("sapics_releases", _positive_int("SAPICS_REFRESH_HOURS", 24, 8760),
-             lambda c: __import__("app.services.sapics_updater", fromlist=["refresh"]).refresh()),
-        ]
+        jobs = _provider_jobs()
         rir_urls = {
             "APNIC": os.getenv("RIR_APNIC_URL", "https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest"),
             "RIPE": os.getenv("RIR_RIPE_URL", "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"),

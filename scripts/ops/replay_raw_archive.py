@@ -13,6 +13,7 @@ from app.core.logs import import_apache_lines
 
 
 class RawReplayError(RuntimeError):
+    """Signal that a raw archive chunk cannot be safely replayed."""
     pass
 
 
@@ -30,6 +31,7 @@ def replay_zstd(path: str | Path, source: str) -> dict:
     raw_lines = 0
 
     def line_stream():
+        """Yield decoded raw lines while recording their integrity metadata."""
         nonlocal raw_bytes, raw_lines
         assert process.stdout
         for line in process.stdout:
@@ -58,6 +60,7 @@ def replay_zstd(path: str | Path, source: str) -> dict:
 
 
 def main() -> None:
+    """Parse replay inputs and print the isolated normalization report."""
     parser = argparse.ArgumentParser(description="Replay one compressed raw-log archive in isolation")
     parser.add_argument("archive", type=Path)
     parser.add_argument("--source", default="raw-archive-replay")

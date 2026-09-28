@@ -13,16 +13,19 @@ _timings: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "total_
 
 
 def increment(name: str, value: int = 1) -> None:
+    """Add a value to a process-local counter."""
     with _lock:
         _counters[name] += value
 
 
 def gauge(name: str, value: int | float) -> None:
+    """Set a process-local gauge to its latest value."""
     with _lock:
         _gauges[name] = float(value)
 
 
 def observe(name: str, elapsed_ms: float) -> None:
+    """Record one elapsed-time observation in milliseconds."""
     with _lock:
         item = _timings[name]
         item["count"] += 1
@@ -31,15 +34,18 @@ def observe(name: str, elapsed_ms: float) -> None:
 
 
 def timed(name: str):
+    """Return a callback that records elapsed time when invoked."""
     started = perf_counter()
 
     def finish() -> None:
+        """Record the time elapsed since the timing callback was created."""
         observe(name, (perf_counter() - started) * 1000)
 
     return finish
 
 
 def snapshot() -> dict:
+    """Return a thread-safe copy of all process-local metrics."""
     with _lock:
         return {
             "counters": dict(_counters),
@@ -55,6 +61,7 @@ def prometheus_text() -> str:
     lines: list[str] = []
 
     def name(value: str) -> str:
+        """Convert a metric key to a safe Prometheus metric name."""
         return "sentinel_" + re.sub(r"[^a-zA-Z0-9_]", "_", value)
 
     for key, value in sorted(data["counters"].items()):

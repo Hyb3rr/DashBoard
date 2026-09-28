@@ -14,6 +14,7 @@ INVALID_REASONS = {
 
 
 def _date(value: Any) -> datetime | None:
+    """Parse supported GeoIP database-version dates into timezone-aware values."""
     if not value:
         return None
     text = str(value)
@@ -28,6 +29,7 @@ def _date(value: Any) -> datetime | None:
 
 
 def _inside_bounds(record: Mapping[str, Any], bounds: Mapping[str, tuple[float, float, float, float]], padding_km: float) -> bool | None:
+    """Check coordinates against country bounds with a kilometer tolerance."""
     code = record.get("country_code")
     lat, lon = record.get("latitude"), record.get("longitude")
     if not code or lat is None or lon is None:
@@ -41,40 +43,35 @@ def _inside_bounds(record: Mapping[str, Any], bounds: Mapping[str, tuple[float, 
     return min_lat - latitude_padding <= float(lat) <= max_lat + latitude_padding and min_lon - longitude_padding <= float(lon) <= max_lon + longitude_padding
 
 
-def validate_records(records: list[dict[str, Any]], *, country_bounds: Mapping[str, tuple[float, float, float, float]] | None = None,
-                     sentinels: Mapping[str, set[tuple[float, float]]] | None = None,
-                     now: datetime | None = None, stale_after_days: int = 180,
-                     boundary_padding_km: float = 50.0) -> list[dict[str, Any]]:
-    """Validate each record independently, then annotate duplicate relationships."""
-    now = now or datetime.now(timezone.utc)
-    country_bounds = country_bounds or {}
-    sentinels = sentinels or {}
-    result = []
-    for original in records:
-        record = dict(original)
-        record.update({"valid": True, "invalid_reason": "none", "is_likely_fallback_value": False})
-        lat, lon = record.get("latitude"), record.get("longitude")
-        pair = (float(lat), float(lon)) if lat is not None and lon is not None else None
-        if pair == (0.0, 0.0):
-            record.update(valid=False, invalid_reason="null_island", is_likely_fallback_value=True)
-        elif pair is not None and pair in sentinels.get(str(record.get("source")), set()):
-            record["is_likely_fallback_value"] = True
-        inside = _inside_bounds(record, country_bounds, boundary_padding_km)
-        if inside is False and record["invalid_reason"] == "none":
-            record.update(valid=False, invalid_reason="coordinate_country_mismatch")
-        elif pair is not None and record.get("coordinate_granularity") == "unknown":
-            record["is_likely_fallback_value"] = True
-        version_date = _date(record.get("database_version"))
-        if version_date and (now - version_date).days > stale_after_days and record["invalid_reason"] == "none":
-            record["invalid_reason"] = "stale_database_version"
-        result.append(record)
+def _validate_record(record: dict[str, Any], country_bounds: Mapping[str, tuple[float, float, float, float]],
+                     sentinels: Mapping[str, set[tuple[float, float]]], now: datetime,
+                     stale_after_days: int, boundary_padding_km: float) -> dict[str, Any]:
+    """Annotate one source record with coordinate, fallback, and freshness checks."""
+    record.update({"valid": True, "invalid_reason": "none", "is_likely_fallback_value": False})
+    lat, lon = record.get("latitude"), record.get("longitude")
+    pair = (float(lat), float(lon)) if lat is not None and lon is not None else None
+    if pair == (0.0, 0.0):
+        record.update(valid=False, invalid_reason="null_island", is_likely_fallback_value=True)
+    elif pair is not None and pair in sentinels.get(str(record.get("source")), set()):
+        record["is_likely_fallback_value"] = True
+    if _inside_bounds(record, country_bounds, boundary_padding_km) is False and record["invalid_reason"] == "none":
+        record.update(valid=False, invalid_reason="coordinate_country_mismatch")
+    elif pair is not None and record.get("coordinate_granularity") == "unknown":
+        record["is_likely_fallback_value"] = True
+    version_date = _date(record.get("database_version"))
+    if version_date and (now - version_date).days > stale_after_days and record["invalid_reason"] == "none":
+        record["invalid_reason"] = "stale_database_version"
+    return record
 
-    for index, record in enumerate(result):
+
+def _annotate_duplicates(records: list[dict[str, Any]]) -> None:
+    """Annotate matching source records without removing or merging them."""
+    for index, record in enumerate(records):
         pair = record.get("latitude"), record.get("longitude")
         if pair[0] is None or pair[1] is None:
             continue
         duplicates = []
-        for other_index, other in enumerate(result):
+        for other_index, other in enumerate(records):
             if index == other_index or other.get("latitude") is None or other.get("longitude") is None:
                 continue
             same_coordinates = round(float(pair[0]), 4) == round(float(other["latitude"]), 4) and round(float(pair[1]), 4) == round(float(other["longitude"]), 4)
@@ -83,4 +80,16 @@ def validate_records(records: list[dict[str, Any]], *, country_bounds: Mapping[s
                 duplicates.append(str(other.get("source")))
         if duplicates:
             record["possibly_duplicate_of"] = sorted(set(duplicates))
+
+
+def validate_records(records: list[dict[str, Any]], *, country_bounds: Mapping[str, tuple[float, float, float, float]] | None = None,
+                     sentinels: Mapping[str, set[tuple[float, float]]] | None = None,
+                     now: datetime | None = None, stale_after_days: int = 180,
+                     boundary_padding_km: float = 50.0) -> list[dict[str, Any]]:
+    """Validate each record independently, then annotate duplicate relationships."""
+    now = now or datetime.now(timezone.utc)
+    country_bounds = country_bounds or {}
+    sentinels = sentinels or {}
+    result = [_validate_record(dict(record), country_bounds, sentinels, now, stale_after_days, boundary_padding_km) for record in records]
+    _annotate_duplicates(result)
     return result

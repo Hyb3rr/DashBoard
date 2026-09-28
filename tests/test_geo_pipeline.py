@@ -11,6 +11,7 @@ async def test_enrichment_pipeline_drops_cross_country_coordinate_candidate(monk
         "dbip_city": {"country_code": "BG", "city": None, "latitude": -4.62336, "longitude": 55.4522},
     }
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {"BG": (41.0, 22.0, 44.2, 28.7)} if "BG" in codes else {})
     monkeypatch.setattr(enrichment, "resolve_network_location", lambda *args, **kwargs: {
         "country": "Bulgaria", "country_code": "BG", "sources": [], "confidence": 0,
         "registration": {"country_code": "BG", "source": "rir:ripe"},

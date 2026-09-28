@@ -4,6 +4,8 @@ import threading
 from app.core.fast_detection import EarlyDetection
 from app.core import metrics
 from app.collectors.websocket_collector import CollectorConfig, WebSocketCollector
+from app.collectors import batching
+from app.collectors.websocket_collector import utc_now
 from app.services.early_alerts import EarlyAlertPublisher
 from app.services import early_alerts as early_alerts_module
 
@@ -61,19 +63,20 @@ def test_early_detection_happens_before_slow_storage(monkeypatch):
         monkeypatch.setattr(collector, "_commit_batch", slow_commit)
         monkeypatch.setattr(collector, "_after_commit", lambda *_args: asyncio.sleep(0))
         monkeypatch.setattr(early_alerts_module.early_alerts, "enqueue", lambda detection, ip=None: detections.append((detection, ip)) or True)
-        collector._stop.clear()
-        collector._storage_task = asyncio.create_task(collector._storage_loop())
-        await collector.handle_message(
+        collector.stop_event.clear()
+        collector.storage_worker.start()
+        await batching.handle_message(
+            collector,
             '{"type":"lines","items":["203.0.113.10 - - [24/Aug/2026:12:00:00 +0000] \\\"GET /.env HTTP/1.1\\\" 404 1 \\\"-\\\" \\\"client\\\""]}',
-            0,
+            0, utc_now,
         )
         await asyncio.sleep(0.05)
         assert commit_started.is_set()
         assert detections and detections[0][1] == "203.0.113.10"
         release_commit.set()
-        await collector._storage_queue.join()
-        collector._stop.set()
-        collector._storage_task.cancel()
-        await asyncio.gather(collector._storage_task, return_exceptions=True)
+        await collector.storage_worker.queue.join()
+        collector.stop_event.set()
+        collector.storage_worker.task.cancel()
+        await asyncio.gather(collector.storage_worker.task, return_exceptions=True)
 
     asyncio.run(scenario())

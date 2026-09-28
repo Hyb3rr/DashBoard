@@ -9,6 +9,7 @@ from app.core.calibration import csv_text, evaluate_csv
 
 
 def main() -> int:
+    """Evaluate the supplied classification labels and print the report."""
     parser = argparse.ArgumentParser(description="Evaluate manually labeled IP classifications")
     parser.add_argument("csv_path")
     args = parser.parse_args()

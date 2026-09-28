@@ -17,6 +17,7 @@ def raw_logs_tail(
     ip: str | None = None,
     status: int | None = Query(None, ge=100, le=599),
 ):
+    """Return a bounded recent raw-log window with optional IP and status filters."""
     now = datetime.now(timezone.utc)
     parsed_ip = None
     if ip:

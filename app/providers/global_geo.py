@@ -11,6 +11,7 @@ from .common import conditional_fetch
 
 
 def _upsert_prefix(conn, network: str, source: str, **values) -> None:
+    """Upsert one current registration-prefix record for its source."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT INTO geo_prefixes
@@ -25,6 +26,7 @@ def _upsert_prefix(conn, network: str, source: str, **values) -> None:
 
 
 def _prefix_params(rows: list[dict], source: str, now: str, rir: str) -> list[tuple]:
+    """Convert parsed RIR prefixes into ordered database parameters."""
     return [
         (
             row["network"], None, None, None, rir, row["country_code"],
@@ -62,6 +64,7 @@ def parse_rir_delegated(payload: str, rir: str) -> list[dict]:
 
 
 def refresh_rir(conn, rir: str, url: str, cache: Path | None = None) -> dict:
+    """Fetch and refresh one RIR delegated-prefix snapshot transactionally."""
     cache = cache or Path(os.getenv(f"{rir.upper()}_DELEGATED_CACHE", f"data/geo/{rir.lower()}-delegated.txt"))
     try:
         result = conditional_fetch(url, cache)
@@ -86,6 +89,7 @@ def refresh_rir(conn, rir: str, url: str, cache: Path | None = None) -> dict:
 
 
 def parse_geofeed(payload: str) -> list[dict]:
+    """Parse valid network and optional locality rows from a geofeed CSV."""
     rows = []
     for row in csv.reader(io.StringIO(payload)):
         if len(row) < 2 or row[0].strip().startswith("#"):
@@ -116,6 +120,7 @@ def parse_geofeed(payload: str) -> list[dict]:
 
 
 def refresh_geofeed(conn, name: str, url: str, cache: Path | None = None) -> dict:
+    """Fetch and persist one verified-source geofeed observation snapshot."""
     cache = cache or Path(os.getenv(f"GEOFEED_{name.upper()}_CACHE", f"data/geo/geofeed-{name}.csv"))
     try:
         result = conditional_fetch(url, cache)

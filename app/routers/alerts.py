@@ -12,14 +12,17 @@ AUTO_EXPLAIN_SETTING = "critical_alert_auto_explain"
 
 @router.get("/alerts", response_class=HTMLResponse)
 def alerts_page():
+    """Serve the alert inbox page."""
     return HTMLResponse((TEMPLATES_DIR / "alerts.html").read_text(encoding="utf-8"))
 
 
 def _iso(value):
+    """Serialize timestamp-like alert fields for JSON responses."""
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _item(row: dict) -> dict:
+    """Convert a database alert row into its API representation."""
     result = dict(row)
     for key in ("created_at", "updated_at", "acknowledged_at", "resolved_at"):
         result[key] = _iso(result.get(key))
@@ -29,11 +32,13 @@ def _item(row: dict) -> dict:
 
 @router.get("/api/alerts/settings")
 def get_alert_settings():
+    """Return the current automatic critical-alert explanation setting."""
     return {"critical_alert_auto_explain": AiTriggerRepository().auto_explain_enabled()}
 
 
 @router.patch("/api/alerts/settings")
 def update_alert_settings(payload: dict):
+    """Update whether critical alerts are automatically sent for explanation."""
     if not isinstance(payload, dict) or not isinstance(payload.get(AUTO_EXPLAIN_SETTING), bool):
         raise HTTPException(status_code=400, detail=f"{AUTO_EXPLAIN_SETTING} must be boolean")
     enabled = AiTriggerRepository().set_auto_explain_enabled(payload[AUTO_EXPLAIN_SETTING])
@@ -48,6 +53,7 @@ def list_alerts(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None),
 ):
+    """List filtered alerts with stable cursor-pagination metadata."""
     try:
         result = AlertRepository().list(severity, status, limit, offset, cursor)
     except ValueError as exc:
@@ -57,6 +63,7 @@ def list_alerts(
 
 @router.patch("/api/alerts/{alert_id}")
 def update_alert(alert_id: int, payload: dict):
+    """Acknowledge or resolve one alert and return its updated representation."""
     status = payload.get("status") if isinstance(payload, dict) else None
     if status not in {"acknowledged", "resolved"}:
         raise HTTPException(status_code=400, detail="status must be acknowledged or resolved")

@@ -6,13 +6,7 @@ import ipaddress
 
 
 def candidate_networks(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> list[str]:
-    """Return every canonical network that can contain ``address``.
-
-    PostgreSQL intelligence tables store canonical CIDR strings. Querying
-    these candidates lets the database use its network index instead of
-    scanning every stored prefix, while the caller performs a final
-    containment check for defensive validation.
-    """
+    """Generate canonical host and prefix candidates for indexed containment lookups."""
     return list(dict.fromkeys(
         [str(address)]
         + [

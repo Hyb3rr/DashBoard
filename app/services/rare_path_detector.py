@@ -30,6 +30,7 @@ def rarity_score(row: dict, baseline_buckets: int = 168, now: datetime | None = 
 
 
 def build_rare_path_evidence(row: dict, now: datetime) -> dict:
+    """Build explainable supporting evidence for one statistically rare path."""
     score = rarity_score(row, now=now)
     payload = UnifiedEvidence(
         source="rare_path_detector", type="rare_path", severity="supporting",

@@ -156,6 +156,53 @@ def test_tor_refresh_merges_default_sources(monkeypatch, tmp_path):
     assert result["count"] == 3
 
 
+def test_tor_refresh_304_updates_metadata_without_replacing_feed(monkeypatch, tmp_path):
+    """Keep the cached feed while recording a successful conditional check."""
+    from urllib.error import HTTPError
+
+    output = tmp_path / "tor_exit_nodes.txt"
+    output.write_text("8.8.8.8\n", encoding="utf-8")
+    metadata_path = output.with_suffix(".txt.meta.json")
+    metadata_path.write_text(json.dumps({"count": 1, "status": "updated"}), encoding="utf-8")
+
+    def not_modified(_request, timeout):
+        """Simulate the feed server's conditional-response status."""
+        raise HTTPError("https://example.test/tor", 304, "Not Modified", {}, None)
+
+    monkeypatch.setattr("scripts.ops.tor_refresh.urlopen", not_modified)
+    result = refresh_tor_exit_list(output, url="https://example.test/tor")
+
+    assert result["status"] == "not_modified"
+    assert result["count"] == 1
+    assert output.read_text(encoding="utf-8") == "8.8.8.8\n"
+    assert json.loads(metadata_path.read_text(encoding="utf-8"))["status"] == "not_modified"
+
+
+def test_tor_refresh_rejects_suspicious_count_drop_without_replacing_feed(monkeypatch, tmp_path):
+    """Keep the previous list when the incoming feed falls below the safety floor."""
+    output = tmp_path / "tor_exit_nodes.txt"
+    output.write_text("8.8.8.8\n1.1.1.1\n2001:4860:4860::8888\n", encoding="utf-8")
+    output.with_suffix(".txt.meta.json").write_text(json.dumps({"count": 10}), encoding="utf-8")
+
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"8.8.8.8\n1.1.1.1\n2001:4860:4860::8888\n"
+
+    monkeypatch.setattr("scripts.ops.tor_refresh.urlopen", lambda _request, timeout: Response())
+    result = refresh_tor_exit_list(output, url="https://example.test/tor")
+
+    assert result["error"] == "sanity_count_drop"
+    assert output.read_text(encoding="utf-8").startswith("8.8.8.8\n")
+
+
 def test_calibration_export_and_evaluation(tmp_path):
     payload = csv_text([
         {"ip": "8.8.8.8", "classification": {"label": "good", "score": 0, "confidence": 65}, "country": "United States"},
@@ -184,11 +231,28 @@ def test_field_merge_does_not_overwrite_existing_value():
     assert sources == {"country": "MaxMind", "city": "Fallback"}
 
 
-def test_tor_exit_list_default_snapshot_is_active(monkeypatch):
-    monkeypatch.delenv("TOR_EXIT_LIST_PATH", raising=False)
+def test_tor_exit_list_configured_snapshot_is_active(monkeypatch, tmp_path):
+    tor_path = tmp_path / "tor-exits.txt"
+    tor_path.write_text("8.8.8.8\n", encoding="utf-8")
+    monkeypatch.setenv("TOR_EXIT_LIST_PATH", str(tor_path))
     result, errors, status = _tor_exit_list("8.8.8.8")
     assert status == "active"
+    assert result["is_tor"] is True
+    assert not errors
+    result, errors, status = _tor_exit_list("1.1.1.1")
+    assert status == "active"
     assert result["is_tor"] is False
+    assert not errors
+
+
+def test_tor_exit_list_missing_default_is_not_configured(monkeypatch, tmp_path):
+    from app.core import enrichment
+
+    monkeypatch.delenv("TOR_EXIT_LIST_PATH", raising=False)
+    monkeypatch.setattr(enrichment, "TOR_EXIT_LIST", tmp_path / "missing-tor-list.txt")
+    result, errors, status = _tor_exit_list("8.8.8.8")
+    assert status == "not_configured"
+    assert result == {}
     assert not errors
 
 
@@ -214,17 +278,21 @@ def test_maxmind_missing_package_is_reported(monkeypatch):
 
 
 def test_lookup_non_public_address():
+    """Keep the non-public IP response complete without running local providers."""
     result = asyncio.run(lookup("127.0.0.1"))
     assert result["is_private"] is True
+    assert result["address_scope"] == "loopback"
     assert result["core_enrichment_status"] == "complete"
     assert result["network_type"] == "private/non-public"
+    assert result["anonymization"]["confidence"] == 0
+    assert result["provider_errors"] == []
 
 
 def test_lookup_uses_maxmind_when_available(monkeypatch):
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda ip, vendor=None, force_refresh=False: {})
     monkeypatch.setattr(
         enrichment,
         "_maxmind",
@@ -253,7 +321,7 @@ def test_lookup_accepts_sapics_country_without_geo_country(monkeypatch):
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda ip, vendor=None, force_refresh=False: {})
     monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
     monkeypatch.setattr(
         "app.services.sapics_reader.lookup",
@@ -284,7 +352,7 @@ def test_lookup_correlates_matching_production_sapics_country_claims(monkeypatch
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None, force_refresh=False: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda ip, vendor=None, force_refresh=False: {})
     monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
     monkeypatch.setattr(
         "app.services.sapics_reader.lookup",
@@ -341,7 +409,7 @@ def test_lookup_preserves_owner_and_sapics_country_attribution(monkeypatch):
     monkeypatch.setattr(
         enrichment,
         "resolve_network_location",
-        lambda conn, ip, vendor=None, force_refresh=False: {
+        lambda ip, vendor=None, force_refresh=False: {
             "country_code": "VN",
             "sources": ["geofeed"],
         },
@@ -376,7 +444,7 @@ def test_lookup_sets_is_tor_from_local_exit_list(monkeypatch, tmp_path):
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda ip, vendor=None, force_refresh=False: {})
     tor_list = tmp_path / "tor.txt"
     tor_list.write_text("8.8.8.8\n")
     monkeypatch.setenv("TOR_EXIT_LIST_PATH", str(tor_list))
@@ -401,10 +469,16 @@ def test_lookup_sets_is_tor_from_local_exit_list(monkeypatch, tmp_path):
 
 
 def test_lookup_reports_missing_local_geoip_configuration(monkeypatch):
+    """Report unavailable enrichment when every local geo source is empty."""
     from app.core import enrichment
 
     monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
-    monkeypatch.setattr(enrichment, "resolve_network_location", lambda conn, ip, vendor=None: {})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda ip, vendor=None, force_refresh=False: {})
+    async def no_geo_result(*_args, **_kwargs):
+        """Keep this test isolated from optional local geography datasets."""
+        return None
+
+    monkeypatch.setattr(enrichment, "_resolve_global_geo", no_geo_result)
     monkeypatch.setattr(enrichment, "_maxmind", lambda ip: ({}, [], "not_configured"))
     result = asyncio.run(lookup("8.8.8.8"))
     assert result["core_enrichment_status"] == "failed"
@@ -596,6 +670,60 @@ def test_group_e_promotes_watch_but_cannot_create_bad():
     )
     assert result["score_breakdown"]["ai_e"] == 8
     assert result["label"] == "medium"
+
+
+def test_region_demand_signal_aggregates_profiles_and_qualified_good_traffic(monkeypatch):
+    """Preserve country context and good-traffic qualification in the read model."""
+    from contextlib import contextmanager
+
+    from app.db import region_repository, repositories
+
+    rows = [
+        {
+            "country_code": "SG", "country": "Singapore", "observation_payload": {
+                "requests": 20, "sensitive_probe_requests": 0, "bot_requests": 0,
+            }, "classification_label": "good", "is_proxy": False,
+        },
+        {
+            "country_code": "SG", "country": "Singapore", "observation_payload": {
+                "requests": 10, "sensitive_probe_requests": 0, "bot_requests": 0,
+            }, "classification_label": "critical", "is_proxy": False,
+        },
+    ]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def execute(self, *_args):
+            return Result()
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr(region_repository, "transaction", fake_transaction)
+    monkeypatch.setattr(
+        repositories.RegionRepository,
+        "get",
+        lambda self, code: {
+            "country_code": code, "country_name": "Singapore",
+            "market_score": 88, "market_level": "high",
+            "market_components": {"product_demand": 72},
+        },
+    )
+
+    result = repositories.RegionRepository().demand_signal()
+
+    assert len(result) == 1
+    assert result[0]["country_name"] == "Singapore"
+    assert result[0]["observed_ip_count"] == 2
+    assert result[0]["observed_requests"] == 30
+    assert result[0]["good_ip_count"] == 1
+    assert result[0]["good_requests"] == 20
+    assert result[0]["critical_ip_count"] == 1
+    assert result[0]["signal_level"] == "low"
 
 
 @pytest.mark.integration

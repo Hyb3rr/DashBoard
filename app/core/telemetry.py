@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 def _normalize_bool(value: object) -> bool | None:
+    """Parse supported boolean representations without guessing."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -16,6 +17,7 @@ def _normalize_bool(value: object) -> bool | None:
 
 
 def _normalize_confidence(value: object) -> int:
+    """Clamp a confidence value to an integer percentage."""
     if isinstance(value, bool):
         return 0
     try:
@@ -26,6 +28,7 @@ def _normalize_confidence(value: object) -> int:
 
 
 def _normalize_confidence_level(value: object) -> str:
+    """Normalize recognized confidence levels or mark them unavailable."""
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"low", "medium", "high"}:
@@ -34,6 +37,7 @@ def _normalize_confidence_level(value: object) -> str:
 
 
 def data_health(observation: dict | None, profile: dict | None, ai_profile: dict | None) -> dict:
+    """Summarize evidence completeness without changing the IP classification."""
     observation, profile, ai_profile = observation or {}, profile or {}, ai_profile or {}
     bucket_history = observation.get("bucket_history_hours")
     if "rule_coverage" in observation:
@@ -58,6 +62,7 @@ def data_health(observation: dict | None, profile: dict | None, ai_profile: dict
 
 
 def confidence_for_label(label: str, health: dict) -> tuple[int, list[str]]:
+    """Calculate label confidence with explicit completeness adjustments."""
     base = {"critical": 90, "medium": 75, "low": 70, "good": 65, "unknown": 35}.get(label, 35)
     score, factors = base, [f"base label confidence {base}"]
     if health.get("core_enrichment_status") == "complete":

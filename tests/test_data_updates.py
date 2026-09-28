@@ -1,5 +1,8 @@
 import json
+import sys
+import types
 from datetime import datetime, timezone
+from pathlib import Path
 
 from scripts.ops import data_scheduler
 from scripts.market import worldbank_update
@@ -70,6 +73,124 @@ def test_worldbank_update_failure_keeps_last_good(tmp_path, monkeypatch):
     result = worldbank_update.update_world_bank(target, min_country_count=1, refresh_market=False)
     assert result["status"] == "failed"
     assert target.read_text() == "last good\n"
+
+
+def test_worldbank_identical_refresh_does_not_rewrite_last_good_snapshot(tmp_path, monkeypatch):
+    target = tmp_path / "Data.csv"
+    target.write_text("last good\n")
+    monkeypatch.setattr(worldbank_update, "_fetch", lambda code, timeout: _records(code))
+
+    first = worldbank_update.update_world_bank(target, min_country_count=1, refresh_market=False)
+    last_good = (tmp_path / "Data.last-good.csv").read_bytes()
+    second = worldbank_update.update_world_bank(target, min_country_count=1, refresh_market=False)
+
+    assert first["status"] == "updated"
+    assert second == {"status": "not_modified", "changed": False, "countries": 1}
+    assert (tmp_path / "Data.last-good.csv").read_bytes() == last_good
+
+
+def test_dev_launcher_does_not_download_geo_databases_at_startup():
+    source = Path("scripts/dev_run.sh").read_text(encoding="utf-8")
+
+    assert "SAPICS_UPDATE_ON_STARTUP" not in source
+    assert "IP2REGION_UPDATE_ON_STARTUP" not in source
+    assert "sapics_updater import refresh" not in source
+    assert "ip2region_updater import refresh" not in source
+
+
+def test_env_example_has_one_disabled_shared_intel_updater_assignment():
+    source = Path(".env.example").read_text(encoding="utf-8")
+    assignments = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("INTEL_UPDATER_ENABLED=")
+    ]
+
+    assert assignments == ["INTEL_UPDATER_ENABLED=false"]
+
+
+def test_scheduler_runs_ip2region_when_due_and_skips_until_next_interval(monkeypatch):
+    calls = []
+    state, report = {}, {}
+    now = datetime(2026, 9, 26, tzinfo=timezone.utc)
+    monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("SAPICS_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("IP2REGION_UPDATER_ENABLED", "true")
+    monkeypatch.setenv("IP2REGION_REFRESH_HOURS", "24")
+    monkeypatch.setattr(
+        data_scheduler, "_refresh_ip2region",
+        lambda: calls.append("ip2region") or {"status": "ok", "updated": ["v4", "v6"]},
+    )
+
+    data_scheduler._run_local_geo_database_updates(state, report, now)
+    data_scheduler._run_local_geo_database_updates(state, report, now.replace(hour=23))
+
+    assert calls == ["ip2region"]
+    assert report["ip2region"]["status"] == "not_due"
+    assert state["ip2region"]["last_success_at"] == now.isoformat()
+
+
+def test_scheduler_uses_existing_sapics_due_source_when_intel_updater_enabled(monkeypatch):
+    calls = []
+    state, report = {}, {}
+    monkeypatch.setenv("INTEL_UPDATER_ENABLED", "true")
+    monkeypatch.setenv("SAPICS_UPDATER_ENABLED", "true")
+    monkeypatch.setenv("IP2REGION_UPDATER_ENABLED", "false")
+    monkeypatch.setattr(data_scheduler, "_refresh_sapics", lambda: calls.append("duplicate"))
+
+    data_scheduler._run_local_geo_database_updates(
+        state, report, datetime(2026, 9, 26, tzinfo=timezone.utc)
+    )
+
+    assert calls == []
+    assert "sapics_local" not in report
+
+
+def test_scheduler_runs_sapics_fallback_when_shared_intel_updater_is_disabled(monkeypatch):
+    calls = []
+    state, report = {}, {}
+    monkeypatch.setenv("INTEL_UPDATER_ENABLED", "false")
+    monkeypatch.setenv("SAPICS_UPDATER_ENABLED", "true")
+    monkeypatch.setenv("IP2REGION_UPDATER_ENABLED", "false")
+    monkeypatch.setattr(
+        data_scheduler, "_refresh_sapics",
+        lambda: calls.append("sapics") or {"status": "ok", "updated": ["country.mmdb"]},
+    )
+
+    data_scheduler._run_local_geo_database_updates(
+        state, report, datetime(2026, 9, 26, tzinfo=timezone.utc)
+    )
+
+    assert calls == ["sapics"]
+    assert report["sapics_local"]["status"] == "ok"
+
+
+def test_ip2region_failed_validation_preserves_last_good_files(tmp_path, monkeypatch):
+    from app.services import ip2region_updater
+
+    package = types.ModuleType("ip2region")
+    package.__path__ = []
+    util = types.ModuleType("ip2region.util")
+    util.IPv4, util.IPv6 = 4, 6
+    util.verify_from_file = lambda _path: (_ for _ in ()).throw(ValueError("invalid xdb"))
+    monkeypatch.setitem(sys.modules, "ip2region", package)
+    monkeypatch.setitem(sys.modules, "ip2region.util", util)
+    monkeypatch.setattr(ip2region_updater, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        ip2region_updater, "urlopen",
+        lambda *_args, **_kwargs: types.SimpleNamespace(read=lambda: b"invalid new xdb"),
+    )
+    previous = {}
+    for filename in ("ip2region_v4.xdb", "ip2region_v6.xdb"):
+        target = tmp_path / filename
+        target.write_bytes(b"known-good database")
+        previous[target] = target.read_bytes()
+
+    result = ip2region_updater.refresh()
+
+    assert result["status"] == "failed"
+    assert all(target.read_bytes() == content for target, content in previous.items())
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(target.name for target in previous)
 
 
 def test_scheduler_runs_due_tasks_independently(tmp_path, monkeypatch):

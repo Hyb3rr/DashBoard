@@ -57,6 +57,7 @@ class ShortWindowDetector:
     """Bounded per-IP correlation state for preliminary alerts."""
 
     def __init__(self, ttl_seconds: int = 60, cooldown_seconds: int = 60, max_ips: int = 10000) -> None:
+        """Initialize bounded per-IP windows, supporting counters, and cooldowns."""
         self.ttl_seconds = max(1, ttl_seconds)
         self.cooldown_seconds = max(0, cooldown_seconds)
         self.max_ips = max(1, max_ips)
@@ -67,6 +68,7 @@ class ShortWindowDetector:
         self._fanout_variants: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
 
     def observe(self, raw_line: str | None, now: float | None = None) -> list[EarlyDetection]:
+        """Update one IP window and return any newly eligible early detections."""
         parsed = _ACCESS_LINE.search(raw_line or "")
         if not parsed:
             return []
@@ -93,6 +95,11 @@ class ShortWindowDetector:
             self._fanout_variants[ip][fanout_base][fanout_variant] += 1
         self._enforce_capacity()
         current = list(entries)
+        candidates = self._candidate_rules(ip, current, raw_line, scanner_tool)
+        return self._emit_candidates(candidates, ip, stamp, method, path, scanner_tool)
+
+    def _candidate_rules(self, ip, current, raw_line, scanner_tool):
+        """Collect matching rule identifiers from the current bounded window."""
         candidates: list[tuple[str, str]] = []
         if scanner_tool:
             candidates.append(("PENTEST-UA-001", "scanner_ua"))
@@ -117,6 +124,10 @@ class ShortWindowDetector:
             candidates.append(("PENTEST-WP-001", "wordpress_enumeration_sequence"))
         if any(len(variants) >= _THRESHOLDS["fanout_min_variants"] for variants in self._fanout_variants[ip].values()):
             candidates.append(("PENTEST-FANOUT-001", "extension_backup_fanout"))
+        return candidates
+
+    def _emit_candidates(self, candidates, ip, stamp, method, path, scanner_tool):
+        """Apply per-rule cooldowns and materialize early-detection records."""
         result = []
         for rule_id, marker in candidates:
             key = (ip, rule_id)
@@ -129,6 +140,7 @@ class ShortWindowDetector:
         return result
 
     def _expire_ip(self, ip: str, now: float) -> None:
+        """Expire stale entries and decrement all counters owned by one IP."""
         cutoff = now - self.ttl_seconds
         window = self._windows.get(ip)
         if window is not None:
@@ -163,10 +175,12 @@ class ShortWindowDetector:
                 del self._last_alert[key]
 
     def active_ip_count(self, now: float | None = None) -> int:
+        """Return the number of IP windows that remain active at the given time."""
         self._expire(now if now is not None else datetime.now(timezone.utc).timestamp())
         return len(self._windows)
 
     def _enforce_capacity(self) -> None:
+        """Evict the least recently observed IP windows above the configured cap."""
         while len(self._windows) > self.max_ips:
             oldest_ip = min(self._windows, key=lambda ip: self._windows[ip][-1].timestamp)
             del self._windows[oldest_ip]
@@ -176,6 +190,7 @@ class ShortWindowDetector:
 
 
 def detect_scanner_user_agent(raw_line: str | None) -> str | None:
+    """Identify a configured scanner tool from the raw user-agent field."""
     if not raw_line:
         return None
     quoted = re.findall(r'"([^"]*)"', raw_line)
@@ -187,6 +202,7 @@ def detect_scanner_user_agent(raw_line: str | None) -> str | None:
 
 
 def classify_wordpress_family(path: str | None) -> str | None:
+    """Classify a path into a configured WordPress enumeration family."""
     value = (path or "").lower().rstrip("/") or "/"
     for family, pattern in _WORDPRESS_FAMILIES:
         if pattern.fullmatch(value) or pattern.match(value):
@@ -195,6 +211,7 @@ def classify_wordpress_family(path: str | None) -> str | None:
 
 
 def fanout_parts(path: str | None) -> tuple[str | None, str | None]:
+    """Split a path into a base and configured extension for fan-out detection."""
     value = path or ""
     for suffix in _FANOUT_SUFFIXES:
         if value.endswith(suffix) and len(value) > len(suffix) and value.rsplit("/", 1)[-1] != suffix[1:]:

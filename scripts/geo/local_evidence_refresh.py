@@ -25,6 +25,7 @@ AUXILIARY_AIRPORT_TAGS = ("nwr/aeroway=aerodrome", "nwr/aeroway=terminal")
 
 
 def _source_candidates(country: str, cache_dir: Path) -> list[Path]:
+    """List configured and conventional cached PBF locations for one country."""
     configured = os.getenv(f"OSM_PBF_PATH_{country}")
     return [Path(configured)] if configured else [
         cache_dir / "sources" / f"{country.lower()}.osm.pbf",
@@ -34,10 +35,12 @@ def _source_candidates(country: str, cache_dir: Path) -> list[Path]:
 
 
 def resolve_source(country: str, cache_dir: Path) -> Path | None:
+    """Return the first non-empty cached OSM source for a country."""
     return next((path for path in _source_candidates(country, cache_dir) if path.exists() and path.stat().st_size), None)
 
 
 def _native_auxiliary_filter(source: Path, candidate: Path, budget_seconds: float) -> None:
+    """Create a bounded auxiliary-only PBF using the native osmium CLI."""
     binary = os.getenv("OSMIUM_BIN") or shutil.which("osmium")
     if not binary:
         raise RuntimeError("native osmium CLI is required for Phase 5B")
@@ -55,6 +58,7 @@ def _native_auxiliary_filter(source: Path, candidate: Path, budget_seconds: floa
 
 
 def _points(entity: Any) -> list[tuple[float, float]]:
+    """Return a valid node location or a way's representative center point."""
     location = getattr(entity, "location", None)
     if location and getattr(location, "valid", lambda: False)():
         return [(float(location.lat), float(location.lon))]
@@ -63,48 +67,44 @@ def _points(entity: Any) -> list[tuple[float, float]]:
     return [(sum(lat for lat, _ in points) / len(points), sum(lon for _, lon in points) / len(points))] if points else []
 
 
-def scan_auxiliary(candidate: Path, country: str, source_hash: str) -> list[dict[str, Any]]:
-    try:
-        import osmium
-    except ImportError as exc:
-        raise RuntimeError("PyOsmium is required for Phase 5B") from exc
-    resolution = production_resolution()
-    cells: dict[str, dict[str, int]] = {}
+def _empty_counts() -> dict[str, int]:
+    """Create a fresh counter record for one H3 cell."""
+    return {
+        "industrial_land_count": 0,
+        "motorway_count": 0,
+        "primary_road_count": 0,
+        "railway_count": 0,
+        "port_count": 0,
+        "airport_count": 0,
+        "access_observation_count": 0,
+    }
 
-    class Handler(osmium.SimpleHandler):
-        def visit(self, entity: Any) -> None:
-            tags = dict(entity.tags)
-            points = _points(entity)
-            if not points:
-                return
-            cell = _cell(*points[0], resolution)
-            counts = cells.setdefault(cell, {"industrial_land_count": 0, "motorway_count": 0,
-                "primary_road_count": 0, "railway_count": 0, "port_count": 0,
-                "airport_count": 0, "access_observation_count": 0})
-            if tags.get("landuse") == "industrial" or "industrial" in tags:
-                counts["industrial_land_count"] += 1
-            highway = tags.get("highway")
-            if highway in {"motorway", "trunk"}:
-                counts["motorway_count"] += 1
-                counts["access_observation_count"] += 1
-            if highway == "primary":
-                counts["primary_road_count"] += 1
-                counts["access_observation_count"] += 1
-            if "railway" in tags:
-                counts["railway_count"] += 1
-                counts["access_observation_count"] += 1
-            if tags.get("natural") == "harbour" or tags.get("harbour") == "yes" or tags.get("industrial") == "port":
-                counts["port_count"] += 1
-                counts["access_observation_count"] += 1
-            if tags.get("aeroway") in {"aerodrome", "terminal"}:
-                counts["airport_count"] += 1
-                counts["access_observation_count"] += 1
 
-        node = visit
-        way = visit
-        relation = visit
+def _count_auxiliary_tags(tags: dict[str, str], counts: dict[str, int]) -> None:
+    """Increment auxiliary evidence counters using the existing OSM tag rules."""
+    if tags.get("landuse") == "industrial" or "industrial" in tags:
+        counts["industrial_land_count"] += 1
+    highway = tags.get("highway")
+    if highway in {"motorway", "trunk"}:
+        counts["motorway_count"] += 1
+        counts["access_observation_count"] += 1
+    if highway == "primary":
+        counts["primary_road_count"] += 1
+        counts["access_observation_count"] += 1
+    if "railway" in tags:
+        counts["railway_count"] += 1
+        counts["access_observation_count"] += 1
+    if tags.get("natural") == "harbour" or tags.get("harbour") == "yes" or tags.get("industrial") == "port":
+        counts["port_count"] += 1
+        counts["access_observation_count"] += 1
+    if tags.get("aeroway") in {"aerodrome", "terminal"}:
+        counts["airport_count"] += 1
+        counts["access_observation_count"] += 1
 
-    Handler().apply_file(str(candidate), locations=True, idx="flex_mem")
+
+def _project_auxiliary_rows(cells: dict[str, dict[str, int]], country: str,
+                            resolution: int, source_hash: str) -> list[dict[str, Any]]:
+    """Project per-cell observations into both market tracks."""
     rows = []
     for cell, counts in cells.items():
         for track in ("woodworking", "metal_fabrication"):
@@ -114,7 +114,36 @@ def scan_auxiliary(candidate: Path, country: str, source_hash: str) -> list[dict
     return rows
 
 
+def scan_auxiliary(candidate: Path, country: str, source_hash: str) -> list[dict[str, Any]]:
+    """Stream auxiliary OSM entities into per-cell evidence rows."""
+    try:
+        import osmium
+    except ImportError as exc:
+        raise RuntimeError("PyOsmium is required for Phase 5B") from exc
+    resolution = production_resolution()
+    cells: dict[str, dict[str, int]] = {}
+
+    class Handler(osmium.SimpleHandler):
+        def visit(self, entity: Any) -> None:
+            """Map one tagged OSM entity to its representative H3 cell."""
+            tags = dict(entity.tags)
+            points = _points(entity)
+            if not points:
+                return
+            cell = _cell(*points[0], resolution)
+            counts = cells.setdefault(cell, _empty_counts())
+            _count_auxiliary_tags(tags, counts)
+
+        node = visit
+        way = visit
+        relation = visit
+
+    Handler().apply_file(str(candidate), locations=True, idx="flex_mem")
+    return _project_auxiliary_rows(cells, country, resolution, source_hash)
+
+
 def refresh_local_evidence(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Refresh auxiliary OSM evidence for countries with an active base snapshot."""
     selected = [str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", ",".join(PRIORITY_COUNTRIES)).split(",")) if str(code).strip()]
     cache_dir = Path(os.getenv("OSM_CACHE_DIR", str(DATA_DIR / "geography" / "osm" / "scale")))
     candidate_dir = cache_dir / "auxiliary-candidates"

@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 
 def atomic_write(path: Path, payload: bytes) -> None:
+    """Atomically replace a file after writing and syncing its temporary copy."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
@@ -24,10 +25,12 @@ def atomic_write(path: Path, payload: bytes) -> None:
 
 
 def meta_path(path: Path) -> Path:
+    """Return the sidecar metadata path associated with a cached provider file."""
     return path.with_name(path.name + ".meta.json")
 
 
 def read_meta(path: Path) -> dict:
+    """Read provider cache metadata, returning an empty mapping when unavailable."""
     try:
         value = json.loads(meta_path(path).read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
@@ -36,6 +39,7 @@ def read_meta(path: Path) -> dict:
 
 
 def conditional_fetch(url: str, cache: Path | None = None, headers: dict | None = None, timeout: int = 30) -> dict:
+    """Fetch a provider resource using cached validators and return its payload."""
     request_headers = dict(headers or {})
     if cache and cache.exists():
         old = read_meta(cache)
@@ -63,6 +67,7 @@ def conditional_fetch(url: str, cache: Path | None = None, headers: dict | None 
 
 
 def parse_networks(payload: bytes | str) -> list[str]:
+    """Parse, canonicalize, and deduplicate IP networks from provider text."""
     text = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else payload
     result = []
     import ipaddress

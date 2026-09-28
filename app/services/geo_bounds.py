@@ -10,6 +10,7 @@ from typing import Any
 
 
 def _pairs(value: Any):
+    """Yield latitude-longitude pairs recursively from GeoJSON coordinates."""
     if isinstance(value, (list, tuple)):
         if len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
             yield float(value[1]), float(value[0])
@@ -38,4 +39,5 @@ def country_bounds(country_code: str) -> tuple[float, float, float, float] | Non
 
 
 def bounds_for(codes: set[str]) -> dict[str, tuple[float, float, float, float]]:
+    """Return available cached administrative bounds for a set of countries."""
     return {code: bounds for code in codes if (bounds := country_bounds(code)) is not None}

@@ -16,14 +16,17 @@ _CLASSIFICATIONS = {"unknown", "good", "low", "medium", "critical"}
 
 
 def _canonical(value: Any) -> str:
+    """Serialize values deterministically for stable case fingerprints."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _bounded_text(value: Any, limit: int) -> str:
+    """Convert a value to text and cap it at the requested length."""
     return str(value or "")[:limit]
 
 
 def _safe_path(value: Any) -> str:
+    """Remove query and host components from a bounded request path."""
     raw = _bounded_text(value, MAX_PATH_LENGTH)
     if not raw:
         return ""
@@ -32,6 +35,7 @@ def _safe_path(value: Any) -> str:
 
 
 def _normalise_evidence(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate, deduplicate, and bound evidence records for a case packet."""
     result = []
     seen: set[str] = set()
     for item in items:
@@ -50,6 +54,7 @@ def _normalise_evidence(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _normalise_requests(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize and bound representative requests without sensitive query data."""
     result = []
     for item in items:
         if not isinstance(item, dict):
@@ -73,7 +78,7 @@ def build_case_packet(
     evidence: Iterable[dict[str, Any]],
     representative_requests: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Build bounded, deterministic packet; no database, network, or AI access."""
+    """Build a deterministic bounded case packet without database or network access."""
     subject_ip = str(ipaddress.ip_address(ip))
     label = str(classification.get("label") or "unknown").lower()
     if label not in _CLASSIFICATIONS:
@@ -105,11 +110,7 @@ def build_case_packet(
 
 
 def build_trigger_identity(packet: dict[str, Any]) -> dict[str, str]:
-    """Build stable deduplication identity for a future semantic trigger.
-
-    Moving observation windows and request samples are intentionally excluded;
-    the canonical packet and its fingerprint remain unchanged.
-    """
+    """Build a stable trigger identity independent of changing request samples."""
     subject = packet.get("subject") or {}
     classification = packet.get("classification") or {}
     evidence = [
@@ -126,11 +127,7 @@ def build_trigger_identity(packet: dict[str, Any]) -> dict[str, str]:
 
 
 def build_live_case_packet(ip: str, snapshot: dict[str, Any], traffic: dict[str, Any], start: Any, end: Any) -> dict[str, Any]:
-    """Build a bounded live packet from already-read snapshots.
-
-    Database and ClickHouse access stays in the outer router; this function
-    only adapts read models into the canonical deterministic packet.
-    """
+    """Adapt existing live snapshots into the canonical bounded case packet."""
     classification = snapshot.get("classification") or {}
     observation = snapshot.get("observation") or {}
     evidence: list[dict[str, Any]] = []

@@ -17,11 +17,13 @@ class ExchangeRateHostClient:
     provider = "exchangerate.host"
 
     def __init__(self, access_key: str | None = None, endpoint: str | None = None):
+        """Configure the provider client and initialize its per-instance cache."""
         self.access_key = access_key or os.getenv("FX_RATE_API_KEY", "")
         self.endpoint = endpoint or os.getenv("FX_RATE_API_URL", "https://api.exchangerate.host/historical")
         self._cache: dict[tuple[str, str], Decimal] = {}
 
     def get_rate(self, currency: str, date: str) -> Decimal:
+        """Return a cached or fetched historical exchange rate against USD."""
         currency = currency.upper().strip()
         key = (currency, date)
         if key in self._cache:

@@ -23,6 +23,7 @@ STAGES = {"rfq", "quoted", "negotiating", "won", "lost"}
 
 
 def _date_from_timestamp(value: str) -> str | None:
+    """Return an ISO calendar date from a timestamp or None when invalid."""
     if not value:
         return None
     try:
@@ -33,6 +34,7 @@ def _date_from_timestamp(value: str) -> str | None:
 
 def validate_rows(rows: list[dict[str, str]], valid_geo_units: set[str], valid_products: set[str],
                   fx_resolver: Any = None) -> tuple[list[dict[str, str]], Counter]:
+    """Validate import rows in policy order and count each rejected category."""
     accepted, rejected = [], Counter()
     for row in rows:
         row = {key: (value or "").strip() for key, value in row.items()}
@@ -46,41 +48,50 @@ def validate_rows(rows: list[dict[str, str]], valid_geo_units: set[str], valid_p
         elif row["stage"] not in STAGES:
             rejected["invalid_stage"] += 1
         else:
-            try:
-                value = Decimal(row["deal_value_original"]) if row.get("deal_value_original") else None
-                fx = Decimal(row["fx_rate_used"]) if row.get("fx_rate_used") else None
-                if value is not None:
-                    currency = row.get("deal_value_currency", "").upper()
-                    row["deal_value_currency"] = currency
-                    if len(currency) != 3 or not currency.isalpha():
-                        raise ValueError
-                    if currency == "USD" and fx is None:
-                        fx, row["fx_rate_used"] = Decimal("1"), "1"
-                    if currency == "USD" and fx == 1 and not row.get("fx_rate_provider"):
-                        row["fx_rate_provider"] = "identity_usd"
-                    row["fx_rate_date"] = row.get("fx_rate_date") or _date_from_timestamp(row.get("quoted_at", "")) or _date_from_timestamp(row.get("created_at", ""))
-                    if not row["fx_rate_date"]:
-                        raise ValueError
-                    if fx is None and currency != "USD" and fx_resolver is not None:
-                        fx = Decimal(str(fx_resolver(currency, row["fx_rate_date"])))
-                        row["fx_rate_used"] = str(fx)
-                        row["fx_rate_provider"] = "exchangerate.host"
-                    if fx is None or not row.get("fx_rate_provider"):
-                        raise LookupError
-                if value is not None and value < 0:
-                    raise ValueError
-                if fx is not None and fx <= 0:
-                    raise ValueError
-            except (LookupError, FxRateError):
-                rejected["missing_fx_rate"] += 1
-            except (InvalidOperation, ValueError):
-                rejected["invalid_value_or_fx"] += 1
+            rejection = _value_rejection(row, fx_resolver)
+            if rejection:
+                rejected[rejection] += 1
             else:
                 accepted.append(row)
     return accepted, rejected
 
 
+def _value_rejection(row: dict[str, str], fx_resolver: Any) -> str | None:
+    """Normalize deal value and FX evidence or return its rejection category."""
+    try:
+        value = Decimal(row["deal_value_original"]) if row.get("deal_value_original") else None
+        fx = Decimal(row["fx_rate_used"]) if row.get("fx_rate_used") else None
+        if value is not None:
+            currency = row.get("deal_value_currency", "").upper()
+            row["deal_value_currency"] = currency
+            if len(currency) != 3 or not currency.isalpha():
+                raise ValueError
+            if currency == "USD" and fx is None:
+                fx, row["fx_rate_used"] = Decimal("1"), "1"
+            if currency == "USD" and fx == 1 and not row.get("fx_rate_provider"):
+                row["fx_rate_provider"] = "identity_usd"
+            row["fx_rate_date"] = row.get("fx_rate_date") or _date_from_timestamp(row.get("quoted_at", "")) or _date_from_timestamp(row.get("created_at", ""))
+            if not row["fx_rate_date"]:
+                raise ValueError
+            if fx is None and currency != "USD" and fx_resolver is not None:
+                fx = Decimal(str(fx_resolver(currency, row["fx_rate_date"])))
+                row["fx_rate_used"] = str(fx)
+                row["fx_rate_provider"] = "exchangerate.host"
+            if fx is None or not row.get("fx_rate_provider"):
+                raise LookupError
+        if value is not None and value < 0:
+            raise ValueError
+        if fx is not None and fx <= 0:
+            raise ValueError
+    except (LookupError, FxRateError):
+        return "missing_fx_rate"
+    except (InvalidOperation, ValueError):
+        return "invalid_value_or_fx"
+    return None
+
+
 def import_csv(path: Path, repo: MarketRepository) -> dict[str, Any]:
+    """Read a CSV, validate its rows, and upsert accepted RFQ intake records."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     geo_units, products = repo.list_market_identity_keys()
@@ -91,6 +102,7 @@ def import_csv(path: Path, repo: MarketRepository) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Parse the input CSV path and run the RFQ import command."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv_path", type=Path)
     args = parser.parse_args()

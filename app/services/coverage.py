@@ -14,10 +14,12 @@ CONSUMER_ID = "mitre_coverage"
 
 
 def _now() -> str:
+    """Return the current UTC timestamp for consumer state updates."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _cursor(conn) -> int:
+    """Load or initialize the durable coverage consumer cursor."""
     row = conn.execute(
         "SELECT last_seq FROM change_consumer_state WHERE consumer_id=%s", (CONSUMER_ID,)
     ).fetchone()
@@ -31,6 +33,7 @@ def _cursor(conn) -> int:
 
 
 def _record(conn, ip: str, window: str, seq: int) -> None:
+    """Persist active rule firings from one IP observation snapshot."""
     # Read detection snapshots from the PG observations payload
     row = conn.execute(
         "SELECT payload FROM ip_observations_state WHERE ip=%s", (ip,)
@@ -59,6 +62,7 @@ def _record(conn, ip: str, window: str, seq: int) -> None:
 
 
 def process_once(limit: int = 500) -> dict:
+    """Process one bounded change-log page and advance its durable cursor."""
     with postgres_store.transaction() as conn:
         cursor = _cursor(conn)
         oldest_row = conn.execute("SELECT MIN(seq) AS seq FROM ip_change_log").fetchone()
@@ -88,6 +92,7 @@ def process_once(limit: int = 500) -> dict:
 
 
 def coverage_matrix(window: str = "24h") -> list[dict]:
+    """Report current rule implementation and recent firing coverage."""
     if window not in {"1h", "24h"}:
         raise ValueError("window must be 1h or 24h")
     cutoff = datetime.now(timezone.utc) - timedelta(hours=1 if window == "1h" else 24)
@@ -128,6 +133,7 @@ def coverage_matrix(window: str = "24h") -> list[dict]:
 
 
 async def run_coverage_consumer(stop_event: asyncio.Event | None = None) -> None:
+    """Poll the durable change log until the worker stop event is set."""
     stop_event = stop_event or asyncio.Event()
     while not stop_event.is_set():
         try:

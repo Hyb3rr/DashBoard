@@ -196,6 +196,19 @@ def test_ip_detail_ai_explain_is_manual_and_polls_validated_result():
     assert "Evidence ID · ${esc(id||'unknown')}" not in html
 
 
+def test_ip_detail_renders_abstention_as_neutral_terminal_state():
+    html = (Path(__file__).parents[1] / "app" / "web" / "templates" / "ip_detail.html").read_text(encoding="utf-8")
+    assert ".ai-explain-status.abstained" in html
+    assert "abstained:'Not eligible for local AI'" in html
+    assert "Local AI analysis was skipped because this case is outside the configured local reasoning budget." in html
+    assert "Detection and risk assessment remain available and unchanged." in html
+    assert "state==='abstained'?'Not eligible'" in html
+    assert "const canRequest=state==='idle'||state==='failed'" in html
+    assert "if(aiJobState.status==='pending'||aiJobState.status==='running')scheduleAiPoll();" in html
+    assert "state==='abstained'" not in html[html.index("function pollAiJob()"):html.index("function setupAiExplain()")]
+    assert ".ai-explain-status.abstained{color:var(--red)" not in html
+
+
 def test_rare_path_evidence_emphasizes_only_path_and_rarity():
     html = (Path(__file__).parents[1] / "app" / "web" / "templates" / "ip_detail.html").read_text(encoding="utf-8")
     assert 'class="rare-path-value"' in html

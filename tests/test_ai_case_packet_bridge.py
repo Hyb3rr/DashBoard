@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from app.ai.reasoning import ReasoningResult
 from app.routers import ai_explanations
 from app.services.case_packets import build_live_case_packet
 
@@ -46,7 +47,7 @@ def test_worker_prefers_persisted_packet(monkeypatch):
         def persist_failed(self, *args): raise AssertionError(args)
     class Provider:
         def explain(self, packet):
-            return type("R", (), {"status": "received", "error": None})()
+            return ReasoningResult("received", "fp")
     monkeypatch.setattr("app.services.ai_explain_worker.evaluate_case", lambda *args, **kwargs: {"grounded": True, "analysis": {"summary": "ok"}, "validation": {"grounded": True}, "unsupported_evidence_ids": []})
     worker = AiExplainWorker(Repo(), Provider(), lambda _: (_ for _ in ()).throw(AssertionError("loader used")))
     assert worker.run_once() is True

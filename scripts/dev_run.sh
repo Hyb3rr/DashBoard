@@ -145,24 +145,10 @@ fi
 # lifespan avoids migration lock work on the realtime request path.
 .venv/bin/python scripts/ops/init_storage.py
 
-# Refresh local SAPICS MMDBs before app start. Failed network/update keeps
-# last-known-good files and must not prevent local development startup.
-if [[ "${SAPICS_UPDATE_ON_STARTUP:-true}" == "true" ]]; then
-  SAPICS_DATA_DIR="${SAPICS_DATA_DIR:-$ROOT_DIR/data/ip_location}" \
-    .venv/bin/python -c 'from app.services.sapics_updater import refresh; print(refresh())' >>"$ROOT_DIR/data/sapics-updater.log" 2>&1 \
-    || echo "SAPICS update failed; keeping last-known-good data" >&2
-fi
-if [[ "${IP2REGION_UPDATE_ON_STARTUP:-true}" == "true" ]]; then
-  IP2REGION_DATA_DIR="${IP2REGION_DATA_DIR:-$ROOT_DIR/data/ip2region}" \
-    .venv/bin/python -c 'from app.services.ip2region_updater import refresh; print(refresh())' >>"$ROOT_DIR/data/ip2region-updater.log" 2>&1 \
-    || echo "ip2region update failed; keeping last-known-good data" >&2
-fi
-
 LLAMA_SERVER_PID=""
 AI_EXPLAIN_WORKER_PID=""
 AI_TRIGGER_PID=""
 UVICORN_PID=""
-DATA_SCHEDULER_PID=""
 
 start_local_ai() {
   if [[ "${AI_EXPLAIN_WORKER_ENABLED:-true}" != "true" ]]; then
@@ -213,22 +199,6 @@ start_local_ai() {
   LLAMA_SERVER_PID=""
 }
 
-start_data_scheduler() {
-  if [[ "${DATA_SCHEDULER_ENABLED:-false}" != "true" ]]; then
-    echo "Data refresh scheduler disabled by configuration"
-    return
-  fi
-  (
-    while true; do
-      "${ROOT_DIR}/.venv/bin/python" -m scripts.ops.data_scheduler \
-        >>"$ROOT_DIR/data/data-scheduler.log" 2>&1 || true
-      sleep "${DATA_SCHEDULER_INTERVAL_SECONDS:-3600}"
-    done
-  ) &
-  DATA_SCHEDULER_PID=$!
-  echo "Data refresh scheduler started (interval ${DATA_SCHEDULER_INTERVAL_SECONDS:-3600}s)"
-}
-
 cleanup() {
   if [[ -n "$CLICKHOUSE_PID" ]] && kill -0 "$CLICKHOUSE_PID" 2>/dev/null; then
     kill "$CLICKHOUSE_PID" 2>/dev/null || true
@@ -249,10 +219,6 @@ cleanup() {
     kill "$UVICORN_PID" 2>/dev/null || true
     wait "$UVICORN_PID" 2>/dev/null || true
   fi
-  if [[ -n "$DATA_SCHEDULER_PID" ]] && kill -0 "$DATA_SCHEDULER_PID" 2>/dev/null; then
-    kill "$DATA_SCHEDULER_PID" 2>/dev/null || true
-    wait "$DATA_SCHEDULER_PID" 2>/dev/null || true
-  fi
   if [[ "$CLICKHOUSE_LOCK_HELD" == "true" ]]; then
     rm -f "$CLICKHOUSE_LOCK_DIR/pid"
     rmdir "$CLICKHOUSE_LOCK_DIR" 2>/dev/null || true
@@ -263,5 +229,4 @@ trap cleanup EXIT INT TERM
 start_local_ai
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 &
 UVICORN_PID=$!
-start_data_scheduler
 wait "$UVICORN_PID"

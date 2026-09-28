@@ -25,35 +25,25 @@ def _region_nudge(region_profile: dict) -> tuple[int, str | None]:
     return min(severity, 5), evidence
 
 
-def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None) -> dict:
-    """Classify an IP with behavior-first, auditable rule groups.
-
-    A (behavior) is sourced from the normalized observation's behavior_score.
-    B (identity) is capped at 25. C is a trust bonus. D is a small
-    behavior-gated region nudge. Aggregated risk_score fields are deliberately
-    excluded to prevent double-counting.
-    """
-    observation = observation or {}
-    region_profile = region_profile or {}
-    evidence: list[str] = []
+def _behavior_signal(observation: dict) -> tuple[int, int, bool, list[str]]:
+    """Read the authoritative behavior score, traffic volume, and evidence."""
     recent_window = "recent_behavior_score" in observation
     behavior_score = max(0, min(int(
         observation.get("recent_behavior_score" if recent_window else "behavior_score") or 0
     ), 100))
     requests = int(observation.get("recent_requests", observation.get("requests")) or 0)
     hard_behavior = int(observation.get("recent_sensitive_probe_requests", observation.get("sensitive_probe_requests")) or 0) > 0
-
-    # Group A: logs.py is the single owner of behavior scoring.
-    group_a = behavior_score
     behavior_evidence = observation.get(
         "recent_behavior_evidence" if recent_window else "behavior_evidence"
     ) or []
-    if behavior_evidence:
-        evidence.extend(f"A — {item}" for item in behavior_evidence)
-    elif group_a:
-        evidence.append(f"A — behavior score {group_a}/100")
+    evidence = [f"A — {item}" for item in behavior_evidence]
+    if not evidence and behavior_score:
+        evidence.append(f"A — behavior score {behavior_score}/100")
+    return behavior_score, requests, hard_behavior, evidence
 
-    # Group B: network identity is a supporting signal only.
+
+def _identity_signal(profile: dict) -> tuple[int, int, list[str]]:
+    """Calculate capped supporting points and evidence for network identity."""
     identity_points = (
         (15 if profile.get("is_tor") else 0, "Tor exit signal"),
         (10 if profile.get("is_proxy") else 0, "Proxy signal"),
@@ -62,100 +52,145 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
     )
     raw_identity = sum(points for points, _ in identity_points)
     group_b = min(raw_identity, 25)
-    for points, label in identity_points:
-        if points:
-            evidence.append(f"B — {label} (+{points})")
+    evidence = [f"B — {label} (+{points})" for points, label in identity_points if points]
     if raw_identity > group_b:
         evidence.append("B — identity contribution capped at +25")
+    return group_b, raw_identity, evidence
 
-    # Group C: only a low-behavior, attributable network gets a trust bonus.
-    group_c = 0
-    org_confidence = int(profile.get("organization_confidence") or 0)
-    if profile.get("organization") and org_confidence >= 70 and not profile.get("is_hosting") and group_a < 25:
-        group_c = -20
-        evidence.append("C — stable attributed network with low behavior risk (-20)")
 
-    # Group D: region never creates risk for a behaviorally clean IP.
-    group_d = 0
-    if group_a > 0:
-        group_d, region_evidence = _region_nudge(region_profile)
-        if region_evidence:
-            evidence.append(f"D — {region_evidence}")
+def _trust_signal(profile: dict, behavior_score: int) -> tuple[int, int, list[str]]:
+    """Apply the low-behavior trusted-organization reduction when eligible."""
+    confidence = int(profile.get("organization_confidence") or 0)
+    eligible = (
+        profile.get("organization")
+        and confidence >= 70
+        and not profile.get("is_hosting")
+        and behavior_score < 25
+    )
+    evidence = ["C — stable attributed network with low behavior risk (-20)"] if eligible else []
+    return (-20 if eligible else 0), confidence, evidence
+
+
+def _region_signal(profile: dict, region_profile: dict, behavior_score: int) -> tuple[int, list[str]]:
+    """Apply conflict context only when behavior evidence already exists."""
+    points, evidence = _region_nudge(region_profile) if behavior_score > 0 else (0, None)
+    result = [f"D — {evidence}"] if evidence else []
     if profile.get("country_code") and region_profile.get("country_name"):
-        evidence.append(f"Region profile available for {region_profile['country_name']}")
+        result.append(f"Region profile available for {region_profile['country_name']}")
+    return points, result
 
-    group_e = 0
-    if ai_profile:
-        ai_score = int(ai_profile.get("ai_anomaly_score") or 0)
-        windows_seen = int(ai_profile.get("windows_seen") or 0)
-        if group_a < 25 and ai_score >= 70 and windows_seen >= 3:
-            group_e = 8
-            windows = ai_profile.get("anomalous_windows", 0)
-            evidence.append(f"E — AI flagged {windows} anomalous window(s) despite low rule-based score (+8)")
 
-    base_score = group_a + group_b + group_c + group_d
-    score = max(0, min(base_score + group_e, 100))
-    score_explanations = {
+def _ai_signal(ai_profile: dict | None, behavior_score: int) -> tuple[int, int, int, list[str]]:
+    """Apply the gated local anomaly bonus and return its observed inputs."""
+    if not ai_profile:
+        return 0, 0, 0, []
+    ai_score = int(ai_profile.get("ai_anomaly_score") or 0)
+    windows_seen = int(ai_profile.get("windows_seen") or 0)
+    if behavior_score < 25 and ai_score >= 70 and windows_seen >= 3:
+        windows = ai_profile.get("anomalous_windows", 0)
+        evidence = [f"E — AI flagged {windows} anomalous window(s) despite low rule-based score (+8)"]
+        return 8, ai_score, windows_seen, evidence
+    return 0, ai_score, windows_seen, []
+
+
+def _score_explanations(profile, ai_profile, behavior, identity, trust, region, ai, score, base_score):
+    """Explain every score group and any final score clamp in plain language."""
+    group_a, group_b, group_c, group_d, group_e = behavior, identity[0], trust[0], region[0], ai[0]
+    raw_identity, org_confidence = identity[1], trust[1]
+    ai_score, windows_seen = ai[1], ai[2]
+    explanations = {
         "A": (
             f"A = {group_a}: recent behavior score from request patterns, probes, bots and response errors."
-            if group_a else
-            "A = 0: no behavior points from the current observation window."
+            if group_a else "A = 0: no behavior points from the current observation window."
         ),
         "B": (
             f"B = {group_b}: raw identity contribution was {raw_identity}, capped at +25."
             if raw_identity > group_b else
             f"B = {group_b}: privacy or hosting identity signals contributed to the score."
-            if group_b else
-            "B = 0: no Tor, proxy, VPN or hosting signal was active."
+            if group_b else "B = 0: no Tor, proxy, VPN or hosting signal was active."
         ),
         "C": "",
         "D": "",
         "E": "",
     }
     if group_c == -20:
-        score_explanations["C"] = f"C = -20: {profile.get('organization')} has confidence {org_confidence}%, is not hosting, and behavior A={group_a} is below 25."
+        explanations["C"] = f"C = -20: {profile.get('organization')} has confidence {org_confidence}%, is not hosting, and behavior A={group_a} is below 25."
     elif not profile.get("organization"):
-        score_explanations["C"] = "C = 0: no attributed organization, so trusted-network reduction cannot activate."
+        explanations["C"] = "C = 0: no attributed organization, so trusted-network reduction cannot activate."
     elif org_confidence < 70:
-        score_explanations["C"] = f"C = 0: organization confidence is {org_confidence}%, below required 70%."
+        explanations["C"] = f"C = 0: organization confidence is {org_confidence}%, below required 70%."
     elif profile.get("is_hosting"):
-        score_explanations["C"] = "C = 0: hosting/datacenter identity is not eligible for trusted-network reduction."
+        explanations["C"] = "C = 0: hosting/datacenter identity is not eligible for trusted-network reduction."
     else:
-        score_explanations["C"] = f"C = 0: trusted-network reduction is disabled because behavior A={group_a} is 25 or higher. High behavior overrides organization trust."
+        explanations["C"] = f"C = 0: trusted-network reduction is disabled because behavior A={group_a} is 25 or higher. High behavior overrides organization trust."
 
     if group_a == 0:
-        score_explanations["D"] = "D = 0: region conflict nudge is behavior-gated and cannot create risk by itself."
+        explanations["D"] = "D = 0: region conflict nudge is behavior-gated and cannot create risk by itself."
     elif group_d:
-        score_explanations["D"] = f"D = +{group_d}: behavior exists and region conflict context activated the nudge."
+        explanations["D"] = f"D = +{group_d}: behavior exists and region conflict context activated the nudge."
     else:
-        score_explanations["D"] = "D = 0: no qualifying medium or high conflict indicator was active."
+        explanations["D"] = "D = 0: no qualifying medium or high conflict indicator was active."
 
     if not ai_profile:
-        score_explanations["E"] = "E = 0: no local AI score snapshot is available."
+        explanations["E"] = "E = 0: no local AI score snapshot is available."
     elif group_a >= 25:
-        score_explanations["E"] = f"E = 0: AI bonus requires A below 25; current behavior A={group_a}."
+        explanations["E"] = f"E = 0: AI bonus requires A below 25; current behavior A={group_a}."
     elif ai_score < 70:
-        score_explanations["E"] = f"E = 0: AI anomaly score is {ai_score}, below required 70."
+        explanations["E"] = f"E = 0: AI anomaly score is {ai_score}, below required 70."
     elif windows_seen < 3:
-        score_explanations["E"] = f"E = 0: only {windows_seen} AI window(s) observed; minimum is 3."
+        explanations["E"] = f"E = 0: only {windows_seen} AI window(s) observed; minimum is 3."
     else:
-        score_explanations["E"] = f"E = +8: AI anomaly score {ai_score} and {windows_seen} windows satisfied the gate."
+        explanations["E"] = f"E = +8: AI anomaly score {ai_score} and {windows_seen} windows satisfied the gate."
+    explanations["final"] = (
+        f"Final score clamped from {base_score + group_e} into 0–100."
+        if score != base_score + group_e
+        else "Final score is the sum of A+B+C+D+E with no clamp applied."
+    )
+    return explanations
 
-    if score != base_score + group_e:
-        score_explanations["final"] = f"Final score clamped from {base_score + group_e} into 0–100."
-    else:
-            score_explanations["final"] = "Final score is the sum of A+B+C+D+E with no clamp applied."
-    if requests < 3 and group_a == 0 and group_b == 0 and group_e == 0:
-        label = "unknown"
-    elif hard_behavior or base_score >= 60:
-        label = "critical"
-    elif score >= 30 or group_e > 0:
-        label = "medium"
-    elif score >= 10:
-        label = "low"
-    else:
-        label = "good"
 
+def _classification_label(requests, behavior, identity, ai_bonus, hard_behavior, base_score, score):
+    """Choose a verdict from the established evidence and score thresholds."""
+    if requests < 3 and behavior == 0 and identity == 0 and ai_bonus == 0:
+        return "unknown"
+    if hard_behavior or base_score >= 60:
+        return "critical"
+    if score >= 30 or ai_bonus > 0:
+        return "medium"
+    if score >= 10:
+        return "low"
+    return "good"
+
+
+def classify_ip(profile: dict, observation: dict | None = None, region_profile: dict | None = None, ai_profile: dict | None = None) -> dict:
+    """Classify an IP with behavior-first, auditable rule groups."""
+    observation, region_profile = observation or {}, region_profile or {}
+    behavior, requests, hard_behavior, evidence = _behavior_signal(observation)
+    identity, raw_identity, identity_evidence = _identity_signal(profile)
+    trust, org_confidence, trust_evidence = _trust_signal(profile, behavior)
+    region, region_evidence = _region_signal(profile, region_profile, behavior)
+    ai_bonus, ai_score, windows_seen, ai_evidence = _ai_signal(ai_profile, behavior)
+    evidence.extend(identity_evidence)
+    evidence.extend(trust_evidence)
+    evidence.extend(region_evidence)
+    evidence.extend(ai_evidence)
+
+    base_score = behavior + identity + trust + region
+    score = max(0, min(base_score + ai_bonus, 100))
+    label = _classification_label(
+        requests, behavior, identity, ai_bonus, hard_behavior, base_score, score
+    )
+    explanations = _score_explanations(
+        profile,
+        ai_profile,
+        behavior,
+        (identity, raw_identity),
+        (trust, org_confidence),
+        (region,),
+        (ai_bonus, ai_score, windows_seen),
+        score,
+        base_score,
+    )
     summaries = {
         "critical": "High likelihood of hostile behavior or unwanted network activity",
         "medium": "Needs review before being treated as benign",
@@ -171,8 +206,14 @@ def classify_ip(profile: dict, observation: dict | None = None, region_profile: 
         "confidence": confidence,
         "summary": summaries[label],
         "evidence": evidence,
-        "score_breakdown": {"behavior_a": group_a, "identity_b": group_b, "trust_c": group_c, "region_d": group_d, "ai_e": group_e},
-        "score_explanations": score_explanations,
+        "score_breakdown": {
+            "behavior_a": behavior,
+            "identity_b": identity,
+            "trust_c": trust,
+            "region_d": region,
+            "ai_e": ai_bonus,
+        },
+        "score_explanations": explanations,
         "data_health": health,
         "confidence_factors": confidence_factors,
     }

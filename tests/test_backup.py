@@ -325,6 +325,7 @@ def test_pg_dump_failure_never_commits(tmp_path):
     uploader = FakeUploader()
     with pytest.raises(RuntimeError, match="pg_dump failed with exit 2"):
         backup_postgres(settings(), "dsn", dump_executable(tmp_path, b"partial", 2), uploader=uploader)
+    assert not uploader.blocks
     assert not uploader.commits
 
 
@@ -377,6 +378,7 @@ def test_clickhouse_upload_or_remote_verify_failure_preserves_artifact(tmp_path)
                           artifact_factory=lambda: (directory, artifact),
                           verifier=lambda settings, key: (1, hashlib.sha256(b"native-clickhouse-backup").hexdigest()))
     assert directory.exists()
+    assert not uploader.manifests
 
 
 def test_clickhouse_sha_verification_failure_preserves_artifact(tmp_path):
@@ -390,6 +392,7 @@ def test_clickhouse_sha_verification_failure_preserves_artifact(tmp_path):
                           artifact_factory=lambda: (directory, artifact),
                           verifier=lambda settings, key: (len(b"native-clickhouse-backup"), "0" * 64))
     assert directory.exists()
+    assert not uploader.manifests
 
 
 def test_clickhouse_default_artifact_is_temporary(tmp_path, monkeypatch):

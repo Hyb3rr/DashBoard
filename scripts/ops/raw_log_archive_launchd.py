@@ -39,12 +39,14 @@ def _env_file(path: str | Path) -> dict[str, str]:
 
 
 def python_executable(root: Path = ROOT) -> str:
+    """Choose the repository virtualenv Python when available."""
     candidate = root / ".venv" / "bin" / "python"
     return str(candidate if candidate.is_file() else Path(sys.executable))
 
 
 def plist_data(root: Path = ROOT, env_file: str | Path = DEFAULT_ENV_FILE,
                plist_path: str | Path = DEFAULT_PLIST) -> dict:
+    """Build launchd configuration for the scheduled archive job."""
     log_dir = root / "data" / "logs"
     return {
         "Label": LABEL,
@@ -66,6 +68,7 @@ def plist_data(root: Path = ROOT, env_file: str | Path = DEFAULT_ENV_FILE,
 
 def install(plist_path: str | Path = DEFAULT_PLIST, root: Path = ROOT,
             env_file: str | Path = DEFAULT_ENV_FILE) -> Path:
+    """Install the launch agent and prepare its log directory."""
     if sys.platform != "darwin":
         raise RuntimeError("macOS launchd adapter requires macOS")
     target = Path(plist_path).expanduser()
@@ -76,12 +79,14 @@ def install(plist_path: str | Path = DEFAULT_PLIST, root: Path = ROOT,
 
 
 def uninstall(plist_path: str | Path = DEFAULT_PLIST) -> None:
+    """Remove the configured launch agent file."""
     if sys.platform != "darwin":
         raise RuntimeError("macOS launchd adapter requires macOS")
     Path(plist_path).expanduser().unlink(missing_ok=True)
 
 
 def run(env_file: str | Path = DEFAULT_ENV_FILE, root: Path = ROOT) -> int:
+    """Run the raw archive job with values from the trusted env file."""
     environment = os.environ.copy()
     environment.update(_env_file(env_file))
     environment["PYTHONPATH"] = str(root)
@@ -91,6 +96,7 @@ def run(env_file: str | Path = DEFAULT_ENV_FILE, root: Path = ROOT) -> int:
 
 
 def main() -> int:
+    """Parse launchd adapter actions and dispatch the selected operation."""
     parser = argparse.ArgumentParser(description="Install or run raw archive launchd adapter")
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--install", action="store_true")

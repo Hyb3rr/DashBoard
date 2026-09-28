@@ -10,6 +10,7 @@ CITY_SUMMARY_MODEL_VERSION = "lc2b-city-summary-v1"
 CITY_CALIBRATION_VERSION = "lc2b-city-cal-v1"
 
 def build_city_summaries(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate cell memberships into weighted per-city evidence summaries."""
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         key = (row["snapshot_id"],row["country_code"],row["city_id"],row["track"],row.get("model_version") or "unknown")
@@ -33,6 +34,7 @@ def build_city_summaries(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
     return result
 
 def calibrate_city_summaries(summaries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Calibrate city raw scores as tie-aware percentiles within each track."""
     summaries = list(summaries)
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summaries:
@@ -51,6 +53,7 @@ def calibrate_city_summaries(summaries: Iterable[dict[str, Any]]) -> list[dict[s
     return [calibrated_by_key.get((row["snapshot_id"],row["country_code"],row["city_id"],row["track"]), row) for row in summaries]
 
 def refresh_city_summaries(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Build and persist city summaries for the selected countries."""
     rows = repo.list_city_summary_inputs(countries)
     summaries = build_city_summaries(rows)
     calibrated = calibrate_city_summaries(summaries)

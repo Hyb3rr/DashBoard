@@ -11,6 +11,7 @@ from .ai_trigger_policy import build_trigger_identity, is_meaningful_trigger
 
 class AiTriggerConsumer:
     def __init__(self, repository: AiTriggerRepository, packet_loader: Callable[[str], dict[str, Any]], enabled: bool = False, batch_size: int = 50, max_pending_jobs: int = 1):
+        """Configure bounded change-feed consumption and case-packet loading."""
         self.repository = repository
         self.packet_loader = packet_loader
         self.enabled = bool(enabled)
@@ -18,6 +19,7 @@ class AiTriggerConsumer:
         self.max_pending_jobs = max(1, int(max_pending_jobs))
 
     def run_once(self) -> int:
+        """Consume semantic transitions and materialize eligible explanation jobs."""
         if not self.enabled:
             return 0
         cursor = self.repository.get_cursor()

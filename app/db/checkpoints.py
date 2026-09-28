@@ -13,6 +13,7 @@ class CheckpointRepository:
     """PostgreSQL source offset and collector lease state."""
 
     def load_offset(self, source_id: str, log_key: str) -> int:
+        """Load the persisted source offset, creating its initial row when absent."""
         with transaction() as conn:
             row = conn.execute("SELECT last_offset FROM log_sources WHERE source_id=%s", (source_id,)).fetchone()
             if not row:
@@ -21,6 +22,7 @@ class CheckpointRepository:
             return int(row["last_offset"] or 0)
 
     def status(self, source_id: str, log_key: str, state: str, error: str | None = None) -> None:
+        """Persist the collector's current status and most recent error."""
         with transaction() as conn:
             conn.execute("""INSERT INTO log_sources(source_id,log_key,status,last_error,updated_at)
                 VALUES (%s,%s,%s,%s,now()) ON CONFLICT(source_id) DO UPDATE SET log_key=EXCLUDED.log_key,status=EXCLUDED.status,last_error=EXCLUDED.last_error,updated_at=now()""", (source_id, log_key, state, error))
@@ -37,6 +39,7 @@ class CheckpointRepository:
         return dict(row) if row else None
 
     def acquire(self, source_id: str, log_key: str, owner: str, state: str) -> bool:
+        """Acquire the source lease when it is free, expired, or already owned."""
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=30)
         with transaction() as conn:
@@ -47,6 +50,7 @@ class CheckpointRepository:
         return bool(row and row["lease_owner"] == owner)
 
     def renew(self, source_id: str, owner: str) -> bool:
+        """Extend an unexpired lease held by this worker."""
         with transaction() as conn:
             updated = conn.execute(
                 """UPDATE log_sources SET lease_expires_at=%s,updated_at=%s
@@ -61,13 +65,7 @@ class CheckpointRepository:
         self, conn, source_id: str, log_key: str, offset: int, state: str,
         event_at: datetime | None, owner: str,
     ) -> None:
-        """Commit a monotonic checkpoint only while the lease is still owned.
-
-        The conditional update is the fencing point. A zero-row update means
-        that the source is missing, the lease changed/expired, or the offset
-        would move backwards; all of those cases must abort the surrounding
-        transaction so the caller cannot acknowledge the batch.
-        """
+        """Commit a monotonic offset only under the live lease, rejecting fencing violations."""
         updated = conn.execute(
             """UPDATE log_sources
                   SET log_key=%s, last_offset=%s, status=%s,
@@ -89,8 +87,7 @@ class CheckpointCommitRejected(RuntimeError):
     """Raised when a worker cannot safely advance a source checkpoint."""
 
     def __init__(self, source_id: str, offset: int) -> None:
+        """Store the rejected source and offset in the exception context."""
         super().__init__(f"checkpoint commit rejected for {source_id} at offset {offset}")
         self.source_id = source_id
         self.offset = offset
-
-

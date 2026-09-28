@@ -11,10 +11,12 @@ from app.ai.manual_review import aggregate_manual_scores
 
 
 def _canonical(value: object) -> str:
+    """Serialize review data deterministically for hashing."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def main() -> int:
+    """Validate manual scores and write a non-overwriting aggregate report."""
     parser = argparse.ArgumentParser(description="Aggregate manual AI reasoning scores")
     parser.add_argument("review_packet", type=Path)
     parser.add_argument("scores", type=Path, help="JSON object with a scores array, or a JSON score array")

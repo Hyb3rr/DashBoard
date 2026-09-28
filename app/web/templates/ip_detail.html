@@ -255,6 +255,7 @@
   .ai-explain-status{display:inline-flex;align-items:center;padding:3px 8px;border:1px solid var(--line);border-radius:4px;color:var(--secondary);font:700 10px monospace;letter-spacing:.06em;text-transform:uppercase}
   .ai-explain-status.completed{color:var(--green);border-color:#64d59a55;background:#64d59a12}
   .ai-explain-status.failed{color:var(--red);border-color:#ff766d55;background:#ff766d12}
+  .ai-explain-status.abstained{color:var(--secondary);border-color:var(--line);background:var(--deck)}
   .ai-explain-status.running,.ai-explain-status.pending{color:var(--yellow);border-color:#e8bd5b55;background:#e8bd5b12}
   .ai-explain-intro{margin:0;color:var(--tertiary);font-size:11px}
   .ai-explain-copy{display:grid;gap:14px;margin-top:14px}
@@ -369,7 +370,7 @@
   return `<section class="card score-explainer" data-investigation-section="detections"><div class="card-head"><div><h2>Detection breakdown</h2><small>Auditable rule groups behind the current score</small></div><span class="score-total">${num(c.score??0)} / 100<small>final threat score</small></span></div><div class="body"><div class="score-components">${cards}</div></div></section>`
   }
   let aiJobId=sessionStorage.getItem(`hub:ai-explain-job:${ip}`)||'',aiJobState=null,aiPollTimer=null,aiPollActive=false,aiEvidenceCatalog=new Map();
-  function aiStatusLabel(state){return ({pending:'Pending',running:'Running',completed:'Grounding validated',failed:'Failed'})[state]||'Not requested'}
+  function aiStatusLabel(state){return ({pending:'Pending',running:'Running',completed:'Grounding validated',failed:'Failed',abstained:'Not eligible for local AI'})[state]||'Not requested'}
   function aiEvidenceTitle(item){
     if(item?.path)return `Rare path · ${item.path}`;
     if(item?.type)return String(item.type).replaceAll('_',' ').replace(/\b\w/g,ch=>ch.toUpperCase());
@@ -392,9 +393,10 @@
     let content='';
     if(state==='pending'||state==='running')content+='<div class="state">Analysis in progress. This may take up to a few minutes on local CPU.</div>';
     if(state==='failed')content+=`<p class="ai-explain-error">${esc(aiJobState.failure_code||'AI analysis unavailable. No automatic retry was performed.')}</p>`;
+    if(state==='abstained')content+='<p class="ai-explain-intro">Local AI analysis was skipped because this case is outside the configured local reasoning budget. Detection and risk assessment remain available and unchanged.</p>';
     if(state==='completed'&&analysis){content=`<div class="ai-explain-copy"><div class="ai-explain-block"><h3>Summary</h3><p>${esc(analysis.summary)}</p></div><div class="ai-explain-block"><h3>Primary evidence</h3>${aiEvidence(analysis.primary_evidence)}</div><div class="ai-explain-block"><h3>Supporting evidence</h3>${aiEvidence(analysis.supporting_evidence)}</div><div class="ai-explain-block"><h3>Alternative explanation</h3><p>${esc(analysis.alternative_explanation)}</p></div><div class="ai-explain-block"><h3>Model-stated uncertainty · not a confidence score</h3><p>${esc(analysis.uncertainty)}</p></div><div class="ai-explain-block"><h3>Recommended investigation</h3>${analysis.recommended_investigation?.length?`<ul class="ai-investigation">${analysis.recommended_investigation.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>`:'<p>No recommendation returned.</p>'}</div></div><div class="ai-validation">AI-generated analysis · grounding validated</div>`}
     const canRequest=state==='idle'||state==='failed';
-    return `<section class="card ai-explain-card" data-investigation-section="overview"><div class="card-head"><div><h2>AI Case Analysis</h2></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':'Explain with AI'}</button></div></div></section>`;
+    return `<section class="card ai-explain-card" data-investigation-section="overview"><div class="card-head"><div><h2>AI Case Analysis</h2></div><span class="ai-explain-status ${cls}" id="ai-explain-status">${status}</span></div><div class="body"><div id="ai-explain-content">${content}</div><div class="triage-actions"><span class="note">${aiJobId?'Job '+esc(aiJobId):'Manual only'}</span><button type="button" class="button primary" id="ai-explain-button" ${canRequest?'':'disabled'}>${state==='failed'?'Explain again':state==='abstained'?'Not eligible':'Explain with AI'}</button></div></div></section>`;
   }
   function renderAiExplainInPlace(){
     const current=document.querySelector('.ai-explain-card');if(!current)return;

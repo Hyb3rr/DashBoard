@@ -14,10 +14,12 @@ RAW_MODEL_VERSION = "phase6a-raw-v1"
 
 
 def _bounded_signal(value: int | float, scale: float) -> float:
+    """Scale a nonnegative evidence count into a bounded signal."""
     return min(1.0, max(0.0, math.log1p(max(0.0, float(value))) / math.log1p(scale)))
 
 
 def build_local_rows(country: str, demand: float | None, inputs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build explainable raw opportunity rows from local evidence inputs."""
     rows = []
     for item in inputs:
         osm_count = int(item.get("osm_feature_count") or 0)
@@ -52,6 +54,7 @@ def build_local_rows(country: str, demand: float | None, inputs: Iterable[dict[s
 
 
 def refresh_local_opportunity(repo: MarketRepository, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Refresh local opportunity snapshots and persist per-country job status."""
     selected = [str(code).strip().upper() for code in (countries or os.getenv("OSM_COUNTRIES", ",".join(PRIORITY_COUNTRIES)).split(",")) if str(code).strip()]
     reports: dict[str, Any] = {}
     for country in selected:

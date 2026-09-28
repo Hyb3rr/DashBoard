@@ -19,6 +19,7 @@ def optional_bool(value: Any) -> bool | None:
 
 
 def _optional_bool(event: dict[str, Any], key: str) -> bool | None:
+    """Normalize one optional traffic validity flag from an event."""
     return optional_bool(event.get(key))
 
 

@@ -12,6 +12,7 @@ VALID_ROLES = {"all", "api", "collector", "worker", "ai"}
 
 
 def validate_environment(env: dict[str, str] | None = None) -> list[str]:
+    """Return fail-closed deployment errors for the supplied environment."""
     values = env if env is not None else os.environ
     errors: list[str] = []
 
@@ -54,6 +55,7 @@ def validate_environment(env: dict[str, str] | None = None) -> list[str]:
 
 
 def main() -> int:
+    """Load deployment settings and print production preflight results."""
     from dotenv import load_dotenv
 
     load_dotenv()

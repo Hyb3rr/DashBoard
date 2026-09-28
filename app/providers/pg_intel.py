@@ -12,6 +12,8 @@ import ipaddress
 import json
 import os
 import socket
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -24,39 +26,111 @@ from .global_geo import parse_rir_delegated, parse_geofeed
 
 
 def _now():
+    """Return the current timezone-aware UTC timestamp."""
     return datetime.now(timezone.utc)
 
 
 def _many(conn, sql, rows):
+    """Execute a parameterized batch through one PostgreSQL cursor."""
     with conn.cursor() as cur:
         cur.executemany(sql, rows)
 
 
 def _json(value):
+    """Wrap decoded or serialized JSON data in a PostgreSQL JSONB adapter."""
     return Jsonb(value if not isinstance(value, str) else json.loads(value))
 
 
-def _privacy(conn, source, kind, networks, *, provider=None, proxy_type=None, score=None, metadata=None, provider_filter=None):
+def _provider_privacy_changes(current, incoming, now, source, kind, provider_filter, refresh_id):
+    """Build provider-scoped history rows for changed membership state."""
+    history_rows = []
+    for network, new_state in incoming.items():
+        old = current.get(network)
+        if old is None:
+            change_type, old_state = "added", None
+        elif not old["active"]:
+            change_type, old_state = "reactivated", dict(old)
+        elif any(old[key] != new_state[key] for key in ("provider", "proxy_type", "score", "metadata")):
+            change_type, old_state = "changed", dict(old)
+        else:
+            continue
+        history_rows.append((now, source, kind, provider_filter, network, change_type,
+                             Jsonb(old_state) if old_state else None, Jsonb(new_state), refresh_id))
+    for network, old in current.items():
+        if old["active"] and network not in incoming:
+            history_rows.append((now, source, kind, provider_filter, network, "removed",
+                                 Jsonb(dict(old)), None, refresh_id))
+    return history_rows
+
+
+def _apply_provider_privacy_snapshot(conn, source, kind, networks, provider,
+                                     proxy_type, score, metadata, provider_filter):
+    """Apply one provider snapshot without affecting sibling providers."""
     now = _now()
-    if provider_filter is None:
-        conn.execute("UPDATE privacy_networks SET active=false WHERE source=%s AND kind=%s", (source, kind))
-    else:
-        conn.execute("UPDATE privacy_networks SET active=false WHERE source=%s AND kind=%s AND provider=%s", (source, kind, provider_filter))
+    current_rows = conn.execute(
+        """SELECT network::text,provider,proxy_type,score,metadata,active
+           FROM privacy_networks WHERE source=%s AND kind=%s AND provider=%s""",
+        (source, kind, provider_filter),
+    ).fetchall()
+    current = {
+        row[0]: {"network": row[0], "provider": row[1], "proxy_type": row[2],
+                 "score": row[3], "metadata": row[4], "active": row[5]}
+        for row in current_rows
+    }
+    incoming = {
+        str(ipaddress.ip_network(network, strict=False)): {
+            "provider": provider, "proxy_type": proxy_type, "score": score,
+            "metadata": metadata or {}, "active": True,
+        }
+        for network in networks
+    }
+    history_rows = _provider_privacy_changes(
+        current, incoming, now, source, kind, provider_filter, str(uuid.uuid4())
+    )
+    if history_rows:
+        _many(conn, """INSERT INTO privacy_provider_change_history
+          (changed_at,source,kind,provider,network,change_type,old_state,new_state,refresh_id)
+          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""", history_rows)
+    conn.execute("UPDATE privacy_networks SET active=false WHERE source=%s AND kind=%s AND provider=%s",
+                 (source, kind, provider_filter))
     values = [(n, kind, provider, proxy_type, score, source, now, now, now, Jsonb(metadata or {})) for n in networks]
     _many(conn, """INSERT INTO privacy_networks
       (network,kind,provider,proxy_type,score,source,first_seen,last_seen,checked_at,metadata,active)
       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
       ON CONFLICT(source,kind,network) DO UPDATE SET provider=excluded.provider,
        proxy_type=excluded.proxy_type,score=excluded.score,last_seen=excluded.last_seen,
-       checked_at=excluded.checked_at,metadata=excluded.metadata,active=true""", values)
-    if values:
-        _many(conn, """INSERT INTO privacy_network_history
-          (network,kind,provider,proxy_type,score,source,first_seen,last_seen,observed_at,metadata)
-          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-          [(n, kind, provider, proxy_type, score, source, now, now, now, Jsonb(metadata or {})) for n in networks])
+       checked_at=excluded.checked_at,metadata=excluded.metadata,active=true
+      WHERE privacy_networks.active IS DISTINCT FROM true OR
+         (privacy_networks.provider,privacy_networks.proxy_type,privacy_networks.score,privacy_networks.metadata)
+         IS DISTINCT FROM (excluded.provider,excluded.proxy_type,excluded.score,excluded.metadata)""", values)
+
+
+def _privacy(conn, source, kind, networks, *, provider=None, proxy_type=None, score=None, metadata=None, provider_filter=None):
+    """Persist one privacy snapshot using global or provider-scoped semantics."""
+    if provider_filter is not None:
+        return _apply_provider_privacy_snapshot(
+            conn, source, kind, networks, provider, proxy_type, score, metadata, provider_filter
+        )
+    from .snapshot_diff import SnapshotRejected, apply_privacy_snapshot
+    now = _now()
+    result = apply_privacy_snapshot(
+        conn,
+        source,
+        kind,
+        [
+            (network, kind, provider, proxy_type, score, source,
+             now, now, now, Jsonb(metadata or {}))
+            for network in networks
+        ],
+        history=True,
+    )
+    if result.get("status") != "updated":
+        raise SnapshotRejected(result)
+    return result
 
 
 def _threat(conn, source, category, networks):
+    """Replace current threat memberships for one source and category."""
     now = _now()
     conn.execute("UPDATE threat_indicators SET active=false WHERE source=%s AND category=%s", (source, category))
     _many(conn, """INSERT INTO threat_indicators
@@ -68,6 +142,7 @@ def _threat(conn, source, category, networks):
 
 
 def refresh_cidr(conn, source, url, kind, cache=None):
+    """Fetch, validate and persist one privacy CIDR feed."""
     cache = cache or Path(os.getenv(f"{source.upper()}_CACHE", f"data/{source}.txt"))
     result = conditional_fetch(url, cache)
     networks = parse_networks(result["payload"])
@@ -78,6 +153,7 @@ def refresh_cidr(conn, source, url, kind, cache=None):
 
 
 def refresh_firehol(conn, name, category=None, url=None, cache_dir=None):
+    """Refresh a FireHOL feed into threat and optional privacy snapshots."""
     category = category or DEFAULT_LISTS.get(name, "threat")
     url = url or list_url(name)
     if url == list_url(name) and not FIREHOL_SOURCES.get(name, {}).get("enabled", True):
@@ -88,13 +164,28 @@ def refresh_firehol(conn, name, category=None, url=None, cache_dir=None):
     if not networks:
         return {"status": "failed", "error": "empty or invalid payload", "records_upserted": 0, "url": url}
     source = f"firehol:{name}"
-    _threat(conn, source, category, networks)
+    from .snapshot_diff import SnapshotRejected, apply_privacy_snapshot, apply_threat_snapshot
+
+    threat_result = apply_threat_snapshot(conn, source, category, networks)
+    if threat_result.get("status") != "updated":
+        raise SnapshotRejected(threat_result)
+    privacy_result = None
     if name in {"firehol_proxies", "firehol_anonymous"}:
-        _privacy(conn, source, "proxy", networks, provider="FireHOL", proxy_type="datacenter", metadata={"role": "proxy"})
-    return {"status": result["status"], "url": url, "records_upserted": len(networks)}
+        now = _now()
+        privacy_rows = [
+            (network, "proxy", "FireHOL", "datacenter", None, source,
+             now, now, now, Jsonb({"role": "proxy"}))
+            for network in networks
+        ]
+        privacy_result = apply_privacy_snapshot(conn, source, "proxy", privacy_rows, history=True)
+        if privacy_result.get("status") != "updated":
+            raise SnapshotRejected(privacy_result)
+    return {"status": result["status"], "url": url, "records_upserted": len(networks),
+            "threat": threat_result, "privacy": privacy_result}
 
 
 def refresh_cloudflare(conn, url=None, cache=None):
+    """Fetch and persist Cloudflare IPv4/IPv6 datacenter ranges."""
     import json as _jsonlib
     url = url or os.getenv("CLOUDFLARE_IPS_URL", "https://api.cloudflare.com/client/v4/ips")
     cache = cache or Path(os.getenv("CLOUDFLARE_CACHE", "data/cloudflare_ips.json"))
@@ -109,25 +200,26 @@ def refresh_cloudflare(conn, url=None, cache=None):
 
 
 def refresh_rir(conn, rir, url, cache=None):
+    """Fetch and persist a delegated registry prefix snapshot."""
     cache = cache or Path(os.getenv(f"{rir.upper()}_DELEGATED_CACHE", f"data/geo/{rir.lower()}-delegated.txt"))
     result = conditional_fetch(url, cache)
     rows = parse_rir_delegated(result["payload"].decode("utf-8", "replace"), rir)
     if not rows:
         return {"status": "failed", "error": "empty or invalid RIR payload", "records_upserted": 0}
-    now = _now()
     source = f"rir:{rir.lower()}"
-    conn.execute("UPDATE geo_prefixes SET active=false WHERE source=%s", (source,))
-    _many(conn, """INSERT INTO geo_prefixes
-      (network,rir,registration_country,source,first_seen,last_seen,active,metadata)
-      VALUES(%s,%s,%s,%s,%s,%s,true,%s)
-      ON CONFLICT(network,source) DO UPDATE SET rir=excluded.rir,
-       registration_country=excluded.registration_country,last_seen=excluded.last_seen,
-       active=true,metadata=excluded.metadata""",
-      [(r["network"], rir, r["country_code"], source, now, now, Jsonb({})) for r in rows])
-    return {"status": result["status"], "records_upserted": len(rows), "source": source}
+    from .snapshot_diff import SnapshotRejected, apply_geo_snapshot
+    snapshot = apply_geo_snapshot(conn, source, [
+        {"network": r["network"], "rir": rir, "country_code": r["country_code"], "metadata": {}}
+        for r in rows
+    ])
+    if snapshot.get("status") != "updated":
+        raise SnapshotRejected(snapshot)
+    return {"status": result["status"], "records_upserted": len(rows),
+            "source": source, "snapshot": snapshot}
 
 
 def refresh_geofeed(conn, name, url, cache=None):
+    """Fetch and persist geofeed prefixes and location observations."""
     cache = cache or Path(os.getenv(f"GEOFEED_{name.upper()}_CACHE", f"data/geo/geofeed-{name}.csv"))
     result = conditional_fetch(url, cache)
     rows = parse_geofeed(result["payload"].decode("utf-8", "replace"))
@@ -152,6 +244,7 @@ def refresh_geofeed(conn, name, url, cache=None):
 
 
 def _addresses(value, resolve=True):
+    """Normalize an IP literal or optionally resolve a hostname to addresses."""
     try:
         return [str(ipaddress.ip_address(value))]
     except ValueError:
@@ -164,6 +257,7 @@ def _addresses(value, resolve=True):
 
 
 def _values(item, key):
+    """Read string values from a nested manifest field or field path."""
     value = item
     for part in key if isinstance(key, list) else [key]:
         if not isinstance(value, dict):
@@ -175,6 +269,7 @@ def _values(item, key):
 
 
 def refresh_az0(conn, url=None, timeout=30):
+    """Refresh provider-scoped VPN address snapshots from the AZ0 manifest."""
     url = url or os.getenv("AZ0_VPN_MANIFEST_URL", "https://raw.githubusercontent.com/az0/vpn_ip/main/data/get_addresses_via_api.json")
     with urlopen(Request(url, headers={"User-Agent": "ip-intelligence/1.0"}), timeout=timeout) as response:
         manifest = json.loads(response.read().decode("utf-8"))
@@ -214,28 +309,8 @@ def refresh_az0(conn, url=None, timeout=30):
     return {"status": overall, "url": url, "records_upserted": total, "providers": statuses}
 
 
-def refresh_device_browser(conn, url=None, api_key=None, cache=None):
-    from .device_browser_info import _csv_payload
-    from .common import atomic_write
-    from urllib.parse import urlparse
-    url = url or os.getenv("DEVICEBROWSERINFO_CSV_URL", "").strip()
-    api_key = api_key if api_key is not None else os.getenv("DEVICEBROWSERINFO_API_KEY", "")
-    if not url:
-        return {"status": "not_configured", "records_upserted": 0}
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    custom = os.getenv("DEVICEBROWSERINFO_AUTH_HEADER", "").strip()
-    if custom and api_key:
-        headers[custom] = api_key
-        headers.pop("Authorization", None)
-    local_path = Path(url) if not urlparse(url).scheme else None
-    if local_path and local_path.is_file():
-        payload = local_path.read_bytes()
-    else:
-        with urlopen(Request(url, headers=headers), timeout=60) as response:
-            payload = response.read()
-    payload = _csv_payload(payload, url)
-    cache = cache or Path(os.getenv("DEVICEBROWSERINFO_CACHE", "data/device_browser_info.csv"))
-    now = _now()
+def _device_browser_records(payload, now):
+    """Normalize DeviceBrowser CSV rows into privacy snapshot records."""
     records = {}
     for row in csv.DictReader(io.StringIO(payload.decode("utf-8-sig", "replace"))):
         network = (row.get("ip") or row.get("network") or row.get("ipAddress") or "").strip()
@@ -257,13 +332,48 @@ def refresh_device_browser(conn, url=None, api_key=None, cache=None):
             score = 0.0
         metadata = {k: row.get(k) for k in ("asn", "organization", "country_code", "countryCode", "city", "latitude", "longitude", "isProxy", "isDataCenter") if row.get(k)}
         records[network] = (network, "proxy", None, proxy_type, score, "device_browser", now, now, now, Jsonb(metadata))
+    return records
+
+
+def refresh_device_browser(conn, url=None, api_key=None, cache=None):
+    """Fetch, normalize, and diff a DeviceBrowser proxy-network snapshot."""
+    from .device_browser_info import _csv_payload
+    from .common import atomic_write
+    from urllib.parse import urlparse
+    url = url or os.getenv("DEVICEBROWSERINFO_CSV_URL", "").strip()
+    api_key = api_key if api_key is not None else os.getenv("DEVICEBROWSERINFO_API_KEY", "")
+    if not url:
+        return {"status": "not_configured", "records_upserted": 0}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    custom = os.getenv("DEVICEBROWSERINFO_AUTH_HEADER", "").strip()
+    if custom and api_key:
+        headers[custom] = api_key
+        headers.pop("Authorization", None)
+    local_path = Path(url) if not urlparse(url).scheme else None
+    if local_path and local_path.is_file():
+        payload = local_path.read_bytes()
+    else:
+        with urlopen(Request(url, headers=headers), timeout=60) as response:
+            payload = response.read()
+    payload = _csv_payload(payload, url)
+    cache = cache or Path(os.getenv("DEVICEBROWSERINFO_CACHE", "data/device_browser_info.csv"))
+    now = _now()
+    parse_started = time.monotonic()
+    records = _device_browser_records(payload, now)
+    parse_ms = round((time.monotonic() - parse_started) * 1000, 2)
     if not records:
         return {"status": "failed", "error": "CSV contains no valid IP records", "records_upserted": 0}
-    atomic_write(cache, payload)
-    _privacy(conn, "device_browser", "proxy", list(records), provider="DeviceBrowser", metadata={"source": "device_browser"})
-    conn.execute("DELETE FROM privacy_networks WHERE source='device_browser' AND kind='proxy' AND active=false")
-    _many(conn, """UPDATE privacy_networks SET provider=%s,proxy_type=%s,score=%s,
-      first_seen=%s,last_seen=%s,checked_at=%s,metadata=%s,active=true
-      WHERE source=%s AND kind=%s AND network=%s""",
-      [("DeviceBrowser", row[3], row[4], row[6], row[7], row[8], row[9], row[5], row[1], row[0]) for row in records.values()])
-    return {"status": "updated", "records_upserted": len(records), "cache": str(cache)}
+    from .snapshot_diff import apply_privacy_snapshot
+    result = apply_privacy_snapshot(
+        conn,
+        "device_browser",
+        "proxy",
+        records.values(),
+        history=True,
+    )
+    if result.get("status") == "updated":
+        atomic_write(cache, payload)
+    result["parse_ms"] = parse_ms
+    result["total_ms"] = round(result.get("total_ms", 0) + result["parse_ms"], 2)
+    result["cache"] = str(cache)
+    return result

@@ -12,6 +12,7 @@ STUDY_VERSION = "phase6b-study-v2"
 
 
 def _percentile(values: list[float], ratio: float) -> float | None:
+    """Return a linearly interpolated percentile for sorted numeric values."""
     if not values:
         return None
     ordered = sorted(values)
@@ -23,6 +24,7 @@ def _percentile(values: list[float], ratio: float) -> float | None:
 
 
 def summarize(values: Iterable[float]) -> dict[str, Any]:
+    """Calculate distribution, skew, and outlier statistics for values."""
     ordered = sorted(float(value) for value in values)
     if not ordered:
         return {"count": 0, "median": None, "iqr": None, "p5": None, "p25": None,
@@ -48,6 +50,7 @@ def summarize(values: Iterable[float]) -> dict[str, Any]:
 
 
 def candidate_calibrations(values: Iterable[float]) -> dict[str, list[float]]:
+    """Calculate candidate percentile and robust-score mappings."""
     ordered = sorted(float(value) for value in values)
     if not ordered:
         return {"percentile": [], "robust_quantile": [], "robust_z": []}
@@ -61,6 +64,7 @@ def candidate_calibrations(values: Iterable[float]) -> dict[str, list[float]]:
 
 
 def run_study(repo: Any, countries: Iterable[str] | None = None) -> dict[str, Any]:
+    """Summarize local scores by track and area type without changing data."""
     selected = {str(code).upper() for code in countries} if countries else None
     groups: dict[tuple[str, str], list[float]] = defaultdict(list)
     for row in repo.list_raw_local_scores():
@@ -78,6 +82,7 @@ def run_study(repo: Any, countries: Iterable[str] | None = None) -> dict[str, An
 
 
 def main() -> int:
+    """Load the market repository and print the calibration study report."""
     from ..db import postgres
     from ..db.market_repository import MarketRepository
     try:

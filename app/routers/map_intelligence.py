@@ -9,6 +9,7 @@ router = APIRouter()
 
 
 def _parse_time(value: str | None) -> datetime | None:
+    """Parse an optional map window timestamp and normalize it to UTC."""
     if not value:
         return None
     try:
@@ -20,6 +21,7 @@ def _parse_time(value: str | None) -> datetime | None:
 
 @router.get("/api/map/world")
 def map_world(range: str = "24h", start: str | None = Query(None), end: str | None = Query(None)):
+    """Return global map intelligence for a preset or custom time window."""
     if (start or end) and not (start and end):
         raise HTTPException(400, "custom map window requires both start and end")
     if not start and not end and range not in RANGE_HOURS:
@@ -32,6 +34,7 @@ def map_world(range: str = "24h", start: str | None = Query(None), end: str | No
 
 @router.get("/api/map/country/{country_code}")
 def map_country(country_code: str, range: str = "24h", start: str | None = Query(None), end: str | None = Query(None)):
+    """Return country-level map intelligence for a preset or custom window."""
     if (start or end) and not (start and end):
         raise HTTPException(400, "custom map window requires both start and end")
     if not start and not end and range not in RANGE_HOURS:

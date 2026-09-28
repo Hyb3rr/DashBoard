@@ -21,6 +21,7 @@ YEARS = tuple(range(2016, 2026))
 
 
 def _fetch(indicator: str, timeout: float = 30.0) -> list[dict]:
+    """Fetch one World Bank indicator response."""
     request = Request(WB_API.format(indicator=indicator), headers={"User-Agent": "SentinelHub-WDI/1.0"})
     with urlopen(request, timeout=timeout) as response:
         payload = response.read()
@@ -31,6 +32,7 @@ def _fetch(indicator: str, timeout: float = 30.0) -> list[dict]:
 
 
 def _validate(raw: dict[str, list[dict]], min_country_count: int = 50) -> list[str]:
+    """Validate indicator coverage and return countries with usable values."""
     required = set(WB_CODES.values())
     if set(raw) != required or any(not records for records in raw.values()):
         raise ValueError("required indicator response missing or empty")
@@ -51,6 +53,7 @@ def _validate(raw: dict[str, list[dict]], min_country_count: int = 50) -> list[s
 
 
 def _csv_bytes(raw: dict[str, list[dict]], countries: list[str]) -> bytes:
+    """Project indicator responses into the local WDI CSV format."""
     names = {value: key for key, value in WB_CODES.items()}
     rows = {}
     for code, records in raw.items():
@@ -74,6 +77,7 @@ def _csv_bytes(raw: dict[str, list[dict]], countries: list[str]) -> bytes:
 
 
 def _atomic(path: Path, content: bytes) -> None:
+    """Replace one file atomically after flushing its temporary contents."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
@@ -89,25 +93,35 @@ def _atomic(path: Path, content: bytes) -> None:
             pass
 
 
+def _fetch_indicators(timeout: float) -> dict[str, list[dict]]:
+    """Fetch every configured indicator before validating or publishing data."""
+    return {code: _fetch(code, timeout) for code in WB_CODES.values()}
+
+
+def _publish_snapshot(data_path: Path, content: bytes, raw: dict[str, list[dict]],
+                      country_count: int) -> dict:
+    """Preserve the last-good CSV and atomically publish changed source files."""
+    if data_path.exists() and data_path.read_bytes() == content:
+        return {"status": "not_modified", "changed": False, "countries": country_count}
+    if data_path.exists():
+        _atomic(data_path.with_name("Data.last-good.csv"), data_path.read_bytes())
+    _atomic(data_path, content)
+    _atomic(data_path.with_name("Data.raw.json"), json.dumps(raw, ensure_ascii=False).encode("utf-8"))
+    return {"status": "updated", "changed": True, "countries": country_count, "indicators": len(raw)}
+
+
 def update_world_bank(data_path: str | Path = WB_DATA, timeout: float = 30.0,
                       min_country_count: int = 50, refresh_market: bool = True) -> dict:
+    """Fetch, validate, and publish WDI data while returning failures as status."""
     data_path = Path(data_path)
-    raw = {}
     try:
-        for code in WB_CODES.values():
-            raw[code] = _fetch(code, timeout)
+        raw = _fetch_indicators(timeout)
         countries = _validate(raw, min_country_count)
         content = _csv_bytes(raw, countries)
         if not content.strip():
             raise ValueError("empty World Bank CSV")
-        if data_path.exists() and data_path.read_bytes() == content:
-            return {"status": "not_modified", "changed": False, "countries": len(countries)}
-        if data_path.exists():
-            _atomic(data_path.with_name("Data.last-good.csv"), data_path.read_bytes())
-        _atomic(data_path, content)
-        _atomic(data_path.with_name("Data.raw.json"), json.dumps(raw, ensure_ascii=False).encode("utf-8"))
-        result = {"status": "updated", "changed": True, "countries": len(countries), "indicators": len(raw)}
-        if refresh_market:
+        result = _publish_snapshot(data_path, content, raw, len(countries))
+        if result["changed"] and refresh_market:
             from .market_refresh import refresh
             result["market_refresh"] = refresh()
         return result
@@ -116,6 +130,7 @@ def update_world_bank(data_path: str | Path = WB_DATA, timeout: float = 30.0,
 
 
 def main() -> int:
+    """Parse update options and return a process status for the refresh result."""
     parser = argparse.ArgumentParser(description="Refresh local World Bank WDI data")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
