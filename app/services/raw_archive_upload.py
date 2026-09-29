@@ -11,6 +11,7 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -32,6 +33,14 @@ class RawArchiveUploader(Protocol):
 
     def put_bytes(self, key: str, data: bytes, content_type: str = "application/json") -> None:
         """Upload a complete byte payload with its declared content type."""
+        ...
+
+    def get_bytes(self, key: str) -> bytes | None:
+        """Read a small object, returning None only when it does not exist."""
+        ...
+
+    def exists(self, key: str) -> bool:
+        """Check whether an object exists, propagating all non-not-found errors."""
         ...
 
     def close(self) -> None:
@@ -65,37 +74,64 @@ def create_azure_uploader(settings: BackupSettings) -> tuple[Any, Any]:
 
 def upload_sealed(path: Path, spool_dir: Path, source_id: str,
                   settings: BackupSettings, uploader: RawArchiveUploader, verifier) -> dict:
-    """Upload a verified sealed chunk and write its remote manifest."""
+    """Upload or recover a verified sealed chunk and its remote manifest."""
     object_key = f"{settings.prefix}/raw-logs/{path.relative_to(spool_dir).as_posix()}"
     archive_source = path.relative_to(spool_dir).parts[0]
     digest = hashlib.sha256()
     size = 0
-    block_ids = []
-    buffer = bytearray()
+    manifest_key = f"{settings.prefix}/raw-logs/manifests/{archive_source}/{path.stem}.json"
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
             size += len(chunk)
-            buffer.extend(chunk)
-            while len(buffer) >= settings.part_size:
-                current_block_id = block_id(len(block_ids) + 1)
-                uploader.put_block(object_key, current_block_id, bytes(buffer[:settings.part_size]))
-                del buffer[:settings.part_size]
-                block_ids.append(current_block_id)
-    if buffer or not block_ids:
-        if not buffer:
-            raise RawArchiveUploadError("sealed raw archive chunk is empty")
-        current_block_id = block_id(len(block_ids) + 1)
-        uploader.put_block(object_key, current_block_id, bytes(buffer))
-        block_ids.append(current_block_id)
-    uploader.put_block_list(object_key, block_ids)
-    remote_size, remote_digest = verifier(settings, object_key)
-    if (remote_size, remote_digest) != (size, digest.hexdigest()):
-        raise RawArchiveUploadError("remote raw archive verification mismatch")
-    manifest_key = f"{settings.prefix}/raw-logs/manifests/{archive_source}/{path.stem}.json"
+    if not size:
+        raise RawArchiveUploadError("sealed raw archive chunk is empty")
+    digest_hex = digest.hexdigest()
+    existing_manifest = uploader.get_bytes(manifest_key)
+    if existing_manifest is not None:
+        try:
+            previous = json.loads(existing_manifest)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RawArchiveUploadError("existing Azure raw archive manifest is invalid") from exc
+        identity = (previous.get("source"), previous.get("chunk_id"),
+                    previous.get("bytes"), previous.get("sha256"),
+                    previous.get("object_key"), previous.get("status"))
+        expected = (archive_source, path.stem, size, digest_hex, object_key, "completed")
+        if identity != expected:
+            raise RawArchiveUploadError("existing Azure raw archive manifest conflicts with sealed chunk")
+        remote_size, remote_digest = verifier(settings, object_key)
+        if (remote_size, remote_digest) != (size, digest_hex):
+            raise RawArchiveUploadError("existing Azure raw archive object no longer matches its manifest")
+        return previous
+
+    # A crash may occur after blob commit but before its manifest is written.
+    # Verify an existing deterministic object before deciding to upload again.
+    if uploader.exists(object_key):
+        remote_size, remote_digest = verifier(settings, object_key)
+        if (remote_size, remote_digest) != (size, digest_hex):
+            raise RawArchiveUploadError("existing Azure raw archive object conflicts with sealed chunk")
+    else:
+        block_ids = []
+        buffer = bytearray()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                buffer.extend(chunk)
+                while len(buffer) >= settings.part_size:
+                    current_block_id = block_id(len(block_ids) + 1)
+                    uploader.put_block(object_key, current_block_id, bytes(buffer[:settings.part_size]))
+                    del buffer[:settings.part_size]
+                    block_ids.append(current_block_id)
+        if buffer or not block_ids:
+            current_block_id = block_id(len(block_ids) + 1)
+            uploader.put_block(object_key, current_block_id, bytes(buffer))
+            block_ids.append(current_block_id)
+        uploader.put_block_list(object_key, block_ids)
+        remote_size, remote_digest = verifier(settings, object_key)
+        if (remote_size, remote_digest) != (size, digest_hex):
+            raise RawArchiveUploadError("remote raw archive verification mismatch")
     manifest = {
         "schema_version": 1, "source": archive_source, "chunk_id": path.stem,
-        "object_key": object_key, "bytes": size, "sha256": digest.hexdigest(),
+        "object_key": object_key, "bytes": size, "sha256": digest_hex,
         "remote_bytes": remote_size, "remote_sha256": remote_digest,
         "verified_at": datetime.now(timezone.utc).isoformat(), "status": "completed",
     }
@@ -104,6 +140,12 @@ def upload_sealed(path: Path, spool_dir: Path, source_id: str,
 
 
 def remove_uploaded_artifacts(path: Path) -> None:
-    """Remove local artifacts only after successful remote upload."""
+    """Remove spool artifacts only after all archive destinations verify."""
     path.unlink()
     path.with_name(path.name + ".json").unlink(missing_ok=True)
+    path.with_name(path.name + ".state.json").unlink(missing_ok=True)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

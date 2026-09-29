@@ -161,10 +161,18 @@ và privacy refresh có worker/state riêng trong `background.py`.
 
 **Raw log archive (song song với fast path):**
 
-- Ghi raw access-log ra `data/raw-log-spool/<source>/<UTC date>/<hour>.log`, không chặn đường xử lý chính (`handle_message()`).
+- Mỗi raw batch được ghi vào spool và `fsync` hoàn tất trước khi downstream xử lý hoặc checkpoint được xác nhận. Nếu archive từ chối nhận hoặc ghi thất bại, batch không nhận durability acknowledgement bình thường; source offset không được xác nhận tiến lên.
 - File xoay theo giờ UTC hoặc khi đạt 128 MiB; chunk đã "seal" có sidecar JSON (nguồn, chunk ID, line/byte count) và không bao giờ bị ghi thêm.
-- Queue nhận có giới hạn (10.000 dòng / 64 MiB); ≥70% báo `PRESSURE`, đầy thì từ chối cả batch (không mất log âm thầm) — client reconnect và replay từ checkpoint.
-- Chunk đã seal được nén Zstandard (verify lossless) rồi upload lên Azure Blob (staged block upload + verify SHA-256 từ xa); file local chỉ xoá sau khi có manifest hoàn chỉnh.
+- Queue nhận có giới hạn (10.000 dòng / 64 MiB); ≥70% báo `PRESSURE`, đầy hoặc disk guard từ chối thì không mất log âm thầm — client reconnect và replay từ checkpoint.
+- Lifecycle: `raw batch → durable spool write + fsync → sealed chunk → verified zstd compression → independent destination state`.
+- Hai destination có durable sidecar state độc lập: **LOCAL** `pending / failed / verified`; **AZURE** `pending / failed / verified`. Thành công ở một destination không khiến destination đó bị copy/upload lại khi destination kia retry thất bại.
+- **Local copy:** chunk được ghi vào file tạm `.tmp`, `fsync`, xác minh size/SHA-256 rồi atomic rename. File đích đã tồn tại cũng được xác minh size/checksum trước khi chấp nhận.
+- **Azure:** chunk được upload bằng staged blocks và xác minh SHA-256 từ xa. Nếu object đã commit nhưng manifest chưa được ghi trước khi process dừng, retry sẽ tìm deterministic object, xác minh bytes + SHA-256, rồi ghi manifest mà không upload object lần nữa. Object hoặc manifest hiện hữu nhưng không khớp chunk sẽ gây lỗi rõ ràng; hệ thống không âm thầm ghi đè.
+- Khi Azure outage hoặc chưa cấu hình Azure/SDK, local copy vẫn có thể được verify nhưng Azure ở `pending/failed`; spool được giữ lại. Vì vậy spool và local copy có thể cùng chiếm disk cho đến khi Azure hoạt động. Disk guard có thể chặn ingestion mới nếu tình trạng kéo dài; đây là hành vi bảo toàn dữ liệu có chủ ý.
+- Cleanup spool chỉ chạy khi local đã `verified` hoặc được cấu hình `disabled`, **và** Azure đã `verified`. Khi local backup bật, final manifest chứa proof của cả hai destination phải được ghi bền vững cạnh file local `.zst` trước khi dọn spool.
+- Local retention mặc định là **7 ngày**. Chỉ xóa local `.zst` hết hạn khi final manifest ghi local và Azure đều `verified`, đồng thời file vẫn khớp bytes/SHA-256 đã ghi nhận. Retention local không thay thế độ bền của Azure.
+- Disk guard giữ mặc định **2 GiB** dung lượng trống dự trữ và cập nhật phép đo theo chu kỳ **10 giây**. Với bản local copy mới, yêu cầu dung lượng là `reserve + compressed chunk size`; nếu bản đã tồn tại và được xác minh, không dự trữ kích thước chunk lần nữa. Khi không đủ reserve, raw admission bị chặn, không có durability receipt thành công và checkpoint bình thường không tiến lên. Archive writer health làm `/health` chuyển degraded; trạng thái tự hồi phục sau khi dung lượng trống trở lại. Không tự xóa dữ liệu để giải phóng disk và local backups còn trong retention được bảo vệ.
+- Thư mục local backup có thể đặt trên filesystem khác. Nếu ở cùng physical disk với spool thì bản copy chỉ giúp khôi phục khỏi lỗi phần mềm/operator hoặc khi cần lấy lại archive gần đây; nó **không** bảo vệ trước hỏng ổ đĩa. Azure là bản off-machine.
 - Job dọn dẹp cross-platform (`raw_log_archive_job`, kèm adapter launchd/Task Scheduler) drain artifact còn sót sau restart/outage.
 - Lệnh replay độc lập (`replay_raw_archive`) để verify tính toàn vẹn chunk — chưa chứng minh byte-identity với `access.log` gốc trên Nginx.
 

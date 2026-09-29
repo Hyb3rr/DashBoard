@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 
 from app.config.backup import BackupSettings
@@ -53,8 +54,14 @@ def test_job_propagates_maintenance_failure_and_releases_lock(tmp_path):
 def test_maintenance_upload_failure_is_one_shot_and_preserves_artifact(tmp_path, monkeypatch):
     compressed = tmp_path / "source" / "2026" / "09" / "03" / "20260903T130000Z-000001.log.zst"
     compressed.parent.mkdir(parents=True)
-    compressed.write_bytes(b"compressed")
-    compressed.with_name(compressed.name + ".json").write_text("{}\n")
+    payload = b"compressed"
+    compressed.write_bytes(payload)
+    compressed.with_name(compressed.name + ".json").write_text(json.dumps({
+        "status": "VERIFIED", "source": "source",
+        "chunk_id": "20260903T130000Z-000001",
+        "compressed_bytes": len(payload),
+        "compressed_sha256": hashlib.sha256(payload).hexdigest(),
+    }) + "\n")
     attempts = []
 
     class Uploader:

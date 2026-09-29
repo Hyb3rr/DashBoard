@@ -66,6 +66,25 @@ class AzureBlobUploader:
 
         self._blob(key).upload_blob(data, blob_type="BlockBlob", overwrite=False, content_settings=ContentSettings(content_type=content_type))
 
+    def get_bytes(self, key: str) -> bytes | None:
+        """Read a small blob, returning None only when Azure reports it missing."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            return self._blob(key).download_blob().readall()
+        except ResourceNotFoundError:
+            return None
+
+    def exists(self, key: str) -> bool:
+        """Check blob existence without hiding authentication or transport errors."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            self._blob(key).get_blob_properties()
+            return True
+        except ResourceNotFoundError:
+            return False
+
     def close(self) -> None:
         """Release SDK transport resources; safe to call more than once."""
         if not self._closed:
