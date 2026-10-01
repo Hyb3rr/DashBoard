@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from ..core.regions import market_score
@@ -14,7 +16,31 @@ from ..core.vietnam_geography import PROVINCES
 
 RANGE_HOURS = {"30m": 0.5, "1h": 1, "6h": 6, "12h": 12, "24h": 24, "3d": 24 * 3, "7d": 24 * 7, "30d": 24 * 30}
 
-# Explicit backend crosswalk: unknown GeoIP localities remain unmapped.
+def _vn_city_key(value: Any) -> str:
+    """Normalize locality names and common administrative prefixes/suffixes."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold().replace("đ", "d")
+    words = "".join(char if char.isalnum() else " " for char in text if not unicodedata.combining(char)).split()
+    if words[:3] == ["ho", "chi", "minh"] and words[-1:] in (["hcm"], ["hcmc"]):
+        words = words[:-1]
+    prefixes = (("thanh", "pho"), ("tp",), ("tinh",), ("city", "of"), ("province", "of"))
+    suffixes = {"city", "province", "municipality", "capital"}
+    changed = True
+    while words and changed:
+        changed = False
+        for prefix in prefixes:
+            if tuple(words[:len(prefix)]) == prefix:
+                words = words[len(prefix):]
+                changed = True
+                break
+        if words and words[-1] in suffixes:
+            words = words[:-1]
+            changed = True
+    return " ".join(words)
+
+
+# Start with locality aliases that identify a province, then add every former
+# and current province name from the versioned 63-to-34 administrative crosswalk.
 _VN_CITY_TO_GEO_UNIT = {
     "ha noi": "01", "hanoi": "01", "cao bang": "04", "tuyen quang": "08",
     "dien bien": "11", "lai chau": "12", "son la": "14", "lao cai": "15",
@@ -27,18 +53,16 @@ _VN_CITY_TO_GEO_UNIT = {
     "ho chi minh city": "79", "sai gon": "79", "saigon": "79", "tay ninh": "80",
     "dong thap": "82", "vinh long": "86", "an giang": "91", "can tho": "92", "ca mau": "96",
 }
+_VN_CROSSWALK_PATH = Path(__file__).resolve().parents[2] / "schemas" / "vietnam_province_crosswalk.json"
+_VN_CROSSWALK = json.loads(_VN_CROSSWALK_PATH.read_text(encoding="utf-8"))
+for _entry in _VN_CROSSWALK["entries"]:
+    _VN_CITY_TO_GEO_UNIT[_vn_city_key(_entry["old_name"])] = str(_entry["new_code"]).zfill(2)
+    _VN_CITY_TO_GEO_UNIT[_vn_city_key(_entry["new_name"])] = str(_entry["new_code"]).zfill(2)
 _VN_NAME_BY_ID = {str(item["code"]): item["name"] for item in PROVINCES}
 
 
-def _vn_city_key(value: Any) -> str:
-    """Normalize a Vietnam locality label for the explicit province crosswalk."""
-    import unicodedata
-    text = unicodedata.normalize("NFKD", str(value or "")).casefold().replace("đ", "d")
-    return "".join(char for char in text if not unicodedata.combining(char) and (char.isalnum() or char == " ")).strip()
-
-
 def _canonical_market_geo_unit(country_code: str, city_name: Any) -> str | None:
-    """Return a canonical market geo-unit only for proven Vietnam localities."""
+    """Map a known Vietnam locality or administrative parent to our canonical unit."""
     if str(country_code or "").upper() != "VN":
         return None
     return _VN_CITY_TO_GEO_UNIT.get(_vn_city_key(city_name))

@@ -49,6 +49,7 @@
   }
 
   function alertBehavior(item) {
+    if (item.reason_type === 'monitored_recurrence') return 'Monitored activity repeated';
     const evidence = Array.isArray(item.evidence) ? item.evidence : [];
     const signals = evidence.map(entry => {
       if (typeof entry === 'string') return entry;

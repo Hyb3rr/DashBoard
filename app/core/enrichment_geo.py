@@ -74,7 +74,7 @@ def apply_geo_resolution(canonical: dict, validated: list[dict], registration: d
         "country_conflict": len(country_candidates) > 1,
         "country_status": status.get("country", "unknown"),
         "country_conflict_severity": sap_country.get("conflict_severity", "none"),
-        "city_conflict": len(city_candidates) > 1 or status.get("city") == "disputed",
+        "city_conflict": status.get("city") == "disputed" or bool(sap_city.get("conflict")),
         "city_status": status.get("city", "unknown"),
         "city_conflict_severity": sap_city.get("conflict_severity", "none"),
         "coordinate_conflict": status.get("coordinates") == "disputed" or bool(sap_city.get("coordinate_conflict")),

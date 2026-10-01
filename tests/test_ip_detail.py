@@ -1,8 +1,15 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.routers import ip_detail
 from app.routers import ip_state
+
+
+class _EmptyClassificationHistory:
+    def for_ip(self, _ip, _limit):
+        return []
 
 
 def test_ip_detail_returns_snapshot_and_schedules_missing_enrichment(monkeypatch):
@@ -14,6 +21,7 @@ def test_ip_detail_returns_snapshot_and_schedules_missing_enrichment(monkeypatch
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
     monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
@@ -21,6 +29,29 @@ def test_ip_detail_returns_snapshot_and_schedules_missing_enrichment(monkeypatch
 
     assert result is snapshot
     assert scheduled == ["8.8.8.8"]
+
+
+def test_ip_detail_returns_bounded_classification_history(monkeypatch):
+    history = [{"source": "traffic", "previous_classification": {"label": "medium"}}]
+
+    class EmptyAi:
+        def scores(self, _ips):
+            return []
+
+    class HistoryRepository:
+        def for_ip(self, ip, limit):
+            assert ip == "8.8.8.8"
+            assert limit == 20
+            return history
+
+    monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: {"ip": "8.8.8.8", "enrichment_status": "complete"})
+    monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", HistoryRepository)
+    monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
+
+    result = asyncio.run(ip_detail.ip_details("8.8.8.8"))
+
+    assert result["classification_history"] == history
 
 
 def test_non_public_ip_is_terminal_and_never_schedules_enrichment(monkeypatch):
@@ -31,6 +62,7 @@ def test_non_public_ip_is_terminal_and_never_schedules_enrichment(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, ip: {"ip": ip, "enrichment_status": "complete", "network_location": {}})
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
     monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
@@ -38,6 +70,50 @@ def test_non_public_ip_is_terminal_and_never_schedules_enrichment(monkeypatch):
         asyncio.run(ip_detail.ip_details(ip))
 
     assert scheduled == []
+
+
+def test_ip_detail_derives_non_public_scope_from_the_identity(monkeypatch):
+    class EmptyAi:
+        def scores(self, _ips):
+            return []
+
+    monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
+    monkeypatch.setattr(ip_detail, "_pg_item", lambda row: dict(row))
+    monkeypatch.setattr(ip_detail, "enqueue", lambda _ip: pytest.fail("non-public IP must not enqueue enrichment"))
+
+    cases = (
+        ("10.0.0.5", "private"),
+        ("127.0.0.1", "loopback"),
+        ("169.254.1.1", "link_local"),
+        ("100.64.0.1", "shared_cgnat"),
+        ("192.0.2.1", "documentation"),
+    )
+    for ip, expected_scope in cases:
+        monkeypatch.setattr(
+            ip_detail.StateRepository,
+            "get",
+            lambda _self, _ip: {"ip": _ip, "enrichment_status": "complete"},
+        )
+        result = asyncio.run(ip_detail.ip_details(ip))
+        assert result["address_scope"] == expected_scope
+        assert result["is_non_public"] is True
+
+
+def test_ip_detail_keeps_public_scope_public(monkeypatch):
+    class EmptyAi:
+        def scores(self, _ips):
+            return []
+
+    monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, ip: {"ip": ip, "enrichment_status": "complete"})
+    monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
+    monkeypatch.setattr(ip_detail, "_pg_item", lambda row: dict(row))
+
+    result = asyncio.run(ip_detail.ip_details("8.8.8.8"))
+
+    assert result["address_scope"] == "public"
+    assert result["is_non_public"] is False
 
 
 def test_non_public_enrichment_exposes_address_scope():
@@ -58,6 +134,7 @@ def test_ip_detail_refresh_never_runs_enrichment_inline(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
     monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
@@ -77,6 +154,7 @@ def test_complete_enrichment_without_ip2region_does_not_reschedule(monkeypatch):
 
     monkeypatch.setattr(ip_detail.StateRepository, "get", lambda _self, _ip: snapshot)
     monkeypatch.setattr(ip_detail, "AiRepository", EmptyAi)
+    monkeypatch.setattr(ip_detail, "ClassificationHistoryRepository", _EmptyClassificationHistory)
     monkeypatch.setattr(ip_detail, "enqueue", lambda ip: scheduled.append(ip))
     monkeypatch.setattr(ip_detail, "_pg_item", lambda row: row)
 
@@ -125,6 +203,9 @@ def test_ip_detail_prioritizes_traffic_and_compacts_score_explanation():
     assert 'data-investigation-tab="intel"' in html
     assert "setInvestigationTab('overview')" in html
     assert 'Assessment snapshot' in html
+    assert 'classificationHistoryMarkup(d.classification_history,c.label)' in html
+    assert 'classification-history' in html
+    assert html.index('id="classification-history"') < html.index('<h2>Detection highlights</h2>')
     assert 'Detection highlights' in html
     assert 'class="investigation-evidence-grid" data-investigation-section="evidence"' in html
     assert 'investigationLayout.dataset.activeTab=tab' in html
@@ -132,6 +213,19 @@ def test_ip_detail_prioritizes_traffic_and_compacts_score_explanation():
     assert '.overview-snapshot .classification-value.critical{color:var(--red)}' in html
     assert '.overview-snapshot .classification-value.medium{color:var(--yellow)}' in html
     assert '.overview-snapshot .classification-value.low{color:var(--low)}' in html
+
+
+def test_ip_detail_marks_non_public_scope_and_public_intel_not_applicable():
+    html = (Path(__file__).parents[1] / "app" / "web" / "templates" / "ip_detail.html").read_text(encoding="utf-8")
+
+    assert "addressScope=d.address_scope||'public'" in html
+    assert "nonPublicAddress=Boolean(d.is_non_public)||addressScope!=='public'" in html
+    assert 'class="scope-badge"' in html
+    assert "GeoIP location','Not applicable'" in html
+    assert "ASN / organization','Not applicable'" in html
+    assert "Public reputation</span><strong>Not applicable</strong>" in html
+    assert "Classification still uses observed behavior." in html
+    assert "if(nonPublicAddress)return facts" in html
 
 
 def test_ip_state_preserves_zero_persisted_score_for_unknown_label(monkeypatch):
@@ -149,6 +243,35 @@ def test_ip_state_preserves_zero_persisted_score_for_unknown_label(monkeypatch):
     assert result["classification"]["score"] == 0
     assert result["classification"]["confidence"] == 0
     assert result["threat_signal_score"] == 0
+
+
+def test_ip_state_uses_persisted_family_max_breakdown_without_exposing_rollout_metadata(monkeypatch):
+    monkeypatch.setattr(ip_state, "classify_ip", lambda *args: {
+        "label": "medium", "score": 30, "confidence": 75,
+        "score_breakdown": {
+            "behavior_a": 30, "identity_b": 10, "trust_c": 0,
+            "region_d": 0, "ai_e": 0,
+        },
+        "score_explanations": {"A": "A = 30: V1 behavior score."},
+    })
+    result = ip_state._pg_item({
+        "ip": "51.68.107.149",
+        "label": "medium",
+        "classification_score": 18,
+        "classification_confidence": 75,
+        "observation_payload": {
+            "recent_behavior_score": 30,
+            "classification_scoring_mode": "family_max",
+            "classification_behavior_score": 18,
+        },
+    })
+
+    assert result["classification"]["score"] == 18
+    assert result["classification"]["score_breakdown"]["behavior_a"] == 18
+    assert "family-max" in result["classification"]["score_explanations"]["A"]
+    assert result["observation"]["recent_behavior_score"] == 30
+    assert "classification_scoring_mode" not in result["observation"]
+    assert "classification_behavior_score" not in result["observation"]
 
 
 def test_ip_state_uses_geo_resolution_when_profile_location_is_empty(monkeypatch):

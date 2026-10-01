@@ -27,7 +27,7 @@ def test_critical_recurrence_obeys_thirty_minute_cooldown():
 def test_postgres_migrations_are_ordered_and_checksumed():
     migrations = discover()
 
-    assert [migration.version for migration in migrations] == list(range(41))
+    assert [migration.version for migration in migrations] == list(range(43))
     assert [migration.filename for migration in migrations] == [
         "000_schema_migrations.sql",
         "001_initial.sql",
@@ -70,6 +70,8 @@ def test_postgres_migrations_are_ordered_and_checksumed():
         "038_privacy_network_change_history.sql",
         "039_az0_privacy_change_history.sql",
         "040_ai_explain_abstentions.sql",
+        "041_classification_history.sql",
+        "042_classification_provenance.sql",
         ]
     assert all(len(migration.checksum_sha256) == 64 for migration in migrations)
 
@@ -106,6 +108,11 @@ def test_migrations_extract_table_contracts():
     assert migrations[39].tables == {"privacy_provider_change_history"}
     assert migrations[40].version == 40
     assert migrations[40].tables == set()
+    assert migrations[41].tables == {"ip_classification_history"}
+    assert "alert_snapshot" in migrations[41].sql
+    assert "change_log" in migrations[41].sql
+    assert "ADD COLUMN IF NOT EXISTS input_contract_version TEXT" in migrations[42].sql
+    assert "ADD COLUMN IF NOT EXISTS input_fingerprint TEXT" in migrations[42].sql
     assert "DELETE FROM alerts" in migrations[34].sql
     assert "DELETE FROM ip_classification_state" in migrations[34].sql
     assert "created_at = cs.updated_at" in migrations[35].sql

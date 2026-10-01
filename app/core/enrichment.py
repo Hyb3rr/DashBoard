@@ -57,6 +57,8 @@ def _address_scope(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> st
         return "link_local"
     if address.is_unspecified:
         return "unspecified"
+    if address.is_multicast:
+        return "multicast"
     if address.is_reserved:
         return "reserved"
     if address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"):
@@ -71,7 +73,7 @@ def _address_scope(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> st
         return "documentation"
     if address.is_private:
         return "private"
-    return "public"
+    return "public" if address.is_global else "reserved"
 
 
 def _geo_hierarchy() -> GeoNamesHierarchy | None:

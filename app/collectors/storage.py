@@ -47,12 +47,19 @@ class StorageWorker:
         received_at: str,
     ) -> None:
         """Queue a batch and start the consumer if necessary."""
+        if self.collector.session.lease_lost.is_set():
+            return
         task = self.start()
         if task is None:
             raise RuntimeError("storage worker failed to start")
         if self.oldest_started is None:
             self.oldest_started = time.monotonic()
         await self.queue.put((batch, end_offset, current_offset, received_at))
+        # A producer may have been blocked on a full queue when lease loss
+        # cleared it. Do not let that now-uncommittable batch keep queue.join()
+        # waiting after the storage worker has stopped.
+        if self.collector.session.lease_lost.is_set():
+            self.discard_uncommitted()
 
     async def drain_and_stop(self) -> None:
         """Drain accepted batches before stopping the consumer."""
@@ -105,6 +112,12 @@ class StorageWorker:
                     except CheckpointCommitRejected as exc:
                         await collector.session.signal_lease_loss(str(exc))
                         metrics.increment("collector.checkpoint_commit_rejected")
+                        # The offset handler waits for queue.join(). Once the
+                        # lease is fenced, queued batches cannot commit under
+                        # this session and will be replayed from the durable
+                        # checkpoint after reset_after_lease_loss(). Drain
+                        # them here so that wait can finish and recovery runs.
+                        self.discard_uncommitted()
                         return
                     except Exception as exc:
                         collector.last_error = f"{type(exc).__name__}: {exc}"[:240]

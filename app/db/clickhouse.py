@@ -492,8 +492,10 @@ def traffic_for_ip(start: datetime, end: datetime, bucket_seconds: int, ip: str,
 
 
 def raw_log_tail(start: datetime, end: datetime, limit: int = 100, dataset_id: str = "live",
-                 ip: str | None = None, status: int | None = None) -> list[dict[str, Any]]:
-    """Return a bounded, read-only tail of raw HTTP events for the live log view."""
+                 ip: str | None = None, status: int | None = None,
+                 before_time: datetime | None = None,
+                 before_event_id: str | None = None) -> list[dict[str, Any]]:
+    """Return a bounded, read-only raw HTTP event page in time order."""
     client = connect()
     try:
         conditions = [
@@ -512,6 +514,16 @@ def raw_log_tail(start: datetime, end: datetime, limit: int = 100, dataset_id: s
         if status is not None:
             conditions.append("status = {status:UInt16}")
             parameters["status"] = status
+        if before_time is not None and before_event_id is not None:
+            cursor_time = before_time
+            if cursor_time.tzinfo is None:
+                cursor_time = cursor_time.replace(tzinfo=timezone.utc)
+            conditions.append(
+                "(event_time < {before_time:DateTime64(3)} OR "
+                "(event_time = {before_time:DateTime64(3)} AND event_id < {before_event_id:String}))"
+            )
+            parameters["before_time"] = cursor_time.astimezone(timezone.utc)
+            parameters["before_event_id"] = before_event_id
         where = " AND ".join(conditions)
         result = client.query(
             f"""SELECT event_id, event_time, ingested_at, src_ip, method, path,
@@ -531,6 +543,44 @@ def raw_log_tail(start: datetime, end: datetime, limit: int = 100, dataset_id: s
                 "source_offset": int(row[9]),
             })
         return list(reversed(rows))
+    finally:
+        client.close()
+
+
+def raw_log_ip_suggestions(start: datetime, end: datetime, prefix: str, limit: int = 12,
+                           dataset_id: str = "live", status: int | None = None) -> list[str]:
+    """Return recent distinct raw-log IPs matching a display-form prefix."""
+    client = connect()
+    try:
+        display_ip = (
+            "if(startsWith(IPv6NumToString(src_ip), '::ffff:'), "
+            "substring(IPv6NumToString(src_ip), 8), IPv6NumToString(src_ip))"
+        )
+        conditions = [
+            "event_time >= {start:DateTime64(3)}",
+            "event_time <= {end:DateTime64(3)}",
+            "dataset_id = {dataset_id:String}",
+            f"startsWith(lower({display_ip}), lower({{prefix:String}}))",
+        ]
+        parameters: dict[str, Any] = {
+            "start": start.astimezone(timezone.utc),
+            "end": end.astimezone(timezone.utc),
+            "dataset_id": dataset_id,
+            "prefix": prefix,
+        }
+        if status is not None:
+            conditions.append("status = {status:UInt16}")
+            parameters["status"] = status
+        rows = client.query(
+            f"""SELECT src_ip, max(event_time) AS last_seen
+                  FROM http_events FINAL
+                 WHERE {' AND '.join(conditions)}
+                 GROUP BY src_ip
+                 ORDER BY last_seen DESC, src_ip ASC
+                 LIMIT {max(1, min(int(limit), 12))}""",
+            parameters=parameters,
+        ).result_rows
+        return [_display_ip(row[0]) for row in rows]
     finally:
         client.close()
 

@@ -96,7 +96,7 @@ app/web/templates|static     frontend (đường dẫn cấu hình qua TEMPLATES
 - **Geo conflict:** Operational country, city, coordinates, RIR registration và ip2region context được giữ thành các lớp riêng. Khi nguồn mâu thuẫn, hệ thống hiển thị `resolved_with_conflict` và giữ candidate; không tự gán một city hoặc thay đổi security classification chỉ vì geo disagreement.
 - **IP Detail hierarchy:** IP traffic appears before the compact `Why this verdict?` score explanation; network location separates the operational result from source candidates and conflict context so live investigation remains the primary view.
 - **IP Detail investigation tabs:** `Overview`, `Activity`, `Detections`, `Evidence`, and `Intel` organize the existing case data client-side while keeping the summary visible and avoiding extra API requests or full-page rerenders.
-- **IP Detail overview:** Overview summarizes the current assessment, activity span, request/error volume, and active score contributions. Detections stays expanded for direct reading; Evidence uses a two-column layout on desktop and collapses responsively on smaller screens.
+- **IP Detail overview:** Overview summarizes the current assessment, activity span, request/error volume, and active score contributions. Classification history lists each saved label transition with its source, before/after score, and evidence snapshot; old change-log entries without evidence are marked as incomplete. Detections stays expanded for direct reading; Evidence uses a two-column layout on desktop and collapses responsively on smaller screens.
 - **Fail-isolated:** 1 job/nguồn lỗi không kéo sập cái khác (intel source, raw archive, backup component... đều retry/degrade độc lập).
 
 ---
@@ -225,9 +225,32 @@ CRITICAL  60–100, hoặc hard behavior (vd sensitive probing)
 
 Mỗi kết quả đi kèm **Evidence** giải thích tín hiệu nào góp phần → xem [Unified Evidence](#local-ai-reasoner).
 
+Behavior score dùng aggregation theo evidence family bằng family-max. V1 vẫn được
+tính để đo chênh lệch trên cùng `detections_recent`, nhưng không còn công tắc runtime
+để chuyển production về V1; rollback cần khôi phục code. Family-max chỉ thay
+aggregation của A; rule points, các thành phần B–E, ngưỡng, hard-sensitive Critical
+và confidence được giữ nguyên. Nếu thiếu `detections_recent`, classification tạm
+fallback sang V1 và ghi metric. Trong 128 lượt production family-max đã quan sát,
+delta đều bằng 0 và behavior score đều bằng 0; chưa có bằng chứng về accuracy hay
+trường hợp nhiều rule cùng family.
+
 ### 7. Region / Market Intelligence
 
 Chấm điểm **tiềm năng thị trường theo quốc gia/khu vực/thành phố**, tách biệt hoàn toàn với security scoring.
+
+Traffic trong Potential Markets dùng cùng country-demand snapshot và cohort cho
+quốc gia lẫn phân rã tỉnh Việt Nam. `qualified_http_requests` đếm request HTTP
+được giữ lại theo eligibility hiện hành; các request không có province
+attribution rõ ràng được cộng vào `Unmapped / unknown city`. Tổng request theo
+tỉnh cộng Unmapped phải bằng tổng ở cấp Việt Nam. `Coverage` vẫn biểu thị độ
+bao phủ market evidence, không phải độ bao phủ địa lý.
+Đối với traffic Việt Nam, nhãn city/district của nguồn GeoIP được quy lên đơn
+vị tỉnh/thành chuẩn của ứng dụng qua trường admin parent (`state`), rồi mới
+gom vào hàng tỉnh. Vì vậy district của DB-IP như `Quan Binh Thanh` có thể được
+hiển thị dưới Hồ Chí Minh dù tên city khác GeoLite2; dữ liệu MMDB không bị sửa
+và nhãn gốc vẫn nằm trong candidate evidence. Parent thiếu, không nhận diện
+được hoặc các nguồn bất đồng thì traffic vẫn nằm ở `Unmapped / unknown city`.
+Đây là phân bổ traffic theo tỉnh/thành, không khẳng định city chính xác.
 
 ```
 Economic Potential = 40% Market Capacity + 60% Industrial Fit   (World Bank WDI)
@@ -248,8 +271,10 @@ IP Detail chỉ enrich lại khi state chưa hoàn tất hoặc user chủ độ
 ### 9. Realtime Dashboard
 
 - **Overview:** donut phân loại (Low/Medium/Critical/Unclassified) + Top IPs + Top paths + System Health, dùng chung time window (mặc định 24h, đổi preset cập nhật đồng bộ cả 4 metric). Traffic timeline vẽ request theo Medium/Critical.
+- **Potential markets:** đổi kỳ 7d/30d/90d vẫn giữ scope quốc gia đang chọn; chọn Việt Nam tiếp tục hiển thị phân rã tỉnh theo kỳ đó.
 - **Global map** (`/map`, chỉ ở Overview): kết hợp market opportunity + security evidence theo quốc gia/thành phố; marker dùng tier cao nhất làm màu tâm, ring thể hiện tier còn lại; zoom load city aggregate thật.
 - **IP Intelligence / IP Detail:** bảng điều tra identity + evidence chi tiết + Explain (AI) thủ công.
+- **Raw Log Tail:** xem log thô dạng từng dòng, mở lịch sử 1h/6h/12h/24h, gợi ý IP theo prefix/status trong cửa sổ đang chọn, cuộn lên đầu khung để tự tải trang log cũ và nhận log mới ở cuối khung cuộn.
 - **Region Detail:** local opportunity + overlap theo area/city.
 - Trang khác: Rare Path Evidence, Threat Intelligence, Data Freshness, What Changed, Collector Health, [Alerts](#alerts).
 
@@ -289,5 +314,6 @@ Tất cả là **CLI thủ công**, không chạy trong FastAPI lifecycle. Secre
 `/alerts` — analyst inbox riêng (PostgreSQL), tách khỏi classification:
 
 - Chỉ ghi các **chuyển severity có ý nghĩa** (lên `low/medium/critical`); không dùng Telegram outbox làm nguồn sự thật.
+- Disposition tự động: `NEW + Medium → MONITOR`, `NEW + Critical → INVESTIGATE`; `MONITOR + Critical → INVESTIGATE`. Medium tái diễn chỉ tạo alert `monitored_recurrence` và chuyển sang `INVESTIGATE` khi evidence fingerprint mới và đã qua cooldown 30 phút. `INVESTIGATE`, `ESCALATE`, `RESOLVED` không bị automation ghi đè; `ESCALATE` vẫn do analyst quản lý.
 - Filter theo severity/status, acknowledge/resolve, click mở IP Detail; poll khi trang đang mở.
 - Toggle tự động sinh AI explanation cho Critical mới — **mặc định tắt**, không replay sự kiện cũ, dùng chung AI worker (concurrency 1). Rate-limit 1 alert/IP/30 phút khi evidence thay đổi đáng kể; evidence giống hệt → dedupe.

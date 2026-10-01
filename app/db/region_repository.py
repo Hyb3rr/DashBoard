@@ -71,9 +71,14 @@ class RegionRepository:
         with transaction() as conn:
             rows = conn.execute(
                 """SELECT r.*,
-                          (SELECT COUNT(*) FROM ip_profiles p
-                            WHERE p.country_code = r.country_code) AS observed_ip_count
+                          COALESCE(ip_counts.observed_ip_count, 0) AS observed_ip_count
                      FROM region_profiles r
+                     LEFT JOIN (
+                         SELECT country_code, COUNT(*) AS observed_ip_count
+                           FROM ip_profiles
+                          WHERE country_code IS NOT NULL
+                          GROUP BY country_code
+                     ) ip_counts ON ip_counts.country_code = r.country_code
                     ORDER BY r.country_name ASC
                     LIMIT %s""",
                 (limit,),
@@ -90,9 +95,17 @@ class RegionRepository:
         item["classification_label"] = item.get("classification_label") or "unknown"
         return item
 
-    def _new_demand_entry(self, code: str, item: dict[str, Any]) -> dict[str, Any]:
+    def _new_demand_entry(
+        self,
+        code: str,
+        item: dict[str, Any],
+        region_profiles: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
         """Create a country demand row with its market-profile context."""
-        region = self.get(code) or {"country_code": code, "country_name": item.get("country") or code}
+        region = region_profiles.get(str(code).upper()) or {
+            "country_code": code,
+            "country_name": item.get("country") or code,
+        }
         return {
             "country_code": code,
             "country_name": region.get("country_name") or item.get("country") or code,
@@ -175,11 +188,32 @@ class RegionRepository:
                 LEFT JOIN ip_classification_state cs ON cs.ip = p.ip
                 WHERE p.country_code IS NOT NULL
             """).fetchall()
+            country_codes = sorted({
+                str(row["country_code"]).upper()
+                for row in rows
+                if row.get("country_code")
+            })
+            region_rows = conn.execute("""
+                SELECT r.*,
+                       COALESCE(ip_counts.observed_ip_count, 0) AS observed_ip_count
+                FROM region_profiles r
+                LEFT JOIN (
+                    SELECT country_code, COUNT(*) AS observed_ip_count
+                    FROM ip_profiles
+                    WHERE country_code = ANY(%s::text[])
+                    GROUP BY country_code
+                ) ip_counts ON ip_counts.country_code = r.country_code
+                WHERE r.country_code = ANY(%s::text[])
+            """, (country_codes, country_codes)).fetchall() if country_codes else []
+        region_profiles = {
+            str(row["country_code"]).upper(): self._normalise(dict(row))
+            for row in region_rows
+        }
         aggregates: dict[str, dict[str, Any]] = {}
         for raw in rows:
             item = self._decode_demand_row(raw)
             code = item["country_code"]
             if code not in aggregates:
-                aggregates[code] = self._new_demand_entry(code, item)
+                aggregates[code] = self._new_demand_entry(code, item, region_profiles)
             self._accumulate_demand_ip(aggregates[code], item)
         return self._finalize_demand_entries(aggregates, limit)

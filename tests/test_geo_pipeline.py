@@ -33,3 +33,39 @@ async def test_enrichment_pipeline_drops_cross_country_coordinate_candidate(monk
     assert location["canonical_resolution"]["resolved"]["longitude"] is None
     assert location["canonical_resolution"]["status"]["coordinates"] == "unknown"
     assert any(item.get("excluded_reason") == "coordinate_country_mismatch" for item in location["canonical_resolution"]["candidates"]["country"])
+
+
+@pytest.mark.asyncio
+async def test_shared_vietnam_parent_does_not_become_city_conflict_downstream(monkeypatch):
+    countries = {"geolite2_country": "VN", "dbip_country": "VN"}
+    cities = {
+        "geolite2_city": {
+            "country_code": "VN", "city": "Ho Chi Minh City", "state": "Ho Chi Minh",
+            "latitude": 10.7769, "longitude": 106.7009,
+        },
+        "dbip_city": {
+            "country_code": "VN", "city": "Ho Chi Minh City", "raw_city": "Quan Tan Phu",
+            "state": "Ho Chi Minh City (HCMC)", "latitude": 10.80, "longitude": 106.72,
+        },
+    }
+    monkeypatch.setattr(enrichment, "_local_intelligence", lambda ip: ({}, {}, {}, []))
+    monkeypatch.setattr(enrichment, "bounds_for", lambda codes: {"VN": (8.0, 102.0, 24.0, 110.0)})
+    monkeypatch.setattr(enrichment, "resolve_network_location", lambda *args, **kwargs: {
+        "country": "Vietnam", "country_code": "VN", "sources": [], "confidence": 0,
+    })
+    monkeypatch.setattr("app.services.sapics_reader.lookup", lambda ip: {
+        "country": {"candidates": countries, "value": "VN", "conflict": False},
+        "city": {
+            "candidates": cities, "value": "Ho Chi Minh City", "source": "geolite2_city",
+            "conflict": False, "same_vietnam_parent": True, "coordinate_conflict": False,
+            "status": "resolved",
+        },
+        "asn": {}, "infrastructure": {},
+    })
+    monkeypatch.setattr("app.services.ip2region_reader.lookup", lambda ip: {})
+
+    result = await enrichment.lookup("1.1.1.1")
+
+    assert result["city"] == "Ho Chi Minh City"
+    assert result["network_location"]["city_conflict"] is False
+    assert result["network_location"]["city_status"] != "disputed"

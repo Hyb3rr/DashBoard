@@ -10,6 +10,7 @@ from ..core.country_demand import CountryDemandConfig, aggregate_country_demand,
 from ..config import settings
 from ..db import clickhouse
 from ..db.repositories import ProfileRepository
+from .map_intelligence import _canonical_market_geo_unit
 
 
 def _normalize_observation(raw: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -22,16 +23,82 @@ def _normalize_observation(raw: dict[str, Any], metadata: dict[str, Any]) -> dic
         return None
     network_type = str((profile or {}).get("network_type") or "").lower()
     path = str(raw.get("path") or "").split("?", 1)[0]
+    location = (profile or {}).get("network_location") or {}
+    if not isinstance(location, dict):
+        location = {}
+    city = (profile or {}).get("city")
+    city_status = str(location.get("city_status") or "unknown").lower()
+    coordinates_present = (profile or {}).get("latitude") is not None and (profile or {}).get("longitude") is not None
+    city_attribution_is_trusted = (
+        country == "VN"
+        and profile_country == country
+        and bool(city)
+        and coordinates_present
+        and city_status in {"resolved", "probable"}
+        and not bool((profile or {}).get("location_disputed"))
+        and not bool(location.get("disputed"))
+        and not bool(location.get("city_conflict"))
+        and not bool(location.get("coordinate_conflict"))
+        and raw.get("geo_conflict") is not True
+    )
+    city_geo_unit_id = _canonical_market_geo_unit("VN", city) if city_attribution_is_trusted else None
+    if (
+        city_geo_unit_id is None
+        and country == "VN"
+        and profile_country == "VN"
+        and raw.get("geo_conflict") is not True
+    ):
+        city_geo_unit_id = _canonical_vn_parent_geo_unit(profile)
     return {
         "country_code": country,
+        "event_time": raw.get("event_time"),
         "country_source": raw.get("country_source") or ("cloudflare" if cf_country else "profile"),
         "visitor_id": raw.get("visitor_id"),
         "identity_method": raw.get("identity_method") or "none",
         "session_id": raw.get("session_id"),
+        "http_validity_evidence_present": any(
+            raw.get(key) is not None
+            for key in (
+                "cf_bot_score", "cf_js_detection_passed", "is_tor", "is_vpn",
+                "is_proxy", "is_hosting", "is_mobile", "is_scanner",
+            )
+        ),
+        "city_geo_unit_id": city_geo_unit_id,
         "product_page": path.startswith(("/products/", "/product/", "/danh-muc/")),
         **_network_context(raw, profile, network_type),
         **_engagement_context(raw),
     }
+
+
+def _canonical_vn_parent_geo_unit(profile: dict[str, Any] | None) -> str | None:
+    """Map a GeoIP city/district label through its unanimous province parent."""
+    network_location = (profile or {}).get("network_location") or {}
+    geo = network_location.get("geo") if isinstance(network_location, dict) else None
+    city = geo.get("city") if isinstance(geo, dict) else None
+    candidates = city.get("candidates") if isinstance(city, dict) else None
+    if not isinstance(candidates, dict):
+        return None
+
+    parent_units: set[str] = set()
+    valid_candidates = 0
+    for candidate in candidates.values():
+        if not isinstance(candidate, dict) or candidate.get("valid") is False:
+            continue
+        country_code = str(candidate.get("country_code") or "").upper()
+        if not country_code:
+            return None
+        valid_candidates += 1
+        if country_code != "VN":
+            return None
+        parent = candidate.get("state")
+        if not parent:
+            return None
+        geo_unit_id = _canonical_market_geo_unit("VN", parent)
+        if geo_unit_id is None:
+            return None
+        parent_units.add(geo_unit_id)
+
+    return next(iter(parent_units)) if valid_candidates and len(parent_units) == 1 else None
 
 
 def _optional_event_bool(raw: dict[str, Any], key: str, fallback: Any = None) -> Any:

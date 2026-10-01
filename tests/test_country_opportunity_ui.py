@@ -13,7 +13,7 @@ def test_dashboard_uses_country_opportunity_read_model():
     assert "data-country-period=\"90d\"" in template
     assert "/api/country-opportunities" in javascript
     assert "period=${encodeURIComponent(countryDemandPeriod)}" in javascript
-    assert "traffic_${countryDemandPeriod}" in javascript
+    assert "qualified_http_requests_${countryDemandPeriod}" in javascript
     assert 'id="country-demand-scope"' in template
     assert "All countries" in javascript
     assert "loadCountryDemandCities" in javascript
@@ -31,7 +31,7 @@ def test_dashboard_uses_country_opportunity_read_model():
     assert "window.location.assign(row.dataset.regionLink)" in javascript
     assert "/regions/${encodeURIComponent(code)}" in javascript
     assert "evidence_level" in javascript
-    assert "traffic_${countryDemandPeriod}" in javascript
+    assert "qualified_http_requests_${countryDemandPeriod}" in javascript
     assert "Market score" in javascript
     assert "country_demand_score" in javascript
     assert "not a probability of market success" not in javascript

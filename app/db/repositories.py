@@ -25,6 +25,7 @@ from .json_codec import jsonb_value as _json
 from .postgres import transaction
 from .state_repository import StateRepository
 from ..core import metrics
+from ..services.dispositions import automatic_transition, recommendation
 from .checkpoints import CheckpointCommitRejected, CheckpointRepository
 from .region_repository import RegionRepository
 from .detection_repository import (
@@ -127,7 +128,8 @@ class ProfileRepository:
         with transaction() as conn:
             rows = conn.execute(
                 """SELECT host(p.ip) AS ip,p.country_code,p.is_tor,p.is_hosting,p.is_vpn,p.is_proxy,
-                          p.network_type,p.abuse_score,cs.label
+                          p.network_type,p.abuse_score,cs.label,p.city,p.latitude,p.longitude,
+                          p.location_disputed,p.location_scope,p.network_location
                      FROM ip_profiles p
                      LEFT JOIN ip_classification_state cs ON cs.ip=p.ip
                     WHERE p.ip = ANY(%s::inet[])""",
@@ -288,3 +290,71 @@ class DispositionRepository:
                 VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(ip) DO UPDATE SET state=EXCLUDED.state,suggested_state=EXCLUDED.suggested_state,assigned_to=EXCLUDED.assigned_to,note=EXCLUDED.note,updated_at=EXCLUDED.updated_at""", (ip, state, suggestion, assigned_to, note, now, _json(history)))
             result = conn.execute("SELECT * FROM ip_dispositions WHERE ip=%s", (ip,)).fetchone()
         return dict(result)
+
+    @staticmethod
+    def apply_automatic_transition(
+        conn,
+        *,
+        ip: str,
+        classification_label: str | None,
+        alert_result: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Apply one policy-approved transition on the caller's transaction."""
+        at = now or datetime.now(timezone.utc)
+        alert_reason_type = (
+            alert_result.get("reason_type")
+            if alert_result and alert_result.get("created")
+            else None
+        )
+        for _ in range(2):
+            row = conn.execute(
+                "SELECT state,assigned_to,note,history FROM ip_dispositions WHERE ip=%s FOR UPDATE",
+                (ip,),
+            ).fetchone()
+            current = dict(row) if row else {"state": "new", "history": []}
+            from_state = str(current.get("state") or "new").lower()
+            transition = automatic_transition(from_state, classification_label, alert_reason_type)
+            if transition is None:
+                return None
+            to_state, reason = transition
+            history = _decode_json(current.get("history")) or []
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "at": at.isoformat(),
+                "actor": "system",
+                "from": from_state,
+                "to": to_state,
+                "reason": reason,
+            })
+            suggested_state = recommendation(classification_label)
+            if row:
+                conn.execute(
+                    """UPDATE ip_dispositions
+                       SET state=%s,suggested_state=%s,updated_at=%s,history=%s
+                       WHERE ip=%s AND state=%s""",
+                    (to_state, suggested_state, at, _json(history), ip, from_state),
+                )
+                return {"from": from_state, "to": to_state, "reason": reason}
+
+            # Serialize first-time transitions so a concurrent Critical write
+            # cannot be overwritten by a stale NEW -> MONITOR decision.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s::text,0))",
+                (ip,),
+            )
+            row = conn.execute(
+                "SELECT state,assigned_to,note,history FROM ip_dispositions WHERE ip=%s FOR UPDATE",
+                (ip,),
+            ).fetchone()
+            if row:
+                continue
+            inserted = conn.execute(
+                """INSERT INTO ip_dispositions(ip,state,suggested_state,updated_at,history)
+                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT(ip) DO NOTHING RETURNING ip""",
+                (ip, to_state, suggested_state, at, _json(history)),
+            )
+            if inserted is not None and inserted.fetchone():
+                return {"from": from_state, "to": to_state, "reason": reason}
+        return None

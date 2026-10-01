@@ -13,6 +13,7 @@ const yes=value=>value===null||value===undefined?'<span class="flag">unknown</sp
 
 const classification=x=>x.classification?.label||'unknown';
 const classificationLabel=label=>({critical:'Critical',medium:'Medium',low:'Low',good:'Good',unknown:'Unclassified'})[label]||String(label||'Unclassified');
+const addressScopeLabel=scope=>({private:'Private IP',loopback:'Loopback',link_local:'Local',unspecified:'Unspecified',reserved:'Reserved',shared_cgnat:'Shared CGNAT',documentation:'Documentation',multicast:'Multicast'})[scope]||'Non-public IP';
 const signalScore=x=>Number(x.threat_signal_score??0);
 const classTone=label=>label==='critical'?'critical':label==='medium'?'medium':label==='low'?'low':label==='good'?'good':'unknown';
 const networkLocation=x=>x?.network_location&&typeof x.network_location==='object'&&!Array.isArray(x.network_location)?x.network_location:{};
@@ -61,8 +62,16 @@ let lastClassificationRenderKey='';
 function renderClassificationAnalytics(){
   const currentQueryIdentity=trafficQueryIdentity(snapshotTrafficQuery());
   if(!trafficClassificationSummary||trafficClassificationSummary.queryIdentity!==currentQueryIdentity)return;
-  const allCounts=trafficClassificationSummary?.classification||{critical:0,medium:0,low:0,good:0,unknown:0};
   const items=[['critical','Critical','var(--critical)'],['medium','Medium','var(--watch)'],['low','Low','var(--low)'],['good','Good','var(--stable)'],['unknown','Unclassified','var(--tertiary)']];
+  const allCounts=trafficClassificationSummary.classification;
+  const hasCompleteCounts=allCounts&&typeof allCounts==='object'&&!Array.isArray(allCounts)&&items.every(([key])=>Number.isFinite(allCounts[key])&&allCounts[key]>=0);
+  if(!hasCompleteCounts){
+    const renderKey=`${currentQueryIdentity}|unavailable`;
+    if(renderKey===lastClassificationRenderKey)return;
+    lastClassificationRenderKey=renderKey;
+    $('classification-donut').innerHTML='<div class="state"><strong>Classification data unavailable.</strong></div>';
+    return;
+  }
   const activeClassification=trafficFilterType==='classification'?trafficFilterValue:'';
   const counts=activeClassification?Object.fromEntries(items.map(([key])=>[key,key===activeClassification?Number(allCounts[key]||0):0])):allCounts;
   const total=items.reduce((sum,[key])=>sum+Number(counts[key]||0),0),radius=42,circumference=2*Math.PI*radius;
@@ -187,17 +196,34 @@ function renderCountryDemandCities(code,cities){
 async function loadCountryDemandCities(code){
   const table=$('country-demand-table');table.classList.add('state');table.innerHTML='<div class="state">Loading city opportunities…</div>';
   try{
-    const [regionResponse,mapResponse]=await Promise.all([fetch(apiUrl(`/api/regions/${encodeURIComponent(code)}`),{cache:'no-store'}),fetch(apiUrl(`/api/map/country/${encodeURIComponent(code)}?range=30d`),{cache:'no-store'})]);
+    const isVietnam=String(code).toUpperCase()==='VN';
+    const [regionResponse,mapResponse,demandResponse]=await Promise.all([
+      fetch(apiUrl(`/api/regions/${encodeURIComponent(code)}`),{cache:'no-store'}),
+      fetch(apiUrl(`/api/map/country/${encodeURIComponent(code)}?range=30d`),{cache:'no-store'}),
+      isVietnam?fetch(apiUrl(`/api/country-opportunities?period=${encodeURIComponent(countryDemandPeriod)}`),{cache:'no-store'}):Promise.resolve(null)
+    ]);
     if(!regionResponse.ok)throw new Error(`HTTP ${regionResponse.status}`);
-    const data=await regionResponse.json(),map=mapResponse.ok?await mapResponse.json():{cities:[]};
+    const data=await regionResponse.json(),map=mapResponse?.ok?await mapResponse.json():{cities:[]};
     const profileRows=(data.province_profile?.provinces||[]).map(row=>{const score=row.city_overall_opportunity||{};return {city_id:row.geo_unit_id,city_name:row.province_name,market_score:score.score??null,data_coverage:score.evidence_coverage==null?null:Number(score.evidence_coverage)/100}});
     const signals=profileRows.length?profileRows:(data.city_opportunities||[]).map(row=>({city_id:row.city_id,city_name:row.city_name||row.city_id,market_score:row.city_calibrated_score,data_coverage:null}));
     const traffic=new Map((map.cities||[]).filter(row=>row.city_id).map(row=>[String(row.city_id),row]));
+    let provinceRequests=null,unmappedRequests=null;
+    if(isVietnam){
+      if(!demandResponse?.ok)throw new Error(`Qualified traffic request failed (HTTP ${demandResponse?.status||'unknown'})`);
+      const demandData=await demandResponse.json();
+      const country=(demandData.countries||[]).find(row=>String(row.country_code||'').toUpperCase()==='VN');
+      const cityTraffic=country?.city_traffic;
+      if(cityTraffic&&cityTraffic.conservation!==true)throw new Error('Qualified province traffic failed its conservation check.');
+      if(cityTraffic){
+        provinceRequests=new Map((cityTraffic.provinces||[]).map(row=>[String(row.geo_unit_id),Number(row.qualified_http_requests)||0]));
+        unmappedRequests=Number(cityTraffic.unmapped_qualified_http_requests)||0;
+      }
+    }
     // Market rows come only from the canonical region/city read model. Map
     // locality names are traffic context and must never create market rows.
     const merged=[...signals];
     if(!merged.length){table.innerHTML='<div class="state"><strong>No city opportunity data yet.</strong><span>This country has no published city-level market summary.</span></div>';return}
-    merged.sort((a,b)=>(b.market_score??-1)-(a.market_score??-1)||String(a.city_name).localeCompare(String(b.city_name)));table.classList.remove('state');table.innerHTML=`<table class="country-demand-table"><thead><tr><th>City</th><th>Market opportunity</th><th>Observed users</th><th>Requests · 30d</th><th>Coverage</th></tr></thead><tbody>${merged.map(row=>{const t=traffic.get(String(row.city_id))?.threat||{};return `<tr><td><strong>${esc(row.city_name)}</strong><small>city overall evidence</small></td><td class="opportunity-score">${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td><td>${t.observed_ips==null?'0':num(t.observed_ips)}</td><td>${t.requests==null?'0':num(t.requests)}</td><td>${row.data_coverage==null?'—':esc(`${(Number(row.data_coverage)*100).toFixed(0)}%`)}</td></tr>`}).join('')}</tbody></table>`
+    merged.sort((a,b)=>(b.market_score??-1)-(a.market_score??-1)||String(a.city_name).localeCompare(String(b.city_name)));table.classList.remove('state');table.innerHTML=`<table class="country-demand-table"><thead><tr><th>City / province</th><th>Market opportunity</th><th>Observed users</th><th>${isVietnam?`Qualified requests · ${countryDemandPeriod}`:'Requests · 30d'}</th><th>Coverage</th></tr></thead><tbody>${merged.map(row=>{const t=traffic.get(String(row.city_id))?.threat||{};const requestCount=isVietnam?(provinceRequests==null?null:provinceRequests.get(String(row.city_id))||0):t.requests;return `<tr><td><strong>${esc(row.city_name)}</strong><small>city overall evidence</small></td><td class="opportunity-score">${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td><td>${t.observed_ips==null?'0':num(t.observed_ips)}</td><td>${requestCount==null?(isVietnam?'—':'0'):num(requestCount)}</td><td>${row.data_coverage==null?'—':esc(`${(Number(row.data_coverage)*100).toFixed(0)}%`)}</td></tr>`}).join('')}${isVietnam?`<tr><td><strong>Unmapped / unknown city</strong><small>qualified requests without trusted province attribution</small></td><td>—</td><td>—</td><td>${unmappedRequests==null?'—':num(unmappedRequests)}</td><td>—</td></tr>`:''}</tbody></table>`
   }catch(error){table.innerHTML=`<div class="state"><strong>City opportunities unavailable.</strong><span>${esc(error.message||'Request failed')}</span></div>`}
 }
 async function loadCountryDemandSignals(){
@@ -219,13 +245,14 @@ async function loadCountryDemandSignals(){
     const labels={PRIORITIZE:'Prioritize',EMERGING:'Emerging',INVESTIGATE:'Investigate',WATCH:'Watch'};
     const evidence={NONE:'None',VERY_LOW:'Very low',LOW:'Low',MEDIUM:'Medium',HIGH:'High'};
     table.classList.remove('state');
-    table.innerHTML=`<table class="country-demand-table"><thead><tr><th>Country</th><th>Opportunity</th><th>Status</th><th>Demand</th><th>Traffic · ${countryDemandPeriod}</th><th>Market</th></tr></thead><tbody>${countries.map(row=>{
+    table.innerHTML=`<table class="country-demand-table"><thead><tr><th>Country</th><th>Opportunity</th><th>Status</th><th>Demand</th><th>Qualified requests · ${countryDemandPeriod}</th><th>Market</th></tr></thead><tbody>${countries.map(row=>{
       const status=row.opportunity_status||row.opportunity_state||'WATCH';
       const code=String(row.country_code||'').trim().toUpperCase();
       const regionLink=code?`/regions/${encodeURIComponent(code)}`:'';
       const countryLabel=esc(row.country_name||row.country_code);
       const opportunity=row.opportunity_score==null?'—':esc(Number(row.opportunity_score).toFixed(1));
-      return `<tr tabindex="0" data-region-link="${esc(regionLink)}"><td><strong>${countryLabel}</strong></td><td class="opportunity-score">${opportunity}</td><td><span class="opportunity-state state-${String(status).toLowerCase()}">${esc(labels[status]||'Watch')}</span></td><td>${row.country_demand_score==null?'—':esc(Number(row.country_demand_score).toFixed(1))}</td><td>${num(row[`traffic_${countryDemandPeriod}`])}</td><td>${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td></tr>`;
+      const requestCount=row[`qualified_http_requests_${countryDemandPeriod}`];
+      return `<tr tabindex="0" data-region-link="${esc(regionLink)}"><td><strong>${countryLabel}</strong></td><td class="opportunity-score">${opportunity}</td><td><span class="opportunity-state state-${String(status).toLowerCase()}">${esc(labels[status]||'Watch')}</span></td><td>${row.country_demand_score==null?'—':esc(Number(row.country_demand_score).toFixed(1))}</td><td>${requestCount==null?'—':num(requestCount)}</td><td>${row.market_score==null?'—':esc(Number(row.market_score).toFixed(1))}</td></tr>`;
     }).join('')}</tbody></table>`;
     table.querySelectorAll('[data-region-link]').forEach(row=>{
       const open=()=>{if(row.dataset.regionLink)window.location.assign(row.dataset.regionLink)};
@@ -238,6 +265,11 @@ async function loadCountryDemandSignals(){
   }
 }
 countryDemandScope()?.addEventListener('change',event=>{const code=event.target.value;if(code==='all')loadCountryDemandSignals();else loadCountryDemandCities(code)});
+function reloadCountryDemandView(){
+  const scope=countryDemandScope()?.value||'all';
+  if(scope==='all')return loadCountryDemandSignals();
+  return loadCountryDemandCities(scope);
+}
 function openCountryDemand(c){
   const drawer=$('country-demand-drawer');
   if(!drawer)return;
@@ -306,8 +338,10 @@ function render(){
   const filtered=ips; $('visible-count').textContent=`${num(ipSummary?.total_ips||filtered.length)} total · page ${ipPage}/${ipTotalPages}`;updateHeaders();
   $('rows').innerHTML=filtered.length?filtered.map(x=>{
   const label=classification(x),level=label,score=signalScore(x),ai=x.ai_profile||{},aiKnown=Object.keys(ai).length>0,aiScore=Number(ai.ai_anomaly_score||0),aiTone=aiScore>=70?'alert':aiScore?'':'none',aiWindows=Number(ai.anomalous_windows||0),aiLabel=!aiKnown?'not scored':aiScore?`${aiWindows} anomalous window${aiWindows===1?'':'s'}`:(ai.score_reason||'not flagged'),disp=x.disposition?.state||x.disposition||'new',rowClass=disp==='resolved'?'row-resolved':`row-${label}`,displayStatus=formatStatusWithDisposition(label,disp);
-    const intelTags=(x.intel_tags||[]).map(tag=>`<span class="flag on">${esc(tag.replace('intel:','').replaceAll('_',' '))}</span> `).join('');
-    return `<tr tabindex="0" data-ip="${esc(x.ip)}" class="${esc(rowClass)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text">${esc(label)}${disp.toLowerCase()!=='new'?` <span class="disposition-inline ${esc(disp.toLowerCase())}">(${esc(disp.toLowerCase())})</span>`:''}</span></td><td class="mono last-seen" title="${esc(x.last_seen?seenTime(x.last_seen):'—')}">${esc(seenTime(x.last_seen))}</td><td>${locationCell(x)}</td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${isTrue(x.is_tor)?'<span class="flag on">tor</span> ':''}${isTrue(x.is_vpn)?'<span class="flag on">vpn</span> ':''}${isTrue(x.is_proxy)?'<span class="flag on">proxy</span> ':''}${isTrue(x.is_hosting)?'<span class="flag">host</span>':''}${intelTags}${![x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].some(isTrue)&&!intelTags?'<span class="flag">unknown</span>':''}</td><td><span class="disp-badge ${esc(disp)}">${esc(disp)}</span></td></tr>`
+    const scopeClass=x.address_scope==='link_local'?' scope-tag-local':'';
+    const scopeTag=x.is_non_public?`<span class="scope-tag${scopeClass}" title="Address range only; does not affect risk score or traffic totals">${esc(addressScopeLabel(x.address_scope))}</span>`:'';
+    const intelTags=(x.intel_tags||[]).map(tag=>{const compactAbuse=tag==='intel:abuse_historical'||tag==='intel:abuse_persistent';return `<span class="flag on${compactAbuse?' compact-abuse':''}">${esc(tag.replace('intel:','').replaceAll('_',' '))}</span> `}).join('');
+    return `<tr tabindex="0" data-ip="${esc(x.ip)}" class="${esc(rowClass)}"><td><span class="ip mono">${esc(x.ip)}</span><span class="secondary-text identity-meta">${esc(label)}${disp.toLowerCase()!=='new'?` <span class="disposition-inline ${esc(disp.toLowerCase())}">(${esc(disp.toLowerCase())})</span>`:''}${scopeTag}</span></td><td class="mono last-seen" title="${esc(x.last_seen?seenTime(x.last_seen):'—')}">${esc(seenTime(x.last_seen))}</td><td>${locationCell(x)}</td><td class="mono">${num(x.requests)}</td><td class="mono hide-mobile">${num(x.status_4xx)}</td><td class="mono hide-mobile">${num(x.unique_paths)}</td><td>${isTrue(x.is_tor)?'<span class="flag on">tor</span> ':''}${isTrue(x.is_vpn)?'<span class="flag on">vpn</span> ':''}${isTrue(x.is_proxy)?'<span class="flag on">proxy</span> ':''}${isTrue(x.is_hosting)?'<span class="flag">host</span>':''}${intelTags}${![x.is_tor,x.is_vpn,x.is_proxy,x.is_hosting].some(isTrue)&&!intelTags?'<span class="flag">unknown</span>':''}</td><td><span class="disp-badge ${esc(disp)}">${esc(disp)}</span></td></tr>`
   }).join(''):'<tr><td colspan="8"><div class="state"><strong>No matching identities</strong>Adjust the search or intelligence filters.</div></td></tr>';
 
 
@@ -374,7 +408,7 @@ async function detail(ip){
     const networkItems=[`ASN: ${d.asn||'—'}`,`Organization: ${d.organization||'Unattributed'}`,`Prefix: ${d.ip_prefix||'—'}`,`Network type: ${d.network_type||'Unknown'}`];
     const privacyItems=[`Tor: ${yes(d.is_tor)}`,`VPN: ${yes(d.is_vpn)}`,`Proxy: ${yes(d.is_proxy)}`,`Hosting: ${yes(d.is_hosting)}`];
     const threatItems=[`Abuse score: ${d.abuse_score??'Unknown'}`,`Abuse reports: ${d.abuse_reports??'Unknown'}`];
-  const classificationItems=[`Label: ${classificationLabel(d.classification?.label||'unknown')}`,`Summary: ${d.classification?.summary||'No classification summary'}`,`Confidence: ${d.classification?.confidence??'—'}%`];
+  const classificationItems=[`Label: ${classificationLabel(d.classification?.label||'unknown')}`,`Summary: ${d.classification?.summary||'No classification summary'}`,`Assessment confidence (heuristic): ${d.classification?.confidence??'—'}%`];
     const rareItems=(o.rare_path_evidence||[]).map(x=>`${x.path||'Unknown path'} · rarity ${x.rarity_score??'—'}/100 · first seen ${x.first_seen?window.formatVnTime(x.first_seen):'unknown'}`);
     const economicIndicators=Array.isArray(r.economic_indicators)?r.economic_indicators:Object.values((r.economic_indicators||{}).indicators||{});
     const regionItems=[...economicIndicators.map(x=>`${x.label||x.name||'Indicator'}: ${x.value??x.raw_value??'Unknown'}`),...(r.cultural_context||[]).map(x=>`${x.label}: ${x.value}`),...(r.conflict_indicators||[]).map(x=>`${x.label}: ${x.value}`)];
@@ -385,7 +419,8 @@ async function detail(ip){
     const dispClassLabel=formatStatusWithDisposition(d.classification?.label||'unknown',currentDisp);
     $('detail-body').innerHTML=`
       <div class="detail-grid">
-        <div class="detail"><span>Threat signal</span><strong>${esc(d.threat_signal_score??0)}/100 · ${esc(dispThreatLabel)}</strong></div>
+        <div class="detail"><span>Risk score</span><strong>${esc(d.threat_signal_score??0)}/100 · ${esc(dispThreatLabel)}</strong></div>
+        <div class="detail"><span>Network context</span><strong>${d.is_non_public||d.address_scope&&d.address_scope!=='public'?'Not applicable':d.risk_score==null?'Unavailable':`${esc(d.risk_score)}/100 · not a verdict`}</strong></div>
         <div class="detail"><span>Classification</span><strong>${esc(dispClassLabel)}</strong></div>
         <div class="detail"><span>Core enrichment</span><strong>${esc(d.core_enrichment_status||d.enrichment_status||'unknown')}</strong></div>
         <div class="detail"><span>Privacy enrichment</span><strong>${esc(d.privacy_enrichment_status||'unknown')}</strong></div>
@@ -478,7 +513,7 @@ document.querySelectorAll('.risk-tab').forEach(tab=>tab.addEventListener('click'
 const ipHref=ip=>`/ip/${encodeURIComponent(ip)}?mode=live`;
 $('rows').addEventListener('click',event=>{const row=event.target.closest('tr[data-ip]');if(row)window.location.href=ipHref(row.dataset.ip)});$('rows').addEventListener('keydown',event=>{const row=event.target.closest('tr[data-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.ip)}});
  $('top-ips').addEventListener('click',event=>{if(event.target.closest('[data-traffic-action]'))return;const row=event.target.closest('[data-traffic-ip]');if(row)window.location.href=ipHref(row.dataset.trafficIp)});$('top-ips').addEventListener('keydown',event=>{const row=event.target.closest('[data-traffic-ip]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();window.location.href=ipHref(row.dataset.trafficIp)}});
-document.querySelectorAll('[data-country-period]').forEach(button=>button.addEventListener('click',()=>{countryDemandPeriod=button.dataset.countryPeriod;document.querySelectorAll('[data-country-period]').forEach(item=>item.classList.toggle('active',item===button));loadCountryDemandSignals()}));
+document.querySelectorAll('[data-country-period]').forEach(button=>button.addEventListener('click',()=>{countryDemandPeriod=button.dataset.countryPeriod;document.querySelectorAll('[data-country-period]').forEach(item=>item.classList.toggle('active',item===button));reloadCountryDemandView()}));
 loadCountryDemandSignals();
 
 const openIp=ip=>{window.location.href=ipHref(ip)};

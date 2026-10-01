@@ -26,6 +26,8 @@ def test_alert_board_shows_only_the_highest_current_severity_per_ip():
 
 def test_alert_reason_uses_human_readable_behavior_from_evidence():
     assert "function alertBehavior(item)" in ALERTS_JS
+    assert "item.reason_type === 'monitored_recurrence'" in ALERTS_JS
+    assert "return 'Monitored activity repeated'" in ALERTS_JS
     assert "return 'Sensitive path probing'" in ALERTS_JS
     assert "return 'Brute-force login attempts'" in ALERTS_JS
     assert "return 'Rare path activity'" in ALERTS_JS

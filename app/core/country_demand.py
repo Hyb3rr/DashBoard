@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from math import log1p
 from typing import Any, Iterable
 
@@ -77,18 +78,46 @@ def aggregate_session_observations(events: Iterable[dict[str, Any]]) -> list[dic
         session_id = identity_value if identity_level == "session" else None
         visitor_id = identity_value if identity_level == "visitor" else first_known(rows, "visitor_id")
         countries = {str(row.get("country_code") or "").upper() for row in rows if row.get("country_code")}
+        request_attribution_counts = Counter(
+            (
+                row.get("country_code"),
+                row.get("city_geo_unit_id"),
+                row.get("geo_conflict") is True,
+            )
+            for row in rows
+        )
         item = dict(rows[0])
         item.update({
             "session_id": session_id,
             "visitor_id": visitor_id,
             "identity_level": identity_level,
             "request_count": len(rows),
+            "http_log_observation_count": sum(int(row.get("http_log_observation_count") or 1) for row in rows),
+            "http_validity_evidence_count": sum(
+                int(row.get("http_validity_evidence_count") or bool(row.get("http_validity_evidence_present")))
+                for row in rows
+            ),
+            "_observed_event_times": [
+                timestamp
+                for row in rows
+                for timestamp in (row.get("_observed_event_times") or [row.get("event_time")])
+                if timestamp is not None
+            ],
             "engaged": any(row.get("engaged") is True for row in rows) if any(row.get("engaged") is not None for row in rows) else None,
             "engagement_seconds": max((float(row["engagement_seconds"]) for row in rows if row.get("engagement_seconds") is not None), default=None),
             "pageviews": max((int(row["pageviews"]) for row in rows if row.get("pageviews") is not None), default=None),
             "key_event_count": sum(int(row.get("key_event_count") or 0) for row in rows) if any(row.get("key_event_count") is not None for row in rows) else None,
             "geo_conflict": True if len(countries) > 1 else first_known(rows, "geo_conflict"),
             "country_code": first_known(rows, "country_code"),
+            "_request_geo_attributions": [
+                {
+                    "country_code": country,
+                    "city_geo_unit_id": geo_unit_id,
+                    "geo_conflict": geo_conflict,
+                    "request_count": count,
+                }
+                for (country, geo_unit_id, geo_conflict), count in request_attribution_counts.items()
+            ],
         })
         item.update(normalize_traffic_evidence(item))
         item.update(evaluate_traffic_validity(item))
@@ -145,18 +174,91 @@ def _usable_demand_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _engagement_components(events: list[dict[str, Any]]) -> tuple[float | None, float]:
+def _engagement_components(events: list[dict[str, Any]]) -> tuple[float | None, float | None]:
     """Calculate engagement quality and the share of events with engagement evidence."""
     evidence_keys = ("engaged", "engagement_seconds", "pageviews", "key_event_count")
     rows = [event for event in events if any(event.get(key) is not None for key in evidence_keys)]
     if not rows:
-        return None, 0.0
+        return None, None
     sample_count = len(rows)
     engaged_rate = sum(bool(event.get("engaged")) for event in rows) / sample_count
     page_depth = sum(min(float(event.get("pageviews") or 0) / 5.0, 1.0) for event in rows) / sample_count
     key_event_rate = sum(bool(event.get("key_event_count")) for event in rows) / sample_count
     quality = round(100.0 * (0.45 * engaged_rate + 0.30 * page_depth + 0.25 * key_event_rate), 2)
     return quality, round(sample_count / len(events), 4) if events else 0.0
+
+
+_DEMAND_CONFIDENCE_WEIGHTS = {
+    "sample_sufficiency": 0.35,
+    "traffic_validity_coverage": 0.30,
+    "identity_coverage": 0.20,
+    "temporal_coverage": 0.15,
+}
+
+
+def _event_date(event: dict[str, Any]) -> date | None:
+    """Parse a request timestamp into a UTC calendar date when available."""
+    value = event.get("event_time")
+    if isinstance(value, datetime):
+        timestamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc).date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            timestamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc).date()
+    return None
+
+
+def _log_evidence_confidence(
+    events: list[dict[str, Any]],
+    *,
+    raw_http_observation_count: int,
+    raw_http_validity_evidence_count: int,
+    min_sample_size: int,
+    window_days: int,
+) -> tuple[float, dict[str, Any]]:
+    """Score HTTP-log evidence coverage; this is a heuristic, not probability."""
+    usable = _usable_demand_events(events)
+    active_dates = {
+        day
+        for event in usable
+        for timestamp in (event.get("_observed_event_times") or [event.get("event_time")])
+        if (day := _event_date({"event_time": timestamp})) is not None
+    }
+    identity_count = sum(
+        _identity(event, "session_id", "request_session_id", "visitor_id", "cookie_id", "fingerprint_id") is not None
+        for event in usable
+    )
+    components: dict[str, float | None] = {
+        "sample_sufficiency": round(min(1.0, len(usable) / max(1, min_sample_size)) * 100, 2),
+        "traffic_validity_coverage": round(raw_http_validity_evidence_count / raw_http_observation_count * 100, 2) if raw_http_observation_count else None,
+        "identity_coverage": round(identity_count / len(usable) * 100, 2) if usable else None,
+        "temporal_coverage": round(min(1.0, len(active_dates) / max(1, window_days)) * 100, 2) if active_dates else None,
+    }
+    available = [(name, value) for name, value in components.items() if value is not None]
+    weight_total = sum(_DEMAND_CONFIDENCE_WEIGHTS[name] for name, _ in available)
+    confidence = (
+        sum(_DEMAND_CONFIDENCE_WEIGHTS[name] * float(value) for name, value in available) / weight_total / 100
+        if weight_total else 0.0
+    )
+    breakdown = {
+        **components,
+        "sample_size": len(usable),
+        "sample_threshold": min_sample_size,
+        "http_observation_count": raw_http_observation_count,
+        "http_validity_evidence_count": raw_http_validity_evidence_count,
+        "active_days": len(active_dates),
+        "window_days": window_days,
+        "weights": {name: _DEMAND_CONFIDENCE_WEIGHTS[name] for name, value in available},
+        "available_weight_total": round(weight_total, 4),
+    }
+    return round(confidence, 4), breakdown
 
 
 def _momentum_components(weighted: float, previous_weighted: float) -> tuple[float | None, float | None]:
@@ -174,16 +276,29 @@ def _combined_demand_score(strength: float, quality: float | None, momentum: flo
     return round(sum(weight * value for weight, value in weighted_components) / sum(weight for weight, _ in weighted_components), 2)
 
 
-def _country_demand_components(events: list[dict[str, Any]], previous_events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Calculate weighted demand, engagement quality, momentum and confidence."""
+def _country_demand_components(
+    events: list[dict[str, Any]],
+    previous_events: list[dict[str, Any]],
+    *,
+    raw_http_observation_count: int,
+    raw_http_validity_evidence_count: int,
+    min_sample_size: int,
+    window_days: int,
+) -> dict[str, Any]:
+    """Calculate weighted demand, engagement quality, momentum and log confidence."""
     usable = _usable_demand_events(events)
     weighted = sum(float(event["traffic_validity_score"]) for event in usable)
     previous_usable = _usable_demand_events(previous_events)
     previous_weighted = sum(float(event["traffic_validity_score"]) for event in previous_usable)
     engagement_quality, engagement_coverage = _engagement_components(usable)
     growth, momentum = _momentum_components(weighted, previous_weighted)
-    sample_damping = min(1.0, log1p(min(weighted, previous_weighted)) / log1p(30.0)) if previous_weighted > 0 else 0.0
-    demand_confidence = round(engagement_coverage * sample_damping, 4)
+    demand_confidence, confidence_components = _log_evidence_confidence(
+        events,
+        raw_http_observation_count=raw_http_observation_count,
+        raw_http_validity_evidence_count=raw_http_validity_evidence_count,
+        min_sample_size=min_sample_size,
+        window_days=window_days,
+    )
     strength = _demand_strength(weighted)
     return {
         "weighted_qualified_sessions": round(weighted, 4),
@@ -195,10 +310,12 @@ def _country_demand_components(events: list[dict[str, Any]], previous_events: li
         "momentum_pct": round(growth, 2) if growth is not None else None,
         "country_demand_score": _combined_demand_score(strength, engagement_quality, momentum),
         "demand_confidence": demand_confidence,
+        "demand_confidence_method": "http_log_evidence_v1",
+        "demand_confidence_components": confidence_components,
         "demand_reason": (
-            f"Demand strength {strength:.1f}; engagement coverage {engagement_coverage:.0%}; momentum {momentum:.1f}."
+            f"HTTP log evidence confidence {demand_confidence:.0%} (heuristic, not probability); demand strength {strength:.1f}; momentum {momentum:.1f}."
             if momentum is not None else
-            f"Demand strength {strength:.1f}; engagement coverage {engagement_coverage:.0%}; momentum unavailable."
+            f"HTTP log evidence confidence {demand_confidence:.0%} (heuristic, not probability); demand strength {strength:.1f}; momentum unavailable."
         ),
     }
 
@@ -221,6 +338,10 @@ def _bucket_current_event(event: dict[str, Any], buckets: dict[str, Any]) -> Non
     confidence = event.get("validity_confidence")
     if isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 1:
         bucket["confidence_scores"].append(float(confidence))
+    bucket["http_log_observation_count"] += int(event.get("http_log_observation_count") or 1)
+    bucket["http_validity_evidence_count"] += int(
+        event.get("http_validity_evidence_count") or bool(event.get("http_validity_evidence_present"))
+    )
     if reason:
         bucket["excluded"][reason] += 1
         return
@@ -244,7 +365,7 @@ def _bucket_previous_event(event: dict[str, Any], previous: dict[str, list[dict[
 
 def _collect_country_buckets(current_events, previous_events):
     """Group current validity counts and prior trend evidence by country."""
-    buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"qualified": [], "excluded": defaultdict(int), "validity": defaultdict(float), "validity_scores": [], "confidence_scores": []})
+    buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"qualified": [], "excluded": defaultdict(int), "validity": defaultdict(float), "validity_scores": [], "confidence_scores": [], "http_log_observation_count": 0, "http_validity_evidence_count": 0})
     previous: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in current_events:
         _bucket_current_event(event, buckets)
@@ -333,7 +454,61 @@ def _validity_metrics(bucket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _country_snapshot_row(code: str, bucket: dict[str, Any], previous: dict[str, list[dict[str, Any]]], config: CountryDemandConfig) -> dict[str, Any]:
+def _qualified_http_request_count(events: list[dict[str, Any]]) -> int:
+    """Count raw HTTP observations represented by the retained demand cohort."""
+    return sum(max(0, int(event.get("request_count") or 1)) for event in events)
+
+
+def _vietnam_city_traffic(code: str, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate qualified request counts by trusted canonical province."""
+    if code != "VN":
+        return None
+    provinces: Counter[str] = Counter()
+    unmapped = 0
+    total = 0
+    for event in events:
+        request_count = max(0, int(event.get("request_count") or 1))
+        total += request_count
+        attributions = event.get("_request_geo_attributions")
+        if not isinstance(attributions, list):
+            unmapped += request_count
+            continue
+        if event.get("geo_conflict") is True:
+            unmapped += request_count
+            continue
+        attributed_requests = 0
+        for attribution in attributions:
+            if not isinstance(attribution, dict):
+                continue
+            count = max(0, min(
+                int(attribution.get("request_count") or 0),
+                request_count - attributed_requests,
+            ))
+            attributed_requests += count
+            if count == 0:
+                continue
+            if (
+                str(attribution.get("country_code") or "").upper() == code
+                and attribution.get("geo_conflict") is not True
+                and attribution.get("city_geo_unit_id")
+            ):
+                provinces[str(attribution["city_geo_unit_id"])] += count
+            else:
+                unmapped += count
+        unmapped += max(0, request_count - attributed_requests)
+    mapped = sum(provinces.values())
+    return {
+        "provinces": [
+            {"geo_unit_id": code, "qualified_http_requests": requests}
+            for code, requests in sorted(provinces.items())
+        ],
+        "unmapped_qualified_http_requests": unmapped,
+        "total_qualified_http_requests": total,
+        "conservation": mapped + unmapped == total,
+    }
+
+
+def _country_snapshot_row(code: str, bucket: dict[str, Any], previous: dict[str, list[dict[str, Any]]], config: CountryDemandConfig, window_days: int) -> dict[str, Any]:
     """Build one country row from behavior, trend, validity, and demand evidence."""
     events = bucket["qualified"]
     behavior = _country_behavior_metrics(events, config)
@@ -341,6 +516,8 @@ def _country_snapshot_row(code: str, bucket: dict[str, Any], previous: dict[str,
     return {
         "country_code": code,
         "qualified_requests": len(events),
+        "qualified_http_requests": _qualified_http_request_count(events),
+        "city_traffic": _vietnam_city_traffic(code, events),
         "qualified_sessions": behavior["qualified_sessions"],
         "qualified_visitors": behavior["qualified_visitors"],
         "unique_organizations": behavior["unique_organizations"],
@@ -353,7 +530,14 @@ def _country_snapshot_row(code: str, bucket: dict[str, Any], previous: dict[str,
         "trend": trend["trend"],
         "excluded": dict(bucket["excluded"]),
         **_validity_metrics(bucket),
-        **_country_demand_components(events, previous.get(code, [])),
+        **_country_demand_components(
+            events,
+            previous.get(code, []),
+            raw_http_observation_count=int(bucket["http_log_observation_count"]),
+            raw_http_validity_evidence_count=int(bucket["http_validity_evidence_count"]),
+            min_sample_size=config.min_sample_size,
+            window_days=window_days,
+        ),
     }
 
 
@@ -382,8 +566,11 @@ def aggregate_country_demand(
 ) -> dict[str, Any]:
     """Build a versioned, JSON-safe country demand snapshot from batch input."""
     config = config or CountryDemandConfig()
+    window_days = {"7d": 7, "30d": 30, "90d": 90}.get(period)
+    if window_days is None:
+        raise ValueError("unsupported country demand period")
     buckets, previous = _collect_country_buckets(current_events, previous_events)
-    rows = [_country_snapshot_row(code, bucket, previous, config) for code, bucket in buckets.items()]
+    rows = [_country_snapshot_row(code, bucket, previous, config, window_days) for code, bucket in buckets.items()]
     _add_cohort_signals(rows, config)
     countries = sorted(rows, key=lambda row: (-row["qualified_sessions"], row["country_code"]))
     return {"period": period, "min_sample_threshold": config.min_sample_size, "countries": countries}
@@ -454,6 +641,12 @@ def _recent_traffic_metrics(periods: dict[str, Any], code: str) -> tuple[int, in
     return traffic_7d, traffic_90d, share
 
 
+def _recent_qualified_http_request_metrics(periods: dict[str, Any], code: str) -> tuple[int | None, int | None]:
+    """Return exact HTTP request totals when the snapshot provides them."""
+    values = [periods.get(period, {}).get(code, {}).get("qualified_http_requests") for period in ("7d", "90d")]
+    return tuple(int(value) if isinstance(value, (int, float)) else None for value in values)
+
+
 def _opportunity_explanation(
     traffic: int,
     period: str,
@@ -486,6 +679,7 @@ def _country_opportunity_row(code, demand, periods, market_scores, observed_valu
     demand_confidence = demand.get("demand_confidence")
     country_demand, adjusted_demand, opportunity = _opportunity_scores(market_score, demand)
     traffic_7d, traffic_90d, recent_share = _recent_traffic_metrics(periods, code)
+    request_traffic_7d, request_traffic_90d = _recent_qualified_http_request_metrics(periods, code)
     state = _opportunity_state(traffic, market_score, evidence, rank)
     status = _opportunity_status(market_score, country_demand, demand_confidence, opportunity)
     name = market.get("country_name") or demand.get("country_name") or code
@@ -497,11 +691,18 @@ def _country_opportunity_row(code, demand, periods, market_scores, observed_valu
         "country_code": code, "country_name": name, "market_score": market_score,
         "opportunity_score": opportunity, "opportunity_state": state,
         "country_demand_score": country_demand, "demand_confidence": demand_confidence,
+        "demand_confidence_method": demand.get("demand_confidence_method"),
+        "demand_confidence_components": demand.get("demand_confidence_components"),
         "weighted_qualified_sessions": demand.get("weighted_qualified_sessions"),
         "evidence_coverage": demand.get("evidence_coverage"),
         "adjusted_demand_score": adjusted_demand, "opportunity_status": status,
         "opportunity_reason": explanation, "traffic_7d": traffic_7d,
         "traffic_30d": traffic, "traffic_90d": traffic_90d,
+        "qualified_http_requests": demand.get("qualified_http_requests"),
+        "qualified_http_requests_7d": request_traffic_7d,
+        "qualified_http_requests_30d": demand.get("qualified_http_requests"),
+        "qualified_http_requests_90d": request_traffic_90d,
+        "city_traffic": demand.get("city_traffic") if code == "VN" else None,
         "recent_traffic_share_pct": recent_share,
         "trend_pct": round(float(trend), 2) if trend is not None else None,
         "evidence_level": evidence, "evidence_confidence": confidence,

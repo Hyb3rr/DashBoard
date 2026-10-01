@@ -7,11 +7,13 @@ from typing import Any, Iterable
 
 from .alert_repository import _alert_evidence_for_classification, persist_classification_alert_and_notification
 from .checkpoints import CheckpointRepository
+from .classification_history_repository import ClassificationHistoryRepository
 from .json_codec import jsonb_value as _json
 from .postgres import transaction
 from ..core.clock import utcnow
 from ..core.failpoints import NoopFailpoint
 from ..core import metrics
+from ..core.classification_provenance import classification_input_provenance
 from ..core.intelligence import classify_ip
 from ..core.path_canonicalization import canonicalize_path
 from ..core.rules import BehaviorContext, run_rules, ruleset_hash
@@ -403,19 +405,37 @@ class PgDetectionRepository:
         failpoint,
     ) -> None:
         """Persist one IP observation, classification, change events, and alert."""
+        region_profile = {}
+        ai_profile = None
+        from ..services.classification import classify_with_rollout_metrics
+
+        classification = classify_with_rollout_metrics(
+            profile, payload, region_profile, ai_profile, classifier=classify_ip
+        )
+        input_provenance = classification_input_provenance(
+            profile, payload, region_profile, ai_profile
+        )
         conn.execute(
             """INSERT INTO ip_observations_state(ip,payload,ruleset_hash,updated_at) VALUES (%s,%s,%s,%s)
                ON CONFLICT(ip) DO UPDATE SET payload=EXCLUDED.payload,ruleset_hash=EXCLUDED.ruleset_hash,updated_at=EXCLUDED.updated_at""",
             (ip, _json(payload), payload["ruleset_hash"], now),
         )
         failpoint.hit("after_detection")
-        classification = classify_ip(profile, payload, {}, None)
         old_label = previous["label"] if previous else None
         old_score = int(previous["score"]) if previous else None
         conn.execute(
-            """INSERT INTO ip_classification_state(ip,label,score,confidence,updated_at) VALUES (%s,%s,%s,%s,%s)
-               ON CONFLICT(ip) DO UPDATE SET label=EXCLUDED.label,score=EXCLUDED.score,confidence=EXCLUDED.confidence,updated_at=EXCLUDED.updated_at""",
-            (ip, classification["label"], int(classification["score"]), int(classification.get("confidence", 0)), now),
+            """INSERT INTO ip_classification_state
+               (ip,label,score,confidence,input_contract_version,input_fingerprint,updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(ip) DO UPDATE SET label=EXCLUDED.label,score=EXCLUDED.score,
+                confidence=EXCLUDED.confidence,
+                input_contract_version=EXCLUDED.input_contract_version,
+                input_fingerprint=EXCLUDED.input_fingerprint,updated_at=EXCLUDED.updated_at""",
+            (
+                ip, classification["label"], int(classification["score"]),
+                int(classification.get("confidence", 0)), input_provenance["version"],
+                input_provenance["fingerprint"], now,
+            ),
         )
         conn.execute(
             """INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at,old_label,new_label,old_score,new_score)
@@ -428,8 +448,18 @@ class PgDetectionRepository:
                    VALUES (%s,%s,'classification',%s,%s,%s,%s,%s)""",
                 (dataset_id, ip, now, old_label, classification["label"], old_score, int(classification["score"])),
             )
+            ClassificationHistoryRepository.record_transition(
+                conn,
+                event_key=f"traffic:{dataset_id}:{batch_id}:{ip}",
+                dataset_id=dataset_id,
+                ip=ip,
+                source="traffic",
+                changed_at=now,
+                previous_classification={"label": old_label or "unknown", "score": old_score},
+                current_classification=classification,
+            )
         failpoint.hit("after_classification")
-        persist_classification_alert_and_notification(
+        alert_result = persist_classification_alert_and_notification(
             conn,
             dataset_id=dataset_id,
             batch_id=batch_id,
@@ -439,6 +469,18 @@ class PgDetectionRepository:
             classification=classification,
             evidence=_alert_evidence_for_classification(classification, payload),
             created_at=now,
+            recurrence_observed_at=payload.get("recent_last_seen"),
+        )
+        # Import through the compatibility facade only at runtime to avoid a
+        # module cycle with PgDetectionRepository's existing re-export.
+        from .repositories import DispositionRepository
+
+        DispositionRepository.apply_automatic_transition(
+            conn,
+            ip=ip,
+            classification_label=classification.get("label"),
+            alert_result=alert_result,
+            now=now,
         )
         failpoint.hit("after_alert_outbox")
 

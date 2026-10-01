@@ -27,7 +27,9 @@ def test_identical_snapshot_is_a_noop_and_changes_are_delta_only():
     import psycopg
 
     dsn = os.environ["POSTGRES_DSN"]
-    conn = psycopg.connect(dsn, autocommit=False)
+    conn = psycopg.connect(
+        dsn, autocommit=False, row_factory=psycopg.rows.dict_row
+    )
     try:
         first = apply_privacy_snapshot(
             conn, "__phase2_fixture__", "proxy",

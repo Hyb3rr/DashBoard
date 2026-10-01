@@ -8,13 +8,18 @@ import socket
 
 from ..config import settings
 from ..core.enrichment import lookup
+from ..core.classification_provenance import classification_input_provenance
+from ..db.json_codec import jsonb_value as _json
 from ..core.intelligence import classify_ip
+from .classification import classify_with_rollout_metrics
 from ..db.repositories import (
+    DispositionRepository,
     GeoRepository,
     ProfileRepository,
     _alert_evidence_for_classification,
     persist_classification_alert_and_notification,
 )
+from ..db.classification_history_repository import ClassificationHistoryRepository
 from ..db.postgres import transaction
 
 
@@ -82,29 +87,64 @@ def _reclassify_after_enrichment(conn, ip: str, profile: dict) -> None:
 
     previous_result = conn.execute("SELECT label,score FROM ip_classification_state WHERE ip=%s", (ip,))
     previous_row = previous_result.fetchone() if previous_result is not None else None
-    classification = classify_ip(profile, observation, {}, None)
+    region_profile = {}
+    ai_profile = None
+    classification = classify_with_rollout_metrics(
+        profile, observation, region_profile, ai_profile, classifier=classify_ip
+    )
+    input_provenance = classification_input_provenance(
+        profile, observation, region_profile, ai_profile
+    )
+    conn.execute(
+        "UPDATE ip_observations_state SET payload=%s,updated_at=now() WHERE ip=%s",
+        (_json(observation), ip),
+    )
     old_label = previous_row["label"] if previous_row else None
     old_score = int(previous_row["score"]) if previous_row and previous_row["score"] is not None else None
     score = int(classification["score"])
+    changed_at = datetime.now(timezone.utc)
     conn.execute(
-        """INSERT INTO ip_classification_state(ip,label,score,confidence,updated_at)
-           VALUES (%s,%s,%s,%s,%s)
+        """INSERT INTO ip_classification_state
+           (ip,label,score,confidence,input_contract_version,input_fingerprint,updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT(ip) DO UPDATE SET label=EXCLUDED.label,score=EXCLUDED.score,
-            confidence=EXCLUDED.confidence,updated_at=EXCLUDED.updated_at""",
-        (ip, classification["label"], score, int(classification.get("confidence", 0)), datetime.now(timezone.utc)),
+            confidence=EXCLUDED.confidence,
+            input_contract_version=EXCLUDED.input_contract_version,
+            input_fingerprint=EXCLUDED.input_fingerprint,updated_at=EXCLUDED.updated_at""",
+        (
+            ip, classification["label"], score, int(classification.get("confidence", 0)),
+            input_provenance["version"], input_provenance["fingerprint"], changed_at,
+        ),
     )
-    if old_label == classification["label"] and old_score == score:
-        return
-    conn.execute(
-        """INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at,old_label,new_label,old_score,new_score)
-           VALUES (%s,%s,'enrichment_classification',%s,%s,%s,%s,%s)""",
-        (settings.DATASET_LIVE_ID, ip, datetime.now(timezone.utc), old_label, classification["label"], old_score, score),
-    )
-    persist_classification_alert_and_notification(
+    changed = old_label != classification["label"] or old_score != score
+    if changed:
+        conn.execute(
+            """INSERT INTO ip_change_log(dataset_id,ip,reason,changed_at,old_label,new_label,old_score,new_score)
+               VALUES (%s,%s,'enrichment_classification',%s,%s,%s,%s,%s)""",
+            (settings.DATASET_LIVE_ID, ip, changed_at, old_label, classification["label"], old_score, score),
+        )
+        ClassificationHistoryRepository.record_transition(
+            conn,
+            event_key=f"enrichment:{ip}:{changed_at.isoformat()}",
+            dataset_id=settings.DATASET_LIVE_ID,
+            ip=ip,
+            source="enrichment",
+            changed_at=changed_at,
+            previous_classification={"label": old_label or "unknown", "score": old_score},
+            current_classification=classification,
+        )
+    alert_result = persist_classification_alert_and_notification(
         conn, dataset_id=settings.DATASET_LIVE_ID, batch_id=f"enrichment:{ip}", ip=ip,
         old_label=old_label, old_score=old_score, classification=classification,
         evidence=_alert_evidence_for_classification(classification, observation),
-        created_at=datetime.now(timezone.utc),
+        created_at=changed_at,
+    )
+    DispositionRepository.apply_automatic_transition(
+        conn,
+        ip=ip,
+        classification_label=classification.get("label"),
+        alert_result=alert_result,
+        now=changed_at,
     )
 
 

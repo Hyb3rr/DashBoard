@@ -152,6 +152,103 @@ def test_path_filter_risk_series_is_intentionally_unavailable():
     ) == []
 
 
+def test_ip_page_limits_narrow_keys_before_loading_wide_profile_rows(monkeypatch):
+    from contextlib import contextmanager
+    from app.db import state_repository
+    from app.db.repositories import StateRepository
+
+    statements = []
+
+    class Result:
+        def __init__(self, row=None, rows=None):
+            self.row, self.rows = row, rows or []
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def execute(self, sql, args=()):
+            statements.append((sql, args))
+            if "COUNT(*) AS n" in sql:
+                return Result(row={"n": 1})
+            if "page_keys AS MATERIALIZED" in sql:
+                return Result(rows=[{
+                    "identity_ip": "203.0.113.9",
+                    "observation_payload": {"requests": 4},
+                    "label": "good",
+                    "classification_score": 0,
+                    "classification_confidence": 80,
+                    "disposition": "new",
+                }])
+            return Result(row={"seq": 7})
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr(state_repository, "transaction", fake_transaction)
+    result = StateRepository().page(page=1, page_size=20, sort="last_seen", direction="desc")
+
+    assert result["total"] == 1
+    assert result["cursor"] == 7
+    assert result["rows"][0]["ip"] == "203.0.113.9"
+    count_sql, count_args = statements[0]
+    page_sql, page_args = statements[1]
+    assert "LATERAL" not in count_sql
+    assert "page_keys AS MATERIALIZED" in page_sql
+    assert page_sql.index("LIMIT %s OFFSET %s") < page_sql.index("SELECT host(k.ip)")
+    assert "p.*" in page_sql[page_sql.index("SELECT host(k.ip)"):]
+    assert page_sql.count("LATERAL") == 1  # final geo projection runs only for selected keys
+    assert page_args == [20, 0]
+    assert count_args == []
+
+
+def test_ip_page_text_search_keeps_geo_join_in_filtered_key_selection(monkeypatch):
+    from contextlib import contextmanager
+    from app.db import state_repository
+    from app.db.repositories import StateRepository
+
+    statements = []
+
+    class Result:
+        def __init__(self, row=None, rows=None):
+            self.row, self.rows = row, rows or []
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def execute(self, sql, args=()):
+            statements.append((sql, args))
+            if "COUNT(*) AS n" in sql:
+                return Result(row={"n": 0})
+            if "page_keys AS MATERIALIZED" in sql:
+                return Result(rows=[])
+            return Result(row={"seq": 0})
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr(state_repository, "transaction", fake_transaction)
+    StateRepository().page(page=1, page_size=10, sort="requests", direction="asc", q="example")
+
+    count_sql = statements[0][0]
+    page_sql = statements[1][0]
+    assert "LATERAL" in count_sql
+    candidate_sql = page_sql.split("page_keys AS MATERIALIZED (", 1)[1].split(")\n                    SELECT host(k.ip)", 1)[0]
+    assert "LATERAL" in candidate_sql
+    assert "gr_country" in candidate_sql
+    assert statements[0][1] == ["%example%"] * 5
+    assert statements[1][1] == ["%example%"] * 5 + [10, 0]
+
+
 @pytest.mark.integration
 def test_health_endpoint_response_structure():
     from fastapi.testclient import TestClient

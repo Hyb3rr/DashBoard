@@ -14,3 +14,17 @@ def test_explicit_geo_conflict_is_preserved_when_country_is_consistent():
         {"session_id": "s1", "country_code": "DE", "geo_conflict": None},
     ])
     assert rows[0]["geo_conflict"] is True
+
+
+def test_grouped_session_preserves_each_request_location_for_city_conservation():
+    rows = aggregate_session_observations([
+        {"session_id": "s1", "country_code": "VN", "city_geo_unit_id": "79"},
+        {"session_id": "s1", "country_code": "VN", "city_geo_unit_id": "79"},
+        {"session_id": "s1", "country_code": "VN", "city_geo_unit_id": None},
+    ])
+
+    assert rows[0]["request_count"] == 3
+    assert rows[0]["_request_geo_attributions"] == [
+        {"country_code": "VN", "city_geo_unit_id": "79", "geo_conflict": False, "request_count": 2},
+        {"country_code": "VN", "city_geo_unit_id": None, "geo_conflict": False, "request_count": 1},
+    ]

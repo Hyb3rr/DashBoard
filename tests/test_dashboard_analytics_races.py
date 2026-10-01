@@ -22,6 +22,7 @@ const slice = (start, end) => {
   assert(a >= 0 && b > a, `missing source section ${start}`);
   return source.slice(a, b).trim();
 };
+const classificationRenderer = slice("let lastClassificationRenderKey=", "function renderAnalytics(");
 const state = slice("const TRAFFIC_WINDOW_KEY=", "function syncTimePickerUi(");
 const applyFilter = slice("function applyTrafficFilter(", "function clearTrafficFilter(");
 const clearFilter = slice("function clearTrafficFilter(", "function setClassificationTrafficFilter(");
@@ -95,6 +96,34 @@ function response(resolve, marker, filter, window = {}, classificationSummary = 
   });
 }
 const parsed = url => new URL(url, 'http://hub.test');
+
+function renderClassification(summary) {
+  const elements = { 'classification-donut': { innerHTML: '', querySelectorAll() { return []; } } };
+  const context = vm.createContext({
+    elements, $: id => elements[id], num: value => String(value),
+    trafficQueryIdentity: () => 'current-query', snapshotTrafficQuery: () => ({}),
+    trafficClassificationSummary: summary, trafficFilterType: '', trafficFilterValue: '',
+  });
+  vm.runInContext(`${classificationRenderer}\nrenderClassificationAnalytics()`, context);
+  return elements['classification-donut'].innerHTML;
+}
+
+// Missing or incomplete classification data must be visible as unavailable, never as zero counts.
+{
+  const missing = renderClassification({ queryIdentity: 'current-query' });
+  assert.match(missing, /Classification data unavailable/);
+  assert.doesNotMatch(missing, /donut-visual|<em>0<\/em>/);
+  const incomplete = renderClassification({ queryIdentity: 'current-query', classification: { critical: 0 } });
+  assert.match(incomplete, /Classification data unavailable/);
+  assert.doesNotMatch(incomplete, /<em>0<\/em>/);
+}
+
+// Real all-zero buckets remain valid and continue to render the normal donut.
+{
+  const valid = renderClassification({ queryIdentity: 'current-query', classification: { critical: 0, medium: 0, low: 0, good: 0, unknown: 0 } });
+  assert.match(valid, /donut-visual/);
+  assert.doesNotMatch(valid, /Classification data unavailable/);
+}
 
 (async () => {
   // A starts first; B completes first. Only B may mutate the analytics UI.

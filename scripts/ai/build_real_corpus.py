@@ -10,19 +10,32 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.core.evidence import UnifiedEvidence
+from app.core.classification_provenance import classification_input_provenance
 from app.db import clickhouse
 from app.db.repositories import AiRepository, StateRepository
 from app.services.case_packets import build_case_packet
 from app.config import settings
 
 
-BUILDER_VERSION = "ai-3b0-v1"
+BUILDER_VERSION = "ai-3b0-v3"
 DEFAULT_LIMIT = 30
+CLASSIFIER_CAPTURE_FILES = ("app/core/intelligence.py", "app/core/telemetry.py")
 
 
 def _canonical(value: Any) -> str:
     """Serialize values deterministically for corpus fingerprinting."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _classifier_capture_fingerprint(project_root: Path) -> str:
+    """Fingerprint current classifier sources without claiming persisted provenance."""
+    digest = hashlib.sha256()
+    for relative_path in CLASSIFIER_CAPTURE_FILES:
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((project_root / relative_path).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _iso(value: Any, fallback: datetime) -> str:
@@ -132,7 +145,83 @@ def _case_packet(ip: str, row: dict[str, Any], evidence: list[dict[str, Any]],
     )
 
 
+def _score_comparison_snapshot(
+    ip: str,
+    row: dict[str, Any],
+    packet: dict[str, Any],
+    captured_at: datetime,
+    classifier_capture_fingerprint: str | None,
+) -> dict[str, Any]:
+    """Capture selected persisted V1 inputs beside, not inside, the AI packet."""
+    observation = row.get("observation_payload") or {}
+    if not isinstance(observation, dict):
+        observation = {}
+    selected_present = "detections_recent" in observation
+    selected_detections = observation.get("detections_recent")
+    selected_valid = selected_present and isinstance(selected_detections, list)
+    network_flags = {
+        name: row.get(name) for name in ("is_tor", "is_proxy", "is_vpn", "is_hosting")
+    }
+    behavior_score = observation.get("recent_behavior_score")
+    organization = row.get("organization")
+    organization_confidence = row.get("organization_confidence")
+    reconstructed_provenance = classification_input_provenance(
+        row, observation, {}, None
+    )
+    return {
+        "case_id": packet.get("case_id"),
+        "ip": ip,
+        "snapshot_at": packet.get("window", {}).get("end"),
+        "captured_at": captured_at.isoformat(),
+        "persisted_v1": {
+            "label": row.get("label"),
+            "score": row.get("classification_score"),
+            "confidence": row.get("classification_confidence"),
+            "input_contract_version": row.get("persisted_input_contract_version"),
+            "input_fingerprint": row.get("persisted_input_fingerprint"),
+            "classifier_version": None,
+            "classifier_version_status": "not_stored_by_classification_persistence",
+        },
+        "input_fingerprint_reconstruction": {
+            "contract_version": reconstructed_provenance["version"],
+            "fingerprint": reconstructed_provenance["fingerprint"],
+            "canonical_inputs": reconstructed_provenance["canonical_inputs"],
+        },
+        "behavior": {
+            "selection_source": "observation_payload.detections_recent",
+            "selected_detections_available": selected_valid,
+            "selected_detections": selected_detections if selected_valid else None,
+            "selected_detections_missing_reason": None if selected_valid else "detections_recent_not_persisted",
+            "score": behavior_score,
+            "requests": observation.get("recent_requests"),
+            "sensitive_probe_requests": observation.get("recent_sensitive_probe_requests"),
+            "evidence": observation.get("recent_behavior_evidence"),
+            "evaluated_at": observation.get("evaluated_at"),
+            "ruleset_hash": observation.get("ruleset_hash"),
+            "ruleset_hash_1h": observation.get("ruleset_hash_1h"),
+            "ruleset_hash_24h": observation.get("ruleset_hash_24h"),
+        },
+        "network_context": network_flags,
+        "trust_reduction": {
+            "organization": organization,
+            "organization_confidence": organization_confidence,
+            "is_hosting": row.get("is_hosting"),
+            "behavior_score": behavior_score,
+        },
+        "scorer_provenance": {
+            "persisted_classifier_version": None,
+            "persisted_classifier_version_status": "not_stored_by_classification_persistence",
+            "capture_classifier_fingerprint": classifier_capture_fingerprint,
+            "capture_fingerprint_files": list(CLASSIFIER_CAPTURE_FILES),
+            "ruleset_hash": observation.get("ruleset_hash"),
+            "ruleset_hash_1h": observation.get("ruleset_hash_1h"),
+            "ruleset_hash_24h": observation.get("ruleset_hash_24h"),
+        },
+    }
+
+
 def _manifest(cases: list[dict[str, Any]], selection: dict[str, list[str]],
+              score_comparison_snapshots: dict[str, dict[str, Any]],
               start: datetime, end: datetime) -> dict[str, Any]:
     """Create the corpus provenance envelope and canonical content hash."""
     corpus_hash = hashlib.sha256(_canonical(cases).encode("utf-8")).hexdigest()
@@ -141,11 +230,13 @@ def _manifest(cases: list[dict[str, Any]], selection: dict[str, list[str]],
             "corpus_created_at": end.isoformat(),
             "source_window": {"start": start.isoformat(), "end": end.isoformat()},
             "corpus_sha256": corpus_hash,
+            "score_comparison_sha256": hashlib.sha256(_canonical(score_comparison_snapshots).encode("utf-8")).hexdigest(),
             "builder_version": BUILDER_VERSION,
             "packet_count": len(cases),
             "selection_reason": selection,
         },
         "cases": cases,
+        "score_comparison_snapshots": score_comparison_snapshots,
     }
 
 
@@ -156,6 +247,7 @@ def build_corpus(
     ai_scores: dict[str, dict[str, Any]] | None = None,
     limit: int = DEFAULT_LIMIT,
     high_volume_threshold: int = 1000,
+    classifier_capture_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Build deterministic packets from one PG snapshot and bounded CH reads."""
     end = snapshot_at.astimezone(timezone.utc)
@@ -163,11 +255,16 @@ def build_corpus(
     candidates = _rank_candidates(rows, ai_scores or {}, end, high_volume_threshold)
     selected = candidates[: max(1, min(int(limit), 30))]
     cases = []
+    score_comparison_snapshots = {}
     selection = {}
     for _, ip, row, evidence, reasons in selected:
-        cases.append(_case_packet(ip, row, evidence, traffic_for_ip, start, end))
+        packet = _case_packet(ip, row, evidence, traffic_for_ip, start, end)
+        cases.append(packet)
+        score_comparison_snapshots[str(packet["case_id"])] = _score_comparison_snapshot(
+            ip, row, packet, end, classifier_capture_fingerprint
+        )
         selection[ip] = reasons
-    return _manifest(cases, selection, start, end)
+    return _manifest(cases, selection, score_comparison_snapshots, start, end)
 
 
 def main() -> int:
@@ -178,10 +275,17 @@ def main() -> int:
     parser.add_argument("--high-volume-threshold", type=int, default=1000)
     args = parser.parse_args()
     snapshot_at = datetime.now(timezone.utc)
-    result = StateRepository().page(1, 5000, "threat_signal_score", "desc")
+    result = StateRepository().page(
+        1, 5000, "threat_signal_score", "desc",
+        include_classification_provenance=True,
+    )
     rows = result["rows"]
     scores = {str(item["ip"]): item for item in AiRepository().scores([str(row.get("identity_ip") or row.get("ip")) for row in rows if row.get("identity_ip") or row.get("ip")])}
-    corpus = build_corpus(rows, clickhouse.traffic_for_ip, snapshot_at, scores, args.limit, args.high_volume_threshold)
+    classifier_fingerprint = _classifier_capture_fingerprint(Path(__file__).resolve().parents[2])
+    corpus = build_corpus(
+        rows, clickhouse.traffic_for_ip, snapshot_at, scores, args.limit,
+        args.high_volume_threshold, classifier_fingerprint,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(corpus, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(corpus["manifest"], indent=2, ensure_ascii=False))

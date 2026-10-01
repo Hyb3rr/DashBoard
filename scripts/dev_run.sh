@@ -25,8 +25,113 @@ CLICKHOUSE_DATA_DIR="${CLICKHOUSE_DATA_DIR:-$ROOT_DIR/data/clickhouse}"
 CLICKHOUSE_BACKUP_TEMP_DIR="${CLICKHOUSE_BACKUP_TEMP_DIR:-$CLICKHOUSE_DATA_DIR/backups}"
 CLICKHOUSE_TCP_PORT="${CLICKHOUSE_TCP_PORT:-9001}"
 CLICKHOUSE_LOCK_DIR="${CLICKHOUSE_LOCK_DIR:-$ROOT_DIR/data/.clickhouse-launch.lock}"
+DEV_RUN_LOCK_DIR="${DEV_RUN_LOCK_DIR:-$ROOT_DIR/data/.dev-run.lock}"
 
 mkdir -p "$ROOT_DIR/data"
+
+DEV_RUN_LOCK_HELD="false"
+CLICKHOUSE_PID=""
+CLICKHOUSE_LOCK_HELD="false"
+LLAMA_SERVER_PID=""
+AI_EXPLAIN_WORKER_PID=""
+AI_TRIGGER_PID=""
+UVICORN_PID=""
+EXIT_REASON="launcher_exit"
+EXIT_STATUS=0
+CLEANUP_RUNNING="false"
+
+release_dev_run_lock() {
+  if [[ "$DEV_RUN_LOCK_HELD" == "true" ]]; then
+    lock_pid=""
+    if [[ -f "$DEV_RUN_LOCK_DIR/pid" ]]; then
+      lock_pid="$(<"$DEV_RUN_LOCK_DIR/pid")"
+    fi
+    if [[ "$lock_pid" == "$$" ]]; then
+      rm -f "$DEV_RUN_LOCK_DIR/pid"
+      rmdir "$DEV_RUN_LOCK_DIR" 2>/dev/null || true
+    else
+      echo "Launcher lock owner changed; leaving $DEV_RUN_LOCK_DIR untouched (observed PID: ${lock_pid:-unknown})" >&2
+    fi
+    DEV_RUN_LOCK_HELD="false"
+  fi
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+  if [[ "$CLEANUP_RUNNING" == "true" ]]; then
+    return
+  fi
+  CLEANUP_RUNNING="true"
+  echo "Launcher cleanup: reason=$EXIT_REASON status=$EXIT_STATUS launcher_pid=$$ clickhouse_pid=${CLICKHOUSE_PID:-reused-or-none}"
+  if [[ -n "$CLICKHOUSE_PID" ]] && kill -0 "$CLICKHOUSE_PID" 2>/dev/null; then
+    kill "$CLICKHOUSE_PID" 2>/dev/null || true
+    wait "$CLICKHOUSE_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$AI_EXPLAIN_WORKER_PID" ]] && kill -0 "$AI_EXPLAIN_WORKER_PID" 2>/dev/null; then
+    kill "$AI_EXPLAIN_WORKER_PID" 2>/dev/null || true
+    wait "$AI_EXPLAIN_WORKER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$AI_TRIGGER_PID" ]] && kill -0 "$AI_TRIGGER_PID" 2>/dev/null; then
+    kill "$AI_TRIGGER_PID" 2>/dev/null || true
+    wait "$AI_TRIGGER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$LLAMA_SERVER_PID" ]] && kill -0 "$LLAMA_SERVER_PID" 2>/dev/null; then
+    kill "$LLAMA_SERVER_PID" 2>/dev/null || true
+    wait "$LLAMA_SERVER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$UVICORN_PID" ]] && kill -0 "$UVICORN_PID" 2>/dev/null; then
+    kill "$UVICORN_PID" 2>/dev/null || true
+    wait "$UVICORN_PID" 2>/dev/null || true
+  fi
+  if [[ "$CLICKHOUSE_LOCK_HELD" == "true" ]]; then
+    rm -f "$CLICKHOUSE_LOCK_DIR/pid"
+    rmdir "$CLICKHOUSE_LOCK_DIR" 2>/dev/null || true
+  fi
+  release_dev_run_lock
+  trap - EXIT INT TERM
+  exit "$EXIT_STATUS"
+}
+
+handle_signal() {
+  signal_name="$1"
+  EXIT_REASON="signal_$signal_name"
+  case "$signal_name" in
+    INT) EXIT_STATUS=130 ;;
+    TERM) EXIT_STATUS=143 ;;
+  esac
+  cleanup
+}
+
+if ! mkdir "$DEV_RUN_LOCK_DIR" 2>/dev/null; then
+  existing_pid=""
+  if [[ -f "$DEV_RUN_LOCK_DIR/pid" ]]; then
+    existing_pid="$(<"$DEV_RUN_LOCK_DIR/pid")"
+  fi
+  if [[ "$existing_pid" =~ ^[0-9]+$ ]] && kill -0 "$existing_pid" 2>/dev/null; then
+    echo "Another dev_run launcher owns local app services (PID $existing_pid); refusing to start a second instance" >&2
+    exit 1
+  fi
+  if [[ -z "$existing_pid" || ! "$existing_pid" =~ ^[0-9]+$ ]]; then
+    echo "Dev launcher lock exists without a valid owner PID; refusing to start: $DEV_RUN_LOCK_DIR" >&2
+    exit 1
+  fi
+  echo "Removing stale dev launcher lock for stopped PID $existing_pid"
+  rm -f "$DEV_RUN_LOCK_DIR/pid"
+  rmdir "$DEV_RUN_LOCK_DIR" 2>/dev/null || {
+    echo "Stale dev launcher lock could not be removed: $DEV_RUN_LOCK_DIR" >&2
+    exit 1
+  }
+  mkdir "$DEV_RUN_LOCK_DIR" || {
+    echo "Another dev_run launcher acquired local app services first" >&2
+    exit 1
+  }
+fi
+printf '%s\n' "$$" >"$DEV_RUN_LOCK_DIR/pid"
+DEV_RUN_LOCK_HELD="true"
+trap cleanup EXIT
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+echo "Launcher owns local app services: pid=$$ lock=$DEV_RUN_LOCK_DIR"
 
 if ! pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
   if [[ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]]; then
@@ -72,11 +177,8 @@ clickhouse_healthy() {
   clickhouse_http_healthy && clickhouse_tcp_ready
 }
 
-CLICKHOUSE_PID=""
-CLICKHOUSE_LOCK_HELD="false"
-
 if clickhouse_healthy; then
-  echo "Reusing healthy ClickHouse on HTTP $CLICKHOUSE_HTTP_PORT / TCP $CLICKHOUSE_TCP_PORT"
+  echo "Reusing healthy ClickHouse on HTTP $CLICKHOUSE_HTTP_PORT / TCP $CLICKHOUSE_TCP_PORT; launcher_pid=$$ clickhouse_owner=external"
 else
   # Only one launcher may perform a ClickHouse startup. Re-check after taking
   # the lock because another launcher may have completed startup meanwhile.
@@ -108,7 +210,7 @@ else
   CLICKHOUSE_LOCK_HELD="true"
 
   if clickhouse_healthy; then
-    echo "ClickHouse became healthy while startup lock was acquired; reusing it"
+    echo "ClickHouse became healthy while startup lock was acquired; launcher_pid=$$ clickhouse_owner=external"
     rm -f "$CLICKHOUSE_LOCK_DIR/pid"
     rmdir "$CLICKHOUSE_LOCK_DIR"
     CLICKHOUSE_LOCK_HELD="false"
@@ -144,11 +246,6 @@ fi
 # ready and before starting the app. Keeping DDL out of FastAPI's live
 # lifespan avoids migration lock work on the realtime request path.
 .venv/bin/python scripts/ops/init_storage.py
-
-LLAMA_SERVER_PID=""
-AI_EXPLAIN_WORKER_PID=""
-AI_TRIGGER_PID=""
-UVICORN_PID=""
 
 start_local_ai() {
   if [[ "${AI_EXPLAIN_WORKER_ENABLED:-true}" != "true" ]]; then
@@ -199,34 +296,13 @@ start_local_ai() {
   LLAMA_SERVER_PID=""
 }
 
-cleanup() {
-  if [[ -n "$CLICKHOUSE_PID" ]] && kill -0 "$CLICKHOUSE_PID" 2>/dev/null; then
-    kill "$CLICKHOUSE_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$AI_EXPLAIN_WORKER_PID" ]] && kill -0 "$AI_EXPLAIN_WORKER_PID" 2>/dev/null; then
-    kill "$AI_EXPLAIN_WORKER_PID" 2>/dev/null || true
-    wait "$AI_EXPLAIN_WORKER_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$AI_TRIGGER_PID" ]] && kill -0 "$AI_TRIGGER_PID" 2>/dev/null; then
-    kill "$AI_TRIGGER_PID" 2>/dev/null || true
-    wait "$AI_TRIGGER_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$LLAMA_SERVER_PID" ]] && kill -0 "$LLAMA_SERVER_PID" 2>/dev/null; then
-    kill "$LLAMA_SERVER_PID" 2>/dev/null || true
-    wait "$LLAMA_SERVER_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$UVICORN_PID" ]] && kill -0 "$UVICORN_PID" 2>/dev/null; then
-    kill "$UVICORN_PID" 2>/dev/null || true
-    wait "$UVICORN_PID" 2>/dev/null || true
-  fi
-  if [[ "$CLICKHOUSE_LOCK_HELD" == "true" ]]; then
-    rm -f "$CLICKHOUSE_LOCK_DIR/pid"
-    rmdir "$CLICKHOUSE_LOCK_DIR" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
 start_local_ai
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 &
 UVICORN_PID=$!
-wait "$UVICORN_PID"
+echo "Dashboard process started: launcher_pid=$$ uvicorn_pid=$UVICORN_PID clickhouse_pid=${CLICKHOUSE_PID:-reused-or-none}"
+EXIT_REASON="uvicorn_exit"
+if wait "$UVICORN_PID"; then
+  EXIT_STATUS=0
+else
+  EXIT_STATUS=$?
+fi

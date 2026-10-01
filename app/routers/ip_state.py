@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import ipaddress
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
-from ..core.enrichment import abuse_reputation_state, intel_tags_for_abuse
+from ..core.enrichment import _address_scope, abuse_reputation_state, intel_tags_for_abuse
 from ..core.intelligence import classify_ip
 from ..core.calibration import csv_text
 from ..db.repositories import AiRepository, StateRepository
@@ -221,10 +222,27 @@ def _pg_item(row: dict, ai_profile: dict | None = None) -> dict:
     # AI is explanatory/read-only here. Rules and persisted classification state
     # remain the source of classification decisions.
     classification = _classification_payload(row, profile, observation)
+    scoring_mode = observation.get("classification_scoring_mode")
+    effective_behavior = observation.get("classification_behavior_score")
+    if scoring_mode == "family_max" and isinstance(effective_behavior, int) and not isinstance(effective_behavior, bool):
+        breakdown = classification.get("score_breakdown")
+        if isinstance(breakdown, dict) and "behavior_a" in breakdown:
+            classification["score_breakdown"] = {**breakdown, "behavior_a": effective_behavior}
+        explanations = classification.get("score_explanations")
+        if isinstance(explanations, dict):
+            explanations = dict(explanations)
+            explanations["A"] = (
+                f"A = {effective_behavior}: family-max of the selected recent rule detections."
+            )
+            classification["score_explanations"] = explanations
+    api_observation = {
+        key: value for key, value in observation.items()
+        if key not in {"classification_scoring_mode", "classification_behavior_score"}
+    }
     item = {
         **profile,
         "ip": profile["ip"],
-        "observation": observation,
+        "observation": api_observation,
         "classification": classification,
         "disposition": _disposition_payload(row, include_history=True),
         "ai_profile": ai_profile or {},
@@ -307,8 +325,12 @@ def _pg_compact_item(row: dict, ai_profile: dict | None = None) -> dict:
     reputation = abuse_reputation_state(row.get("threat_indicators"), provider_status)
     source_location = profile.get("network_location")
     location = source_location if isinstance(source_location, dict) else None
+    ip_text = str(row.get("ip") or "")
+    address = ipaddress.ip_address(ip_text)
     item = {
-        "ip": str(row.get("ip") or ""),
+        "ip": ip_text,
+        "address_scope": _address_scope(address),
+        "is_non_public": not address.is_global,
         "country": profile.get("country"), "country_code": profile.get("country_code"),
         "city": profile.get("city"), "region": profile.get("region"),
         "network_location": _compact_network_location(location),

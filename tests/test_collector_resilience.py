@@ -146,7 +146,7 @@ async def test_lease_loss_resets_memory_to_durable_offset(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_rejection_restarts_storage_worker_for_next_batch(monkeypatch):
+async def test_checkpoint_rejection_discards_queued_batches_and_recovers(monkeypatch):
     from app.db.repositories import CheckpointCommitRejected
 
     collector = WebSocketCollector(_config())
@@ -157,22 +157,44 @@ async def test_checkpoint_rejection_restarts_storage_worker_for_next_batch(monke
         calls += 1
         if calls == 1:
             raise CheckpointCommitRejected("source", 10)
-        return 10, 1, set(), []
+        return 20, 1, set(), []
 
-    async def mark_lease_lost(_error):
-        collector.session.lease_lost.set()
+    async def after_commit(*_args):
+        return None
 
     monkeypatch.setattr(collector, "_commit_batch", commit)
-    monkeypatch.setattr(collector.session, "signal_lease_loss", mark_lease_lost)
+    monkeypatch.setattr(collector, "_after_commit", after_commit)
+    monkeypatch.setattr(collector.session, "load_offset", lambda: 10)
+    collector.storage.pending = [("line", "stamp")]
+    collector.pending_lines = 1
+    collector.storage.stream_offset = 10
+    collector.storage_worker.queue.put_nowait((["first"], 10, 0, "stamp"))
+    collector.storage_worker.queue.put_nowait((["queued"], 20, 10, "stamp"))
     collector.storage_worker.start()
-    await collector.storage_worker.queue.put((["first"], 10, 0, "stamp"))
-    await asyncio.sleep(0)
-    await asyncio.wait_for(collector.storage_worker.queue.join(), timeout=1)
-    assert collector.storage_worker.task.done()
 
-    await batching.enqueue_storage(collector, ["second"], 10, 0, "stamp")
+    # The offset handler queues another batch and waits for every accepted
+    # batch. Lease rejection must drain the later queued items to release it.
+    result = await asyncio.wait_for(
+        batching._handle_offset(collector, {"value": 15}, 10, lambda: "stamp"),
+        timeout=1,
+    )
+
+    assert result == 0
+    assert collector.storage_worker.task.done()
+    assert collector.storage_worker.queue.empty()
+    assert collector.storage_worker.queue._unfinished_tasks == 0
+    assert collector.session.lease_lost.is_set()
+    assert calls == 1
+
+    collector.session.lease_lost.clear()
+    await collector.session.reset_after_lease_loss()
+    assert collector.storage.stream_offset == 10
+    assert collector.last_offset == 10
+
+    await batching.enqueue_storage(collector, ["second"], 20, 10, "stamp")
     await asyncio.wait_for(collector.storage_worker.queue.join(), timeout=1)
     assert calls == 2
+    assert collector.last_offset == 20
     assert not collector.storage_worker.task.done()
     collector.storage_worker.task.cancel()
     await asyncio.gather(collector.storage_worker.task, return_exceptions=True)

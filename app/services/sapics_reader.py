@@ -137,6 +137,19 @@ def _valid_country(value) -> bool:
     return _known(value) and len(str(value).strip()) == 2 and str(value).strip().isalpha()
 
 
+def _vn_parent_key(value) -> str | None:
+    """Normalize a provider's Vietnam province/region label for comparison."""
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold().replace("đ", "d")
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"\([^)]*\)", " ", text)
+    words = [word for word in re.sub(r"[^a-z0-9]+", " ", text).split()
+             if word not in {"city", "province", "municipality", "hcmc", "hcm"}]
+    return " ".join(words) or None
+
+
 def _country_consensus(candidates: dict[str, str | None]) -> dict:
     """Rank country claims by agreement and source priority, preserving conflict metadata."""
     valid = {name: value for name, value in candidates.items() if _valid_country(value)}
@@ -175,6 +188,27 @@ def _city_consensus(candidates: dict[str, dict | None]) -> dict:
     distance = _distance(candidates["geolite2_city"], candidates["dbip_city"])
     coordinate_conflict = bool(distance is not None and distance > 25)
     names_conflict = len({str(value["city"]).strip().lower() for value in known.values()}) > 1
+    parent_keys = {
+        _vn_parent_key(value.get("state"))
+        for value in known.values()
+        if str(value.get("country_code") or "").upper() == "VN" and value.get("state")
+    }
+    same_vietnam_parent = (
+        len(known) > 1
+        and len(parent_keys) == 1
+        and None not in parent_keys
+        and all(str(value.get("country_code") or "").upper() == "VN" for value in known.values())
+    )
+    # GeoLite may report a province/city while DB-IP reports a district.
+    # If both agree on the parent region and coordinates, normalize the city
+    # label used downstream while retaining the provider's raw value.
+    if same_vietnam_parent and not coordinate_conflict and city:
+        for value in known.values():
+            if str(value.get("city") or "").strip().casefold() != str(city.get("city") or "").strip().casefold():
+                value["raw_city"] = value.get("city")
+                value["city"] = city.get("city")
+                value["canonicalized_to_shared_parent"] = True
+    names_conflict = names_conflict and not same_vietnam_parent
     conflict = coordinate_conflict or names_conflict
     severity = "high" if distance is not None and distance > 100 else "medium" if conflict else "none"
     selected = city if city and not conflict else {}
@@ -189,6 +223,7 @@ def _city_consensus(candidates: dict[str, dict | None]) -> dict:
         "coordinate_granularity": selected.get("coordinate_granularity", "unknown"),
         "conflict": conflict,
         "coordinate_conflict": coordinate_conflict,
+        "same_vietnam_parent": same_vietnam_parent,
         "status": status,
         "conflict_severity": severity,
         "distance_km": round(distance, 1) if distance else None,

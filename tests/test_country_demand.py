@@ -1,4 +1,4 @@
-from app.core.country_demand import CountryDemandConfig, aggregate_country_demand, build_country_opportunities, exclusion_state
+from app.core.country_demand import CountryDemandConfig, aggregate_country_demand, aggregate_session_observations, build_country_opportunities, exclusion_state
 
 
 def event(country="TH", session="s1", visitor="v1", **extra):
@@ -116,3 +116,167 @@ def test_opportunity_rewards_high_confidence_demand():
     assert result["opportunity_score"] == 75.9
     assert result["opportunity_status"] == "PRIORITIZE"
 
+
+def test_vietnam_qualified_http_requests_conserve_across_provinces_and_unmapped():
+    observations = [
+        {"country_code": "VN", "session_id": "s1", "city_geo_unit_id": "79"},
+        {"country_code": "VN", "session_id": "s1", "city_geo_unit_id": "79"},
+        {"country_code": "VN", "session_id": "s2", "city_geo_unit_id": None},
+        {"country_code": "VN", "session_id": "s3", "city_geo_unit_id": "01", "geo_conflict": True},
+    ]
+
+    row = aggregate_country_demand(aggregate_session_observations(observations), []) ["countries"][0]
+
+    assert row["qualified_requests"] == 3
+    assert row["qualified_http_requests"] == 4
+    assert row["city_traffic"] == {
+        "provinces": [{"geo_unit_id": "79", "qualified_http_requests": 2}],
+        "unmapped_qualified_http_requests": 2,
+        "total_qualified_http_requests": 4,
+        "conservation": True,
+    }
+
+
+def test_country_opportunities_expose_selected_period_http_and_city_traffic():
+    snapshots = {
+        "7d": {"countries": [{"country_code": "VN", "qualified_requests": 2,
+                               "qualified_http_requests": 9,
+                               "city_traffic": {"total_qualified_http_requests": 9}}]},
+        "30d": {"countries": [{"country_code": "VN", "qualified_requests": 5,
+                                "qualified_http_requests": 22,
+                                "city_traffic": {"total_qualified_http_requests": 22}}]},
+        "90d": None,
+    }
+
+    row = build_country_opportunities(snapshots, {}, period="7d")["countries"][0]
+
+    assert row["traffic_7d"] == 2
+    assert row["qualified_http_requests"] == 9
+    assert row["city_traffic"]["total_qualified_http_requests"] == 9
+
+
+def test_vietnam_city_attribution_requires_consistent_resolved_location():
+    from app.services.country_demand import _normalize_observation
+
+    profile = {
+        "country_code": "VN", "city": "Ho Chi Minh City", "latitude": 10.8, "longitude": 106.6,
+        "location_disputed": False,
+        "network_location": {"city_status": "probable", "city_conflict": False,
+                              "coordinate_conflict": False, "disputed": False},
+    }
+
+    normalized = _normalize_observation({"src_ip": "203.0.113.1", "cf_country": "VN"}, {"203.0.113.1": profile})
+    no_coordinates = _normalize_observation(
+        {"src_ip": "203.0.113.1", "cf_country": "VN"},
+        {"203.0.113.1": {**profile, "latitude": None}},
+    )
+    country_conflict = _normalize_observation(
+        {"src_ip": "203.0.113.1", "cf_country": "US"}, {"203.0.113.1": profile},
+    )
+
+    assert normalized["city_geo_unit_id"] == "79"
+    assert no_coordinates["city_geo_unit_id"] is None
+    assert country_conflict["city_geo_unit_id"] is None
+
+
+def test_vietnam_dbip_district_maps_through_agreeing_province_parent():
+    from app.services.country_demand import _normalize_observation
+
+    ip = "203.0.113.2"
+    profile = {
+        "country_code": "VN", "city": None, "latitude": None, "longitude": None,
+        "location_disputed": True,
+        "network_location": {
+            "geo": {"city": {
+                "status": "disputed", "conflict": True, "coordinate_conflict": True,
+                "candidates": {
+                    "dbip_city": {"city": "Quan Binh Thanh", "state": "Ho Chi Minh City (HCMC)",
+                                  "country_code": "VN", "valid": True},
+                    "geolite2_city": {"city": "Ho Chi Minh City", "state": "Ho Chi Minh",
+                                       "country_code": "VN", "valid": True},
+                },
+            }},
+        },
+    }
+
+    normalized = _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: profile})
+
+    assert normalized["city_geo_unit_id"] == "79"
+
+
+def test_unseen_future_city_label_maps_by_recognized_vietnam_parent():
+    from app.services.country_demand import _normalize_observation
+
+    ip = "203.0.113.6"
+    profile = {
+        "country_code": "VN", "city": None,
+        "network_location": {"geo": {"city": {"candidates": {
+            "dbip_city": {"city": "Unlisted District Name", "state": "Da Nang City",
+                          "country_code": "VN", "valid": True},
+        }}}},
+    }
+
+    normalized = _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: profile})
+
+    assert normalized["city_geo_unit_id"] == "48"
+
+
+def test_vietnam_dbip_district_stays_unmapped_when_parent_missing_or_disagrees():
+    from app.services.country_demand import _normalize_observation
+
+    ip = "203.0.113.3"
+    base = {
+        "country_code": "VN", "city": None, "latitude": None, "longitude": None,
+        "network_location": {"geo": {"city": {"candidates": {
+            "dbip_city": {"city": "Quan Binh Thanh", "state": "Ho Chi Minh City (HCMC)",
+                          "country_code": "VN", "valid": True},
+        }}}},
+    }
+    missing_parent = {**base, "network_location": {"geo": {"city": {"candidates": {
+        "dbip_city": {"city": "Quan Binh Thanh", "country_code": "VN", "valid": True},
+    }}}}}
+    conflicting_parent = {**base, "network_location": {"geo": {"city": {"candidates": {
+        "dbip_city": {"city": "Quan Binh Thanh", "state": "Ho Chi Minh City (HCMC)",
+                      "country_code": "VN", "valid": True},
+        "geolite2_city": {"city": "Hanoi", "state": "Hanoi", "country_code": "VN", "valid": True},
+    }}}}}
+
+    assert _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: missing_parent})["city_geo_unit_id"] is None
+    assert _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: conflicting_parent})["city_geo_unit_id"] is None
+
+
+def test_vietnam_dbip_district_stays_unmapped_when_geoip_country_candidates_conflict():
+    from app.services.country_demand import _normalize_observation
+
+    ip = "203.0.113.4"
+    profile = {
+        "country_code": "VN", "city": None,
+        "network_location": {"geo": {"city": {"candidates": {
+            "dbip_city": {"city": "Quan Binh Thanh", "state": "Ho Chi Minh City (HCMC)",
+                          "country_code": "VN", "valid": True},
+            "geolite2_city": {"city": "Somewhere", "state": "California",
+                               "country_code": "US", "valid": True},
+        }}}},
+    }
+
+    normalized = _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: profile})
+
+    assert normalized["city_geo_unit_id"] is None
+
+
+def test_vietnam_dbip_district_stays_unmapped_when_candidate_country_is_unknown():
+    from app.services.country_demand import _normalize_observation
+
+    ip = "203.0.113.5"
+    profile = {
+        "country_code": "VN", "city": None,
+        "network_location": {"geo": {"city": {"candidates": {
+            "dbip_city": {"city": "Quan Binh Thanh", "state": "Ho Chi Minh City (HCMC)",
+                          "country_code": "VN", "valid": True},
+            "geolite2_city": {"city": "Unresolved", "state": "Hanoi", "valid": True},
+        }}}},
+    }
+
+    normalized = _normalize_observation({"src_ip": ip, "cf_country": "VN"}, {ip: profile})
+
+    assert normalized["city_geo_unit_id"] is None

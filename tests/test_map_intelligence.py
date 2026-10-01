@@ -1,7 +1,12 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.services.map_intelligence import MapIntelligenceService, _canonical_vn_traffic, _utc_iso
+from app.services.map_intelligence import (
+    MapIntelligenceService,
+    _canonical_market_geo_unit,
+    _canonical_vn_traffic,
+    _utc_iso,
+)
 
 
 def test_vietnam_traffic_attaches_to_canonical_province_and_preserves_unmapped():
@@ -35,6 +40,31 @@ def test_vietnam_country_contract_exposes_traffic_conservation():
     assert result["cities"][0]["city_id"] == "01"
     assert result["coverage"]["unmapped_traffic"] == {"observed_ips": 1, "requests": 2}
     assert result["coverage"]["traffic_conservation"] is True
+
+
+def test_vietnam_locality_aliases_and_former_province_names_share_canonical_unit():
+    """Normalize accents, common labels and historical province names."""
+    assert _canonical_market_geo_unit("VN", "TP. Hồ Chí Minh City") == "79"
+    assert _canonical_market_geo_unit("VN", "Binh Duong") == "79"
+    assert _canonical_market_geo_unit("VN", "Da Nang City") == "48"
+    assert _canonical_market_geo_unit("VN", "Thừa Thiên - Huế") == "46"
+    assert _canonical_market_geo_unit("VN", "Ho Chi Minh City (HCMC)") == "79"
+    assert _canonical_market_geo_unit("VN", "Vinhomes Times City") is None
+    assert _canonical_market_geo_unit("US", "Hanoi") is None
+
+
+def test_vietnam_traffic_merges_old_and_new_names_into_one_province_row():
+    """Aggregate old and current GeoIP labels under the canonical province."""
+    rows, unmapped = _canonical_vn_traffic({"cities": [
+        {"city_name": "Bình Dương", "observed_ips": 2, "requests": 8},
+        {"city_name": "Ho Chi Minh City", "observed_ips": 1, "requests": 5},
+    ]})
+    assert len(rows) == 1
+    assert rows[0]["city_key"] == "79"
+    assert rows[0]["city_name"] == "Hồ Chí Minh"
+    assert rows[0]["observed_ips"] == 3
+    assert rows[0]["requests"] == 13
+    assert unmapped == {"observed_ips": 0, "requests": 0}
 
 
 def test_world_contract_merges_opportunity_and_existing_threat_state():

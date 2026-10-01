@@ -54,37 +54,65 @@ class StateRepository:
 
     def page(self, page: int, page_size: int, sort: str, direction: str, q: str | None = None,
              privacy: str | None = None, classification: str | None = None, disposition: str | None = None,
-             intel_tag: str | None = None) -> dict[str, Any]:
+             intel_tag: str | None = None, include_classification_provenance: bool = False) -> dict[str, Any]:
         """Return a filtered and sorted page of compact IP inventory rows."""
         where, args = self._where(q, privacy, classification, disposition, intel_tag)
         order = self._sorts.get(sort, self._sorts["threat_signal_score"])
         order_direction = "ASC" if direction.lower() == "asc" else "DESC"
+        geo_join = """LEFT JOIN LATERAL (
+                           SELECT country AS gr_country, country_code AS gr_country_code,
+                                  city AS gr_city, asn AS gr_asn, organization AS gr_organization,
+                                  network_type AS gr_network_type, confidence AS gr_confidence,
+                                  disputed AS gr_disputed, location_scope AS gr_location_scope
+                             FROM geo_resolutions WHERE ip=i.ip LIMIT 1
+                       ) gr ON TRUE"""
+        # Geo resolution is needed in the candidate set only for text search.
+        # The final projection still joins it for the selected page rows.
+        candidate_geo_join = geo_join if q else ""
+        provenance_projection = (
+            "cs.input_contract_version AS persisted_input_contract_version, "
+            "cs.input_fingerprint AS persisted_input_fingerprint,"
+            if include_classification_provenance else ""
+        )
         with transaction() as conn:
             total = conn.execute(
                 f"""WITH identities AS (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles)
                     SELECT COUNT(*) AS n FROM identities i
                     LEFT JOIN ip_observations_state o ON o.ip=i.ip
                     LEFT JOIN ip_profiles p ON p.ip=i.ip
-                    LEFT JOIN LATERAL (SELECT country AS gr_country, country_code AS gr_country_code, city AS gr_city, asn AS gr_asn, organization AS gr_organization, network_type AS gr_network_type, confidence AS gr_confidence, disputed AS gr_disputed, location_scope AS gr_location_scope FROM geo_resolutions WHERE ip=i.ip LIMIT 1) gr ON TRUE
+                    {candidate_geo_join}
                     LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
                     LEFT JOIN ip_dispositions d ON d.ip=i.ip WHERE {where}""", args,
             ).fetchone()["n"]
             rows = conn.execute(
-                f"""WITH identities AS (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles)
-                    SELECT host(i.ip) AS identity_ip, p.*, o.payload AS observation_payload,
+                f"""WITH identities AS (SELECT ip FROM ip_observations_state UNION SELECT ip FROM ip_profiles),
+                    page_keys AS MATERIALIZED (
+                        SELECT i.ip, {order} AS sort_value,
+                               COALESCE(NULLIF(o.payload->>'requests','')::bigint,0) AS request_order
+                          FROM identities i
+                          LEFT JOIN ip_observations_state o ON o.ip=i.ip
+                          LEFT JOIN ip_profiles p ON p.ip=i.ip
+                          {candidate_geo_join}
+                          LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
+                          LEFT JOIN ip_dispositions d ON d.ip=i.ip
+                         WHERE {where}
+                         ORDER BY sort_value {order_direction}, request_order DESC, i.ip ASC
+                         LIMIT %s OFFSET %s
+                    )
+                    SELECT host(k.ip) AS identity_ip, p.*, o.payload AS observation_payload,
                            gr.gr_country, gr.gr_country_code, gr.gr_city, gr.gr_asn, gr.gr_organization,
                            gr.gr_network_type, gr.gr_confidence, gr.gr_disputed, gr.gr_location_scope,
                            cs.label, cs.score AS classification_score, cs.confidence AS classification_confidence,
+                           {provenance_projection}
                            d.state AS disposition
-                      FROM identities i
-                      LEFT JOIN ip_observations_state o ON o.ip=i.ip
-                      LEFT JOIN ip_profiles p ON p.ip=i.ip
-                      LEFT JOIN LATERAL (SELECT country AS gr_country, country_code AS gr_country_code, city AS gr_city, asn AS gr_asn, organization AS gr_organization, network_type AS gr_network_type, confidence AS gr_confidence, disputed AS gr_disputed, location_scope AS gr_location_scope FROM geo_resolutions WHERE ip=i.ip LIMIT 1) gr ON TRUE
-                      LEFT JOIN ip_classification_state cs ON cs.ip=i.ip
-                      LEFT JOIN ip_dispositions d ON d.ip=i.ip
-                     WHERE {where}
-                     ORDER BY {order} {order_direction}, COALESCE(NULLIF(o.payload->>'requests','')::bigint,0) DESC, i.ip ASC
-                     LIMIT %s OFFSET %s""", [*args, page_size, (page - 1) * page_size],
+                      FROM page_keys k
+                      LEFT JOIN ip_observations_state o ON o.ip=k.ip
+                      LEFT JOIN ip_profiles p ON p.ip=k.ip
+                      LEFT JOIN LATERAL (SELECT country AS gr_country, country_code AS gr_country_code, city AS gr_city, asn AS gr_asn, organization AS gr_organization, network_type AS gr_network_type, confidence AS gr_confidence, disputed AS gr_disputed, location_scope AS gr_location_scope FROM geo_resolutions WHERE ip=k.ip LIMIT 1) gr ON TRUE
+                      LEFT JOIN ip_classification_state cs ON cs.ip=k.ip
+                      LEFT JOIN ip_dispositions d ON d.ip=k.ip
+                     ORDER BY k.sort_value {order_direction}, k.request_order DESC, k.ip ASC""",
+                [*args, page_size, (page - 1) * page_size],
             ).fetchall()
             cursor = conn.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM ip_change_log").fetchone()["seq"]
         normalized = []

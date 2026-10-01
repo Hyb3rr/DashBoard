@@ -2,6 +2,7 @@ import asyncio
 import csv
 from io import StringIO
 import json
+import ipaddress
 import pytest
 from datetime import datetime, timedelta, timezone
 
@@ -286,6 +287,13 @@ def test_lookup_non_public_address():
     assert result["network_type"] == "private/non-public"
     assert result["anonymization"]["confidence"] == 0
     assert result["provider_errors"] == []
+
+
+def test_address_scope_marks_multicast_non_public():
+    from app.core.enrichment import _address_scope
+
+    assert _address_scope(ipaddress.ip_address("224.0.0.1")) == "multicast"
+    assert _address_scope(ipaddress.ip_address("ff02::1")) == "multicast"
 
 
 def test_lookup_uses_maxmind_when_available(monkeypatch):
@@ -676,7 +684,7 @@ def test_region_demand_signal_aggregates_profiles_and_qualified_good_traffic(mon
     """Preserve country context and good-traffic qualification in the read model."""
     from contextlib import contextmanager
 
-    from app.db import region_repository, repositories
+    from app.db import region_repository
 
     rows = [
         {
@@ -691,13 +699,29 @@ def test_region_demand_signal_aggregates_profiles_and_qualified_good_traffic(mon
         },
     ]
 
+    region_rows = [{
+        "country_code": "SG",
+        "country_name": "Singapore",
+        "economic_indicators": {},
+        "cultural_context": [],
+        "conflict_indicators": [],
+        "sources": [],
+        "observed_ip_count": 2,
+    }]
+    executed = []
+
     class Result:
+        def __init__(self, result_rows):
+            self.result_rows = result_rows
+
         def fetchall(self):
-            return rows
+            return self.result_rows
 
     class Connection:
-        def execute(self, *_args):
-            return Result()
+        def execute(self, query, args=()):
+            executed.append((query, args))
+            result_rows = region_rows if "FROM region_profiles r" in query else rows
+            return Result(result_rows)
 
     @contextmanager
     def fake_transaction():
@@ -705,18 +729,17 @@ def test_region_demand_signal_aggregates_profiles_and_qualified_good_traffic(mon
 
     monkeypatch.setattr(region_repository, "transaction", fake_transaction)
     monkeypatch.setattr(
-        repositories.RegionRepository,
+        region_repository.RegionRepository,
         "get",
-        lambda self, code: {
-            "country_code": code, "country_name": "Singapore",
-            "market_score": 88, "market_level": "high",
-            "market_components": {"product_demand": 72},
-        },
+        lambda *_args, **_kwargs: pytest.fail("demand_signal must batch country context"),
     )
 
-    result = repositories.RegionRepository().demand_signal()
+    result = region_repository.RegionRepository().demand_signal()
 
     assert len(result) == 1
+    assert len(executed) == 2
+    assert "GROUP BY country_code" in executed[1][0]
+    assert executed[1][1] == (["SG"], ["SG"])
     assert result[0]["country_name"] == "Singapore"
     assert result[0]["observed_ip_count"] == 2
     assert result[0]["observed_requests"] == 30
@@ -724,6 +747,47 @@ def test_region_demand_signal_aggregates_profiles_and_qualified_good_traffic(mon
     assert result[0]["good_requests"] == 20
     assert result[0]["critical_ip_count"] == 1
     assert result[0]["signal_level"] == "low"
+
+
+def test_region_list_batches_observed_ip_counts(monkeypatch):
+    """Load region rows and their IP counts in one grouped query."""
+    from contextlib import contextmanager
+
+    from app.db import region_repository
+
+    executed = []
+    rows = [{
+        "country_code": "US",
+        "country_name": "United States",
+        "economic_indicators": {},
+        "cultural_context": [],
+        "conflict_indicators": [],
+        "sources": [],
+        "observed_ip_count": 853,
+    }]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def execute(self, query, args):
+            executed.append((query, args))
+            return Result()
+
+    @contextmanager
+    def fake_transaction():
+        yield Connection()
+
+    monkeypatch.setattr(region_repository, "transaction", fake_transaction)
+
+    result = region_repository.RegionRepository().list(limit=50)
+
+    assert len(executed) == 1
+    assert "GROUP BY country_code" in executed[0][0]
+    assert "SELECT COUNT(*) FROM ip_profiles" not in executed[0][0]
+    assert executed[0][1] == (50,)
+    assert result[0]["observed_ip_count"] == 853
 
 
 @pytest.mark.integration

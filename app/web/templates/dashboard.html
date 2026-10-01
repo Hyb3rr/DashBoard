@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sentinel Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260930-abuse-badge-layout">
   <link rel="stylesheet" href="/static/sidebar.css">
   <link rel="stylesheet" href="/static/map.css">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
@@ -154,6 +154,7 @@
               </select>
             </div>
           </div>
+          <p class="identity-scope-note">Scope tags describe the address range only; they do not affect risk scores or traffic totals.</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -230,7 +231,7 @@
     <!-- The Sentinel Hub dashboard is an analyst surface, not the monitored app. -->
     <script>window.BEHAVIOR_TRACKING={enabled:false,sessionTimeoutMs:1800000};</script>
     <script src="/static/behavior-tracker.js"></script>
-    <script src="/static/dashboard.js?v=20260921-geo-location"></script>
+    <script src="/static/dashboard.js?v=20260930-abuse-badge-layout"></script>
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="/static/map.js"></script>
 </body>

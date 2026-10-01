@@ -74,6 +74,48 @@ def test_city_unknown_is_not_selected_when_coordinates_conflict(monkeypatch):
     assert result["city"]["longitude"] is None
 
 
+def test_vietnam_city_and_district_names_with_same_parent_are_normalized(monkeypatch):
+    countries = {name: "VN" for name in ("user_country", "server_country", "geolite2_country", "dbip_country", "iptoasn_country")}
+    cities = {
+        "geolite2_city": {
+            "country_code": "VN", "city": "Ho Chi Minh City", "state": "Ho Chi Minh",
+            "latitude": 10.7769, "longitude": 106.7009,
+        },
+        "dbip_city": {
+            "country_code": "VN", "city": "Quan Tan Phu", "state": "Ho Chi Minh City (HCMC)",
+            "latitude": 10.80, "longitude": 106.72,
+        },
+    }
+    monkeypatch.setattr(sapics_reader, "_country", lambda name, ip: countries[name])
+    monkeypatch.setattr(sapics_reader, "_city", lambda name, ip: cities[name])
+    monkeypatch.setattr(sapics_reader, "_asn", lambda name, ip: None)
+
+    result = sapics_reader.lookup("198.51.100.9")
+
+    assert result["city"]["value"] == "Ho Chi Minh City"
+    assert result["city"]["status"] == "resolved"
+    assert result["city"]["same_vietnam_parent"] is True
+    assert result["city"]["conflict"] is False
+    assert result["city"]["candidates"]["dbip_city"]["city"] == "Ho Chi Minh City"
+    assert result["city"]["candidates"]["dbip_city"]["raw_city"] == "Quan Tan Phu"
+
+
+def test_vietnam_city_names_with_different_parent_regions_remain_disputed():
+    result = sapics_reader._city_consensus({
+        "geolite2_city": {
+            "country_code": "VN", "city": "Ho Chi Minh City", "state": "Ho Chi Minh",
+            "latitude": 10.7769, "longitude": 106.7009,
+        },
+        "dbip_city": {
+            "country_code": "VN", "city": "Bien Hoa", "state": "Dong Nai",
+            "latitude": 10.95, "longitude": 106.82,
+        },
+    })
+
+    assert result["same_vietnam_parent"] is False
+    assert result["status"] == "disputed"
+
+
 def test_unknown_city_coordinates_remain_only_as_vendor_fallback_candidates(monkeypatch):
     countries = {name: "BG" for name in ("user_country", "server_country", "geolite2_country", "dbip_country", "iptoasn_country")}
     cities = {

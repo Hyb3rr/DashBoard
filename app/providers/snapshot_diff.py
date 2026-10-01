@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from psycopg.rows import tuple_row
 from psycopg.types.json import Jsonb
 
 
@@ -314,7 +315,9 @@ def _apply_snapshot(conn, source, discriminator, rows, *, target, history):
     refresh_id = str(uuid.uuid4())
     copy_ms = stage_index_ms = analyze_ms = diff_ms = history_ms = apply_ms = 0.0
 
-    with conn.cursor() as cur:
+    # Snapshot SQL uses positional columns throughout (COUNT(*) reads and
+    # aggregate unpacking), independent of the connection's application row factory.
+    with conn.cursor(row_factory=tuple_row) as cur:
         staged, rejection = _stage_and_validate_snapshot(
             cur, source, discriminator, rows, target, table, started
         )

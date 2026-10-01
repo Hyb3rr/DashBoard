@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .json_codec import jsonb_value, json_bytes
@@ -135,46 +135,135 @@ def should_create_critical_recurrence(
     return reference - latest_alert_at >= CRITICAL_ALERT_REPEAT_COOLDOWN
 
 
+def should_create_monitored_recurrence(
+    disposition: str | None,
+    old_label: str | None,
+    new_label: str,
+    evidence_fingerprint: str,
+    latest_fingerprint: str | None,
+    baseline_at: datetime | None,
+    now: datetime | None = None,
+) -> bool:
+    """Allow changed Medium evidence for a monitored IP after the alert cooldown."""
+    if (disposition or "new").lower() != "monitor":
+        return False
+    if (old_label or "unknown").lower() != "medium" or (new_label or "unknown").lower() != "medium":
+        return False
+    if baseline_at is None or not evidence_fingerprint or evidence_fingerprint == latest_fingerprint:
+        return False
+    reference = now or utcnow()
+    return reference - baseline_at >= CRITICAL_ALERT_REPEAT_COOLDOWN
+
+
 def _alert_evidence_for_classification(classification: dict[str, Any], observation: dict[str, Any]) -> list[Any]:
     """Keep alert evidence aligned with the evidence used for classification."""
     return classification.get("evidence") or observation.get("recent_behavior_evidence") or []
 
 
+def _as_utc_datetime(value: Any) -> datetime | None:
+    """Normalize persisted/event timestamps before comparing recurrence order."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def create_classification_alert(conn, *, dataset_id: str, batch_id: str, ip: str, old_label: str | None,
-                                old_score: int | None, classification: dict[str, Any], evidence: list[Any]) -> None:
-    """Persist an eligible severity transition or cooled-down Critical recurrence."""
+                                old_score: int | None, classification: dict[str, Any], evidence: list[Any],
+                                created_at=None, recurrence_observed_at=None) -> dict[str, Any]:
+    """Persist an eligible severity transition or meaningful cooled-down recurrence."""
     new_label = str(classification.get("label") or "unknown").lower()
     reason_type = "classification_transition"
-    if not should_create_alert(old_label, new_label):
-        if not should_create_critical_recurrence(old_label, new_label, None):
-            return
-        latest = conn.execute(
-            "SELECT created_at FROM alerts WHERE ip=%s AND severity='critical' AND reason_type <> 'initial_inventory' ORDER BY created_at DESC LIMIT 1",
-            (ip,),
-        ).fetchone()
-        if not should_create_critical_recurrence(old_label, new_label, latest["created_at"] if latest else None):
-            return
-        reason_type = "critical_recurrence"
     fingerprint = hashlib.sha256(json_bytes(evidence)).hexdigest()
+    if not should_create_alert(old_label, new_label):
+        recurrence_at = _as_utc_datetime(recurrence_observed_at)
+        if recurrence_at is None:
+            return {"created": False, "reason_type": None}
+        if (old_label or "unknown").lower() == "medium" and new_label == "medium":
+            disposition = conn.execute(
+                "SELECT state,updated_at FROM ip_dispositions WHERE ip=%s FOR UPDATE", (ip,),
+            ).fetchone()
+            if (disposition or {}).get("state", "new").lower() != "monitor":
+                return {"created": False, "reason_type": None}
+            latest = conn.execute(
+                """SELECT created_at,evidence_fingerprint FROM alerts
+                   WHERE ip=%s AND severity='medium'
+                   AND reason_type IN ('classification_transition','monitored_recurrence')
+                   ORDER BY created_at DESC,id DESC LIMIT 1""",
+                (ip,),
+            ).fetchone()
+            baselines = [
+                normalized for value in (
+                    disposition.get("updated_at") if disposition else None,
+                    latest.get("created_at") if latest else None,
+                )
+                if (normalized := _as_utc_datetime(value)) is not None
+            ]
+            baseline_at = max(baselines) if baselines else None
+            if baseline_at is not None and recurrence_at <= baseline_at:
+                return {"created": False, "reason_type": None}
+            if not should_create_monitored_recurrence(
+                disposition.get("state"), old_label, new_label, fingerprint,
+                latest.get("evidence_fingerprint") if latest else None,
+                baseline_at,
+                created_at or utcnow(),
+            ):
+                return {"created": False, "reason_type": None}
+            reason_type = "monitored_recurrence"
+        elif should_create_critical_recurrence(old_label, new_label, None):
+            latest = conn.execute(
+                """SELECT created_at,evidence_fingerprint FROM alerts
+                   WHERE ip=%s AND severity='critical'
+                   ORDER BY created_at DESC,id DESC LIMIT 1""",
+                (ip,),
+            ).fetchone()
+            if latest and recurrence_at <= _as_utc_datetime(latest["created_at"]):
+                return {"created": False, "reason_type": None}
+            if latest and latest.get("evidence_fingerprint") == fingerprint:
+                return {"created": False, "reason_type": None}
+            if not should_create_critical_recurrence(
+                old_label, new_label, latest["created_at"] if latest else None, created_at or utcnow(),
+            ):
+                return {"created": False, "reason_type": None}
+            reason_type = "critical_recurrence"
+        else:
+            return {"created": False, "reason_type": None}
     dedupe_key = f"classification:{ip}:{new_label}:{reason_type}:{fingerprint}"
-    title = f"{new_label.title()} severity raised for {ip}" if reason_type == "classification_transition" else f"Critical activity repeated for {ip}"
+    title = (
+        f"{new_label.title()} severity raised for {ip}"
+        if reason_type == "classification_transition"
+        else f"Monitored activity repeated for {ip}"
+        if reason_type == "monitored_recurrence"
+        else f"Critical activity repeated for {ip}"
+    )
     description = (
         f"Deterministic classification changed from {(old_label or 'unknown').lower()} to {new_label}."
         if reason_type == "classification_transition"
+        else "Medium classification recurred with changed evidence after the alert cooldown."
+        if reason_type == "monitored_recurrence"
         else "Critical classification remains active with materially changed evidence after the alert cooldown."
     )
-    conn.execute(
+    result = conn.execute(
         """INSERT INTO alerts
            (ip,severity,reason_type,title,description,evidence,evidence_fingerprint,
             previous_classification,current_classification,dedupe_key)
            SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s
            WHERE EXISTS (SELECT 1 FROM ip_profiles WHERE ip=%s)
               OR EXISTS (SELECT 1 FROM ip_observations_state WHERE ip=%s)
-           ON CONFLICT(dedupe_key) DO NOTHING""",
+           ON CONFLICT(dedupe_key) DO NOTHING
+           RETURNING id""",
         (ip, new_label, reason_type, title, description, jsonb_value(evidence), fingerprint,
          jsonb_value({"label": old_label or "unknown", "score": old_score}),
          jsonb_value(classification), dedupe_key, ip, ip),
     )
+    inserted = result.fetchone() if result is not None else None
+    return {"created": bool(inserted), "reason_type": reason_type if inserted else None}
 
 
 def persist_classification_alert_and_notification(
@@ -188,9 +277,10 @@ def persist_classification_alert_and_notification(
     classification: dict[str, Any],
     evidence: list[Any],
     created_at=None,
-) -> None:
+    recurrence_observed_at=None,
+) -> dict[str, Any]:
     """Persist classification alerts and Critical notification outbox rows."""
-    create_classification_alert(
+    alert_result = create_classification_alert(
         conn,
         dataset_id=dataset_id,
         batch_id=batch_id,
@@ -199,16 +289,18 @@ def persist_classification_alert_and_notification(
         old_score=old_score,
         classification=classification,
         evidence=evidence,
+        created_at=created_at,
+        recurrence_observed_at=recurrence_observed_at,
     )
     if str(classification.get("label") or "unknown").lower() != "critical":
-        return
-    if (old_label or "unknown").lower() == "critical":
-        return
-    created_at = created_at or utcnow()
-    key = f"classification_critical:{dataset_id}:{ip}:{batch_id}"
-    conn.execute(
-        """INSERT INTO alert_outbox(ip,event_type,payload,status,attempts,next_retry_at,idempotency_key)
-           VALUES (%s,'classification_critical',%s,'pending',0,%s,%s)
-           ON CONFLICT(idempotency_key) DO NOTHING""",
-        (ip, jsonb_value({"ip": ip, "classification": classification}), created_at, key),
-    )
+        return alert_result
+    if (old_label or "unknown").lower() != "critical":
+        created_at = created_at or utcnow()
+        key = f"classification_critical:{dataset_id}:{ip}:{batch_id}"
+        conn.execute(
+            """INSERT INTO alert_outbox(ip,event_type,payload,status,attempts,next_retry_at,idempotency_key)
+               VALUES (%s,'classification_critical',%s,'pending',0,%s,%s)
+               ON CONFLICT(idempotency_key) DO NOTHING""",
+            (ip, jsonb_value({"ip": ip, "classification": classification}), created_at, key),
+        )
+    return alert_result

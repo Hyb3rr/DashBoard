@@ -3,9 +3,11 @@ import ipaddress
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from ..core.enrichment import _address_scope
 from ..services.dispositions import STATES
 from ..services.enrichment_queue import enqueue
 from ..db.repositories import AiRepository, DispositionRepository, StateRepository
+from ..db.classification_history_repository import ClassificationHistoryRepository
 from .ip_state import _pg_item
 
 router = APIRouter()
@@ -36,6 +38,11 @@ async def ip_details(ip: str, refresh: bool = False):
     scores = await asyncio.to_thread(AiRepository().scores, [address_text])
     ai_profile = scores[0] if scores else None
     item = _pg_item(row, ai_profile) if ai_profile else _pg_item(row)
+    item["address_scope"] = _address_scope(address)
+    item["is_non_public"] = not address.is_global
+    item["classification_history"] = await asyncio.to_thread(
+        ClassificationHistoryRepository().for_ip, address_text, 20
+    )
     return item
 
 

@@ -34,6 +34,7 @@ def test_sidebar_script_owns_shared_navigation_and_preserves_collapse_state():
     assert "href: '/regions'" not in script
     assert "sentinel-sidebar-collapsed" in script
     assert "aria-current=\"page\"" in script
+    assert "page === 'ip-detail' ? 'ip-intelligence'" in script
 
 
 def test_sidebar_css_has_one_visual_contract():

@@ -18,6 +18,39 @@ class FakeRepository:
         return True
 
 
+def test_country_demand_metadata_loads_location_fields_in_one_batch(monkeypatch):
+    from app.db import repositories
+
+    class Cursor:
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self):
+            return [{"ip": "203.0.113.4", "country_code": "VN", "city": "Ho Chi Minh City",
+                     "latitude": 10.8, "longitude": 106.6, "location_disputed": False,
+                     "location_scope": "network", "network_location": {"city_status": "resolved"}}]
+
+    cursor = Cursor()
+    class Connection:
+        def execute(self, sql, params):
+            cursor.execute(sql, params)
+            return cursor
+
+    class Scope:
+        def __enter__(self): return Connection()
+        def __exit__(self, *_): return False
+
+    monkeypatch.setattr(repositories, "transaction", lambda: Scope())
+    result = repositories.ProfileRepository().country_demand_metadata(["203.0.113.4"])
+
+    assert "p.city,p.latitude,p.longitude" in cursor.sql
+    assert "p.location_disputed,p.location_scope,p.network_location" in cursor.sql
+    assert cursor.params == (["203.0.113.4"],)
+    assert result["203.0.113.4"]["city"] == "Ho Chi Minh City"
+    assert result["203.0.113.4"]["network_location"]["city_status"] == "resolved"
+
+
 def row(code, session):
     return {"country_code": code, "session_id": session, "visitor_id": session, "engaged_session_depth": 2}
 
@@ -58,7 +91,8 @@ def test_observation_normalization_prefers_event_country_and_event_flags():
     """Keep event country and explicit booleans ahead of profile fallbacks."""
     result = _normalize_observation(
         {"src_ip": "203.0.113.1", "cf_country": "us", "country_source": "edge",
-         "path": "/products/saw?campaign=x", "is_tor": False, "engaged": True},
+         "path": "/products/saw?campaign=x", "is_tor": False, "engaged": True,
+         "event_time": "2026-09-15T12:00:00Z", "cf_bot_score": 72},
         {"203.0.113.1": {"country_code": "SG", "network_type": "mobile",
                           "is_tor": True, "is_vpn": True, "is_hosting": True,
                           "label": "malicious"}},
@@ -72,6 +106,17 @@ def test_observation_normalization_prefers_event_country_and_event_flags():
     assert result["is_mobile"] is True
     assert result["cgnat"] is True
     assert result["malicious_ip"] is True
+    assert result["event_time"] == "2026-09-15T12:00:00Z"
+    assert result["http_validity_evidence_present"] is True
+
+
+def test_profile_fallbacks_do_not_count_as_http_log_validity_evidence():
+    result = _normalize_observation(
+        {"src_ip": "203.0.113.3", "cf_country": "DE"},
+        {"203.0.113.3": {"is_vpn": True, "is_hosting": True}},
+    )
+    assert result["is_vpn"] is True
+    assert result["http_validity_evidence_present"] is False
 
 
 def test_observation_without_any_country_is_excluded():
