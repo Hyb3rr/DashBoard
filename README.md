@@ -1,319 +1,370 @@
-# Sentinel Hub
-
-Hệ thống giám sát & phát hiện hành vi bất thường trên web server theo thời gian thực, kết hợp rule-based detection, ML (Isolation Forest), threat intelligence, local AI reasoning (giải thích thủ công) và market/region intelligence.
-
----
 
 ## Mục lục
 
-- [Tech Stack](#tech-stack)
-- [Kiến trúc tổng quan](#ki%E1%BA%BFn-tr%C3%BAc-t%E1%BB%95ng-quan)
-- [Nguyên tắc thiết kế](#nguy%C3%AAn-t%E1%BA%AFc-thi%E1%BA%BFt-k%E1%BA%BF)
-- [Pipeline](#pipeline)
-    1. [Web Server](#1-web-server)
-    2. [Log Collector](#2-log-collector)
-    3. [Normalizer](#3-normalizer)
-    4. [Data Storage](#4-data-storage)
-    5. [Detection & Analysis](#5-detection--analysis)
-    6. [Scoring & Classification](#6-scoring--classification)
-    7. [Region / Market Intelligence](#7-region--market-intelligence)
-    8. [FastAPI](#8-fastapi)
-    9. [Realtime Dashboard](#9-realtime-dashboard)
-- [Local AI Reasoner](#local-ai-reasoner)
-- [Backup / Restore](#backup--restore)
-- [Alerts](#alerts)
+-   [1\. Tổng quan](#1-t%E1%BB%95ng-quan)
+-   [2\. Tech stack và quyền sở hữu dữ liệu](#2-tech-stack-v%C3%A0-quy%E1%BB%81n-s%E1%BB%9F-h%E1%BB%AFu-d%E1%BB%AF-li%E1%BB%87u)
+-   [3\. Kiến trúc và luồng dữ liệu](#3-ki%E1%BA%BFn-tr%C3%BAc-v%C3%A0-lu%E1%BB%93ng-d%E1%BB%AF-li%E1%BB%87u)
+-   [4\. Collector, độ bền và raw log](#4-collector-%C4%91%E1%BB%99-b%E1%BB%81n-v%C3%A0-raw-log)
+-   [5\. Chuẩn hóa và lưu trữ](#5-chu%E1%BA%A9n-h%C3%B3a-v%C3%A0-l%C6%B0u-tr%E1%BB%AF)
+-   [6\. Detection, scoring và evidence](#6-detection-scoring-v%C3%A0-evidence)
+-   [7\. Threat intelligence và enrichment](#7-threat-intelligence-v%C3%A0-enrichment)
+-   [8\. Alerts và điều tra](#8-alerts-v%C3%A0-%C4%91i%E1%BB%81u-tra)
+-   [9\. Region / Market Intelligence](#9-region--market-intelligence)
+-   [10\. API, SSE và giao diện](#10-api-sse-v%C3%A0-giao-di%E1%BB%87n)
+-   [11\. Local AI Reasoner](#11-local-ai-reasoner)
+-   [12\. Workers, scheduler và vận hành](#12-workers-scheduler-v%C3%A0-v%E1%BA%ADn-h%C3%A0nh)
+-   [13\. Backup, restore và retention](#13-backup-restore-v%C3%A0-retention)
+-   [14\. Security và ranh giới sản phẩm](#14-security-v%C3%A0-ranh-gi%E1%BB%9Bi-s%E1%BA%A3n-ph%E1%BA%A9m)
+-   [15\. Test và kiểm chứng](#15-test-v%C3%A0-ki%E1%BB%83m-ch%E1%BB%A9ng)
 
-**Demo:** [Sensitive path](https://drive.google.com/drive/folders/1DvwZV9QClBiKu6J_3zBe2Hcmjzc0Sya7?usp=sharing)
+[Video demo](https://drive.google.com/file/d/1YSOIGlBR6ENeN25x7cLklHwsw8BcKaoz/view?usp=sharing)
+[data](https://drive.google.com/file/d/10ulZ2iWc_BKeOuwLZWNxrejtqdiGTdyW/view?usp=sharing)
 
----
+## 1\. Tổng quan
 
-## Tech Stack
+Sentinel Hub là hệ thống **giám sát web server theo hướng read-only**. Máy chủ được theo dõi chỉ gửi log
 
-|Thành phần|Công nghệ|
-|---|---|
-|Backend|Python, FastAPI|
-|Event Storage|ClickHouse|
-|State Storage|PostgreSQL|
-|Log Transport|WebSocket|
-|Realtime UI|Server-Sent Events (SSE)|
-|Frontend|HTML, CSS, JavaScript|
-|Detection|Rules, Rare Path|
-|Machine Learning|Isolation Forest|
-|Threat Intelligence|Geo, ASN, FireHOL, Tor, Proxy/VPN datasets|
-|Market Intelligence|World Bank WDI, UN Comtrade, FAOSTAT, ILOSTAT, BGS World Mineral Statistics, OSM/GHSL|
+Sentinel Hub nhận telemetry, phân tích hành vi và trình bày bằng chứng để operator điều tra. Hệ thống không điều khiển máy chủ được theo dõi.
 
-**Config:** biến môi trường trong `.env` (copy từ `.env.example`), chỉ điền credential cho service đang bật. `.env`, dataset sinh ra, cache Python, archive và report **không** được commit.
+Hai miền nghiệp vụ được tách riêng:
 
-**Reproducible Python environment:** `uv.lock` pins the resolved dependency
-graph for Python 3.11+. Release/build environments should use `uv sync --locked`
-and must fail if the lockfile is out of date; local development may continue
-with the existing virtualenv workflow.
+1.  **Security monitoring:** ingest log, phát hiện hành vi bất thường, phân loại IP, enrichment, alerts và điều tra.
+2.  **Region / Market Intelligence:** tổng hợp dữ liệu kinh tế, thương mại và địa lý để nghiên cứu cơ hội thị trường. Market context không phải security risk.
 
-**Production preflight:** before exposing an instance, run
-`python scripts/ops/validate_production_config.py`. It requires PostgreSQL and
-ClickHouse configuration, proxy authentication with explicit trusted CIDRs,
-security headers, and explicit trusted hosts without wildcard entries. It
-does not print or validate credential values.
+Luồng chính:
 
-**Cấu trúc code chính:**
-
-```
-app/                         package chính (FastAPI, core, services, collectors...)
-app/db/repositories.py      compatibility facade cho profile, geo, intelligence, disposition
-app/db/detection_repository.py detection feature aggregation, rules và atomic PG detection transaction
-app/db/state_repository.py  dashboard IP inventory, summary và change-feed read models
-app/db/region_repository.py country profile và qualified-traffic context
-app/db/market_repository.py market identity, catalog và publication facade
-app/db/market_evidence_repository.py OSM/H3/local evidence, calibration và area/city rollups
-app/db/market_demand_repository.py RFQ, product priors, industrial và country-demand snapshots
-app/db/alert_repository.py  alert persistence, cursor pagination và outbox
-app/db/json_codec.py        adapter JSONB và serialization ổn định dùng chung
-rules/behavior/              1 file JSON / rule, validate bởi rules/schema/
-scripts/geo/ market/ ops/    scripts vận hành & migration (ngoài package app)
-app/core/                    clock & failure-injection hooks (dùng ở runtime)
-tests/fixtures/              helper test-only, không được import vào production
-app/web/templates|static     frontend (đường dẫn cấu hình qua TEMPLATES_DIR/STATIC_DIR)
+```text
+Web server logs
+  → WebSocket collector
+  → normalize + raw archive
+  → ClickHouse events + PostgreSQL state/detection
+  → REST/SSE APIs
+  → dashboard và IP investigation
 ```
 
----
+## 2\. Tech stack và quyền sở hữu dữ liệu
 
-## Kiến trúc tổng quan
+| Khu vực | Công nghệ / trách nhiệm |
+| --- | --- |
+| Backend/API | Python, FastAPI |
+| Ingest transport | WebSocket client |
+| Event và analytics | ClickHouse, `clickhouse-connect` |
+| Mutable state | PostgreSQL, psycopg 3 |
+| Realtime browser updates | SSE; PostgreSQL `LISTEN/NOTIFY` làm cross-process wake-up |
+| Frontend | HTML, CSS và JavaScript; không cần SPA framework |
+| Map | MapLibre GL JS |
+| Statistical anomaly detection | scikit-learn Isolation Forest |
+| Local geospatial aggregation | H3, OSM và GHSL urban context |
+| Raw archive | local spool, Zstandard, SHA-256, Azure Blob |
+| Local case explanation | llama.cpp server với Foundation-Sec GGUF và JSON Schema output |
+| Scheduling | process riêng; macOS LaunchAgent được hỗ trợ |
+| Tests | pytest; browser checks theo môi trường/harness |
+
+Quyền sở hữu dữ liệu
+
+**ClickHouse** sở hữu raw HTTP events, event history, time-series, request/path analytics và các phép tổng hợp số lượng lớn.
+
+**PostgreSQL** sở hữu IP profiles, classification/risk state, evidence, intelligence metadata, provider status, checkpoint/lease, idempotency, alerts/outbox, change feed, AI jobs và region/market read models.
+
+SQLite không thuộc runtime architecture. Không có chế độ SQLite fallback hoặc offline analysis mode.
+
+## 3\. Kiến trúc và luồng dữ liệu
+
 
 ![System structure](./attachments/system_structure.png)
 
----
 
-## Nguyên tắc thiết kế
+Collector commit giữ nguyên tính replay-safe: event được ghi bền vững và state/checkpoint được xử lý trước khi source offset được xác nhận. Offset chỉ tiến sau khi batch được xử lý thành công. Nếu commit lỗi, storage worker retry; queue có giới hạn để chậm lại bằng backpressure thay vì âm thầm loại raw batch.
 
-- **Tách luồng realtime khỏi workload nặng** — Early Detection chỉ dùng rule nhẹ
-    - state ngắn hạn trong memory; Rare Path, Isolation Forest, enrichment, market refresh, OSM processing chạy ngoài Collector hot path. Khi quá tải, ưu tiên giữ: Collector/ingest → Fast Detection/Early Alert → Durable storage/ checkpoint → mới tới deep/background analysis.
-- **Không mất, không trùng log:** log chỉ được xác nhận sau khi lưu thành công; khi kết nối lại hoặc khởi động lại, các log đã xử lý sẽ được bỏ qua để tránh ghi và đếm trùng.
-- **Backpressure thay vì drop:** mọi queue có giới hạn; storage chậm → áp dụng backpressure thay vì âm thầm mất log.
-- **Tách lưu trữ theo workload:** ClickHouse = event bất biến/lịch sử/analytics; PostgreSQL = state hiện tại (IP profile, evidence, classification, job, intel).
-- **Change-feed retention:** `ip_change_log` được giới hạn bởi maintenance task riêng trong `data_scheduler`; AI scoring chỉ ghi semantic changes, không dọn durable feed.
-- **Data refresh scheduler:** chạy ngoài vòng đời FastAPI; cấu hình macOS nằm ở mục riêng bên dưới. `scripts/dev_run.sh` không khởi chạy scheduler.
-- **Giải thích market score:** Region Profile giải thích cả cấp quốc gia và khu vực bằng các thành phần đã lưu (product demand, OSM sector features, industrial land, access observations, economic potential và machinery imports); đây là market/commercial context, tách biệt với security risk.
-- **Geo conflict:** Operational country, city, coordinates, RIR registration và ip2region context được giữ thành các lớp riêng. Khi nguồn mâu thuẫn, hệ thống hiển thị `resolved_with_conflict` và giữ candidate; không tự gán một city hoặc thay đổi security classification chỉ vì geo disagreement.
-- **IP Detail hierarchy:** IP traffic appears before the compact `Why this verdict?` score explanation; network location separates the operational result from source candidates and conflict context so live investigation remains the primary view.
-- **IP Detail investigation tabs:** `Overview`, `Activity`, `Detections`, `Evidence`, and `Intel` organize the existing case data client-side while keeping the summary visible and avoiding extra API requests or full-page rerenders.
-- **IP Detail overview:** Overview summarizes the current assessment, activity span, request/error volume, and active score contributions. Classification history lists each saved label transition with its source, before/after score, and evidence snapshot; old change-log entries without evidence are marked as incomplete. Detections stays expanded for direct reading; Evidence uses a two-column layout on desktop and collapses responsively on smaller screens.
-- **Fail-isolated:** 1 job/nguồn lỗi không kéo sập cái khác (intel source, raw archive, backup component... đều retry/degrade độc lập).
+`app/main.py` wiring các routers và khởi động component theo `APP_ROLE`. Role FastAPI được hỗ trợ là `all`, `api`, `collector`, `worker`, `ai`; data scheduler chạy riêng bằng `python -m scripts.ops.data_scheduler`.
 
----
+## 4\. Collector, độ bền và raw log
 
-## Data refresh scheduler
+### WebSocket collector
 
-On macOS, the scheduler can run as a per-user LaunchAgent, independently of
-the FastAPI process. `RunAtLoad` runs one pass at login; `StartInterval` repeats
-it using `DATA_SCHEDULER_INTERVAL_SECONDS`. The scheduler's persisted due-state
-prevents every launch from forcing every provider refresh, and its process lock
-prevents overlapping passes. PostgreSQL and ClickHouse must still be running
-for jobs that depend on them. A LaunchAgent runs after user login, not before
-login at boot.
+Kỹ thuật chính:
 
-With `.env` configured, write the plist and load it into the current user
-session:
+-   **Batching:** nhận nhiều log, gom theo batch/flush interval rồi đưa vào một storage queue có giới hạn.
+-   **Deterministic identity:** event ID được tạo ổn định từ source, offset và raw line; batch identity ổn định theo source và offset range để bảo vệ replay/idempotency.
+-   **Workload governance:** collector theo dõi áp lực hàng chờ để trì hoãn công việc nền như enrichment, ...
 
-```sh
-python -m scripts.ops.data_scheduler_launchd --install
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sentinel.data-scheduler.plist"
-launchctl print "gui/$(id -u)/com.sentinel.data-scheduler"
+Giá trị mặc định trong collector config là batch tối đa 200 dòng và flush mỗi 1.000 ms; storage queue có giới hạn 1.000 batch. Các giá trị này có thể cấu hình qua environment, không phải cam kết throughput cố định.
+
+### Fast Detection
+
+Kiểm tra các dấu hiệu nhận biết cao như `/.env`, `/.git` và các WordPress hoặc admin paths.
+
+Early Alert có thể cảnh báo sớm nhưng không thay Stage-2 classification, score, checkpoint hay verdict cuối cùng.
+
+### Raw log archive
+
+Archive có bounded queue (mặc định 10.000 dòng / 64 MiB); áp lực cao được cảnh báo trước khi queue đầy. Chunk được seal theo giờ UTC hoặc khi đạt 128 MiB, lưu metadata và checksum.
+
+## 5\. Chuẩn hóa và lưu trữ
+
+### Normalization
+
+Apache combined access log được parse thành event có các trường chuẩn như IP, timestamp, HTTP method, path, status, bytes, referer và user agent. Raw line vẫn được giữ cho investigation. Parse rejection được ghi với source offset, raw-line hash, parser version và error code để quan sát lỗi mà không làm mất bằng chứng gốc.
+
+Path canonicalization phục vụ phân tích traffic và rare path; không áp dụng lower-case mù quáng cho URL path. Parser/version và event identity hỗ trợ tái lập, phân biệt dữ liệu lỗi và tránh đếm trùng.
+
+### Lưu trữ hai database
+
+| ClickHouse | PostgreSQL |
+| --- | --- |
+| HTTP events bất biến | IP profile và current state |
+| Traffic/time buckets | Detection/classification/evidence |
+| Path/request analytics | Checkpoint, lease, idempotency |
+| Historical queries và raw-log tail | Alerts, outbox, jobs, intelligence status |
+| Behavior events và country-demand source events | Change feed, AI state, market read models |
+
+Kết nối và query được đặt sau storage repository modules. FastAPI routers điều phối; business policy thuộc services/core thay vì route handler.
+
+## 6\. Detection, scoring và evidence
+
+### Các lớp phát hiện
+
+1.  **Fast Detection :** marker high-confidence và cửa sổ ngắn bounded trong memory; mục tiêu là độ trễ thấp.
+2.  **Behavior rules:** phát hiện pattern như brute force, burst, scan, sensitive-path probing, bot và tỷ lệ HTTP 4xx. Rule được lưu thành JSON, có schema và test fixtures.
+3.  **Rare Path:** phân tích thống kê theo lịch sử và tập IP; chạy batch/background, là supporting evidence, không tự chứng minh malicious và hiện không tự tăng score theo README contract.
+4.  **Isolation Forest:** học anomaly scoring trên feature windows trong worker riêng; output được lưu như AI anomaly evidence score, không block ingest.
+5.  **Threat/network context:** Tor, VPN, proxy, hosting, ASN hoặc feed match bổ sung bối cảnh; không tự kết luận một IP xấu.
+
+### Scoring và classification
+
+Risk được giải thích theo các nhóm đóng góp:
+
+| Nhóm | Ý nghĩa |
+| --- | --- |
+| A — Behavior | Request pattern, probing, burst, bot, lỗi HTTP |
+| B — Network identity | Tor/proxy/VPN/hosting; contribution có giới hạn |
+| C — Trusted network | Context mạng hoặc tổ chức đáng tin khi behavior thấp |
+| D — Conflict context | Geo/network conflict chỉ được dùng có điều kiện |
+| E — AI anomaly | Isolation Forest signal đủ điều kiện |
+
+Chi tiết score đang áp dụng:
+
+- A là behavior score
+
+- B cộng Tor/proxy/VPN/hosting tối đa +25
+
+- C giảm 20 khi organization confidence ≥70 không hosting và behavior <25
+
+- D chỉ có thể cộng tối đa +5 khi đã có behavior
+
+- E cộng +8 khi behavior <25, anomaly score ≥70 và đã có ít nhất 3 windows
+
+Score cuối được clamp về 0–100. Label `unknown` áp dụng khi traffic/evidence chưa đủ; hard sensitive probing hoặc base score ≥60 thành `critical`; score ≥30 hoặc AI bonus thành `medium`; score ≥10 thành `low`; còn lại là `good`. Confidence/data health được trả kèm verdict, không thay evidence.
+
+### Evidence
+
+Evidence là contract chung nối rule, behavior, rarity, privacy/reputation, AI anomaly và geo/network context. Evidence giữ nguồn, mã/tên detector, giá trị quan sát/threshold, thời gian, giải thích và contribution khi có.
+
+Evidence được dùng trong IP Detail, Alerts, What Changed và CasePacket. Geo/network disagreement và confidence không bị biến thành behavior risk một cách tự động.
+
+## 7\. Threat intelligence và enrichment
+
+Enrichment làm giàu IP bằng provider/local dataset và được thực hiện ở background, không gọi mạng đồng bộ theo từng event hay trong API request hot path.
+
+Các loại context hiện có trong provider/service layer gồm:
+
+-   IP geolocation và ASN/network registration;
+-   hosting/datacenter, Cloudflare và network organization;
+-   Tor exit list;
+-   VPN/proxy/anonymous network và FireHOL/X4BNet-style lists;
+-   SAPICS ip-location-db, local MaxMind-compatible GeoIP và ip2region context;
+-   RIR delegated statistics làm registration context, không làm physical geolocation;
+-   provider freshness/status, local GeoIP/IP2Region datasets và conflict/confidence.
+
+Pipeline snapshot intelligence dùng staging/COPY và set-based PostgreSQL diff. Snapshot giống hệt không update hàng loạt current rows; state chỉ được ghi khi added/changed/removed/reactivated. Safety gate từ chối snapshot rỗng hoặc shrink bất thường theo policy; nhiều bảng thuộc cùng provider được apply trong transaction để tránh trạng thái một nửa.
+
+Geo semantics tách riêng operational location, RIR registration, candidate sources và confidence. RIR country không được diễn giải là vị trí vật lý. Nếu nguồn khác nhau, candidate/conflict được giữ lại; thiếu dữ liệu giữ `null`/unknown thay vì bịa giá trị.
+
+## 8\. Alerts và điều tra
+
+### Alert inbox
+
+Alerts được lưu bền vững trong PostgreSQL, tách khỏi IP classification.
+Auto-explain Critical là tuỳ chọn, mặc định không tự chạy nếu setting không bật.
+
+### Disposition automation
+
+Disposition là trạng thái triage của case, tách biệt với classification (đánh giá rủi ro hiện tại) và alert (sự kiện cần chú ý). Analyst có thể tự đặt trạng thái và ghi người phụ trách/ghi chú; policy tự động chỉ thực hiện các chuyển trạng thái sau:
+
+| Trạng thái hiện tại | Điều kiện | Trạng thái mới | Lý do lưu trong history |
+| --- | --- | --- | --- |
+| `NEW` | Classification chuyển thành `Medium` | `MONITOR` | `medium_classification` |
+| `NEW` | Classification chuyển thành `Critical` | `INVESTIGATE` | `critical_classification` |
+| `MONITOR` | Classification lên `Critical` và alert chuyển severity được tạo | `INVESTIGATE` | `critical_classification` |
+| `MONITOR` | Medium tái diễn với evidence fingerprint mới, ngoài cooldown 30 phút và alert recurrence được tạo | `INVESTIGATE` | `monitored_recurrence` |
+| `MONITOR` | Classification trở lại `Medium` từ mức thấp hơn và alert chuyển classification được tạo | `INVESTIGATE` | `medium_classification` |
+
+Evidence trùng, activity còn trong cooldown, hoặc không tạo được alert recurrence thì không tự chuyển `MONITOR` sang `INVESTIGATE`. Policy không tự thay đổi `INVESTIGATE`, `ESCALATE` hay `RESOLVED`; `ESCALATE` thuộc analyst, và tự mở lại case `RESOLVED` chưa nằm trong phạm vi hiện tại. Mỗi chuyển trạng thái tự động được ghi history với actor `system`, trạng thái trước/sau, thời điểm và lý do. Alert, classification và disposition được lưu cùng transaction hiện có để tránh trạng thái lệch nhau.
+
+### IP Detail
+
+IP Detail hợp nhất summary/classification, request activity, detections, evidence, network location/intelligence, privacy/reputation và nguồn dữ liệu. Các tab tổ chức cùng dữ liệu client-side; mục tiêu là không phát sinh API query không cần thiết hoặc reload toàn trang khi chỉ chuyển tab.
+
+### Raw Log Tail
+
+Raw Log Tail đọc những event mới nhất từ ClickHouse cho việc triage nhanh, hiển thị theo dạng bảng/dòng và cho phép mở IP Detail. Đây là màn hình quan sát log đã ingest, không phải terminal trên remote server.
+
+## 9\. Region / Market Intelligence
+
+Market Intelligence là sản phẩm phụ trợ nghiên cứu thương mại, **không tham gia IP security score**.
+
+### Country / demand context
+
+-   World Bank WDI cung cấp chỉ số kinh tế vĩ mô như GDP, dân số, nhập khẩu và công nghiệp.
+-   UN Comtrade cung cấp trade/import context theo sản phẩm/mã HS.
+-   FAOSTAT, ILOSTAT và BGS bổ sung bối cảnh ngành/sản xuất/lao động/vật liệu khi có dữ liệu phù hợp.
+-   Vietnam sources gồm NSO PX-Web, Foreign Investment Agency/FDI material, InvestVietnam, [doanhnghiep.vn](http://doanhnghiep.vn) registry proxy, Geofabrik/OSM, GeoBoundaries, GeoNames và GHSL.
+-   Product tracks hiện có context cho woodworking và metalworking; mỗi source giữ provenance/freshness và limitation riêng.
+-   Country demand sử dụng traffic đã quan sát như validation/context; qualified sessions, visitor identity, time windows, confidence và coverage được lưu theo snapshot.
+-   Opportunity score/read model được tính trong backend; browser chỉ trình bày giá trị và explanation đã được API trả về.
+
+Trong demand calculation hiện hành, demand strength được nén theo logarithm; country demand score kết hợp strength, engagement quality và momentum với trọng số 50/30/20, rồi renormalize nếu thiếu thành phần. Confidence dựa trên engagement-evidence coverage và sample damping. Country Opportunity shrink confidence-adjusted demand về neutral 50 trước khi blend:
+
+```text
+adjusted_demand = 50 + demand_confidence × (country_demand_score − 50)
+opportunity     = 0.60 × market_score + 0.40 × adjusted_demand
 ```
 
-To unload and remove it:
+Country product prior dùng tối đa sáu tín hiệu normalized: HS imports (0.35), relevant exports (0.20), sector consumption (0.20), manufacturing growth (0.10), labor-cost pressure (0.10) và cement consumption (0.05). Missing signals được loại khỏi mẫu số thay vì biến thành zero. Market-potential v1 còn có city-fit và internal sales/RFQ validation; trọng số được điều chỉnh theo độ đầy đủ của evidence, nên không nên mô tả mọi market/city view bằng một công thức duy nhất.
 
-```sh
-launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sentinel.data-scheduler.plist"
-python -m scripts.ops.data_scheduler_launchd --uninstall
+Ở market-potential v1, external country prior và city fit có trọng số mặc định 60/40; khi thiếu một nguồn, nguồn còn lại được renormalize. Sales/RFQ validation lấy trọng số nội bộ tăng dần theo số RFQ (đến ngưỡng `k`) và giảm tỷ trọng external prior tương ứng. Confidence riêng phản ánh coverage, freshness, source quality và internal validation. Đây là mô hình market-potential, khác công thức Country Opportunity ở trên.
+
+### Vietnam province/city evidence
+
+Vietnam pipeline làm việc với geography foundation, đơn vị hành chính hiện hành, NSO indicators, FDI/industrial context, enterprise proxies và OSM/H3 observations. GeoBoundaries/GeoNames/GHSL hỗ trợ administrative/urban mapping.
+
+OSM/enterprise registry observations được ghi là proxy/discovery evidence, không được gọi nhầm là official factory count. Missing values khác với observed zero. Project context hiện hướng tới evidence-first profile cho 34 tỉnh/thành và không công bố composite Province Potential Score nếu methodology chưa được phê duyệt.
+
+Kỹ thuật chính:
+
+-   H3 cells để chuẩn hóa không gian và join area/city memberships;
+-   geometry/boundary mapping để gắn cells với geography;
+-   snapshot và read-model publication thay vì query nguồn ngoài theo dashboard request;
+-   overlap/calibration và coverage metadata để giải thích hạn chế dữ liệu;
+-   refresh theo batch, riêng từng source có freshness/provenance.
+
+
+## 10\. API, SSE và giao diện
+
+### REST và pages
+
+FastAPI cung cấp health/liveness, traffic analytics, IP state/detail, alerts, raw-log tail, regions, map intelligence, behavior events và AI explain jobs. Routers chịu trách nhiệm parse request/response và gọi service/repository phù hợp.
+
+Behavior/session tracker có JavaScript và ingestion API nhưng dashboard hiện cấu hình `enabled: false`; không nên trình bày nó như telemetry đang được thu thập trong deployment local mặc định.
+
+### Realtime flow
+
+```text
+PostgreSQL transaction writes ip_change_log
+      → trigger NOTIFY(cursor)
+      → each API process LISTENs
+      → process-local realtime bus wakes its SSE clients
+      → browser fetches durable delta by cursor
 ```
 
-Changing `DATA_SCHEDULER_INTERVAL_SECONDS` requires regenerating the plist and
-reloading the agent. `DATA_SCHEDULER_ENABLED=false` makes each invocation exit
-without starting a refresh pass. Logs are written under `data/logs/`; the
-one-shot runner can also be invoked directly with
-`python -m scripts.ops.data_scheduler`.
+PostgreSQL `NOTIFY` chỉ là wake-up hint; `ip_change_log` và cursor API mới là durable truth. Nếu notification bị mất, reconnect/replay theo cursor có thể lấy lại delta. Bus coalesce wake-ups để không broadcast hàng loạt cursor đang chờ cho cùng client. Browser dùng polling fallback có giới hạn khi SSE không hoạt động.
 
-The shared intelligence updater is disabled by default
-(`INTEL_UPDATER_ENABLED=false`). When explicitly enabled, it refreshes SAPICS
-through the existing intelligence schedule; otherwise
-`SAPICS_UPDATER_ENABLED` controls SAPICS's independent fallback schedule.
-`IP2REGION_UPDATER_ENABLED` controls ip2region refreshes. Both local database
-refresh intervals default to 24 hours. Their startup-time network downloads
-were removed from `scripts/dev_run.sh`; failed downloads leave the previous
-validated files in place.
+### Các màn hình
 
----
+| Màn hình | Chức năng |
+| --- | --- |
+| Overview | Live counters, classification breakdown, top IP/path, traffic và health |
+| IP Intelligence | Tìm/lọc IP theo country, ASN, class, disposition; mở investigation |
+| IP Detail | Activity, detections, evidence, geo/network intel và manual AI explanation |
+| Alerts | Inbox theo severity/status, pagination, acknowledge/resolve |
+| Raw Log Tail | Xem event gần nhất và mở IP Detail |
+| Global Map | Các lớp security evidence và market/geo context |
+| Region/Market views | Country opportunity/demand và local area/city evidence |
 
-## Pipeline
+UI dùng shared navigation/theme assets; dashboard ưu tiên delta updates, payload gọn và không rerender toàn trang khi không cần.
 
-### 1. Web Server
+## 11\. Local AI Reasoner
 
-Nguồn sinh log (IP, thời gian, method, path, status, User-Agent). Server chỉ có nhiệm vụ gửi log ra ngoài, không xử lý gì thêm.
-
-### 2. Log Collector
-
-Nhận log realtime qua **WebSocket**, hỗ trợ reconnect/replay để tránh mất log, xử lý trùng, hoặc sai lệch state sau khi mất kết nối.
-
-Collector giữ vai trò điều phối lifecycle và status. Session/lease/reconnect nằm
-trong `app/collectors/session.py`; batch intake và source-offset buffering ở
-`batching.py`; queue, drain và ordered commit/retry ở `storage.py`; enrichment
-và privacy refresh có worker/state riêng trong `background.py`.
-
-**Raw log archive (song song với fast path):**
-
-- Mỗi raw batch được ghi vào spool và `fsync` hoàn tất trước khi downstream xử lý hoặc checkpoint được xác nhận. Nếu archive từ chối nhận hoặc ghi thất bại, batch không nhận durability acknowledgement bình thường; source offset không được xác nhận tiến lên.
-- File xoay theo giờ UTC hoặc khi đạt 128 MiB; chunk đã "seal" có sidecar JSON (nguồn, chunk ID, line/byte count) và không bao giờ bị ghi thêm.
-- Queue nhận có giới hạn (10.000 dòng / 64 MiB); ≥70% báo `PRESSURE`, đầy hoặc disk guard từ chối thì không mất log âm thầm — client reconnect và replay từ checkpoint.
-- Lifecycle: `raw batch → durable spool write + fsync → sealed chunk → verified zstd compression → independent destination state`.
-- Hai destination có durable sidecar state độc lập: **LOCAL** `pending / failed / verified`; **AZURE** `pending / failed / verified`. Thành công ở một destination không khiến destination đó bị copy/upload lại khi destination kia retry thất bại.
-- **Local copy:** chunk được ghi vào file tạm `.tmp`, `fsync`, xác minh size/SHA-256 rồi atomic rename. File đích đã tồn tại cũng được xác minh size/checksum trước khi chấp nhận.
-- **Azure:** chunk được upload bằng staged blocks và xác minh SHA-256 từ xa. Nếu object đã commit nhưng manifest chưa được ghi trước khi process dừng, retry sẽ tìm deterministic object, xác minh bytes + SHA-256, rồi ghi manifest mà không upload object lần nữa. Object hoặc manifest hiện hữu nhưng không khớp chunk sẽ gây lỗi rõ ràng; hệ thống không âm thầm ghi đè.
-- Khi Azure outage hoặc chưa cấu hình Azure/SDK, local copy vẫn có thể được verify nhưng Azure ở `pending/failed`; spool được giữ lại. Vì vậy spool và local copy có thể cùng chiếm disk cho đến khi Azure hoạt động. Disk guard có thể chặn ingestion mới nếu tình trạng kéo dài; đây là hành vi bảo toàn dữ liệu có chủ ý.
-- Cleanup spool chỉ chạy khi local đã `verified` hoặc được cấu hình `disabled`, **và** Azure đã `verified`. Khi local backup bật, final manifest chứa proof của cả hai destination phải được ghi bền vững cạnh file local `.zst` trước khi dọn spool.
-- Local retention mặc định là **7 ngày**. Chỉ xóa local `.zst` hết hạn khi final manifest ghi local và Azure đều `verified`, đồng thời file vẫn khớp bytes/SHA-256 đã ghi nhận. Retention local không thay thế độ bền của Azure.
-- Disk guard giữ mặc định **2 GiB** dung lượng trống dự trữ và cập nhật phép đo theo chu kỳ **10 giây**. Với bản local copy mới, yêu cầu dung lượng là `reserve + compressed chunk size`; nếu bản đã tồn tại và được xác minh, không dự trữ kích thước chunk lần nữa. Khi không đủ reserve, raw admission bị chặn, không có durability receipt thành công và checkpoint bình thường không tiến lên. Archive writer health làm `/health` chuyển degraded; trạng thái tự hồi phục sau khi dung lượng trống trở lại. Không tự xóa dữ liệu để giải phóng disk và local backups còn trong retention được bảo vệ.
-- Thư mục local backup có thể đặt trên filesystem khác. Nếu ở cùng physical disk với spool thì bản copy chỉ giúp khôi phục khỏi lỗi phần mềm/operator hoặc khi cần lấy lại archive gần đây; nó **không** bảo vệ trước hỏng ổ đĩa. Azure là bản off-machine.
-- Job dọn dẹp cross-platform (`raw_log_archive_job`, kèm adapter launchd/Task Scheduler) drain artifact còn sót sau restart/outage.
-- Lệnh replay độc lập (`replay_raw_archive`) để verify tính toàn vẹn chunk — chưa chứng minh byte-identity với `access.log` gốc trên Nginx.
-
-**Fast Detection:** chỉ dùng path marker high-confidence (`/.env`, `/.git`, `wp-config.php`, `phpmyadmin`, `adminer`...), không chờ DB, không đổi classification, không sở hữu checkpoint.
-
-### 3. Normalizer
-
-Parse log thô thành cấu trúc thống nhất; chuẩn hoá path phục vụ traffic stats, detection và Rare Path Analysis.
-
-### 4. Data Storage
-
-|Storage|Vai trò|
-|---|---|
-|**ClickHouse**|Event bất biến, lịch sử truy cập, analytics theo thời gian|
-|**PostgreSQL**|State hiện tại: IP profile, evidence, classification, job, intel, read-model|
-
-### 5. Detection & Analysis
-
-**Behavior Detection:**
-
-- **Rules** — pattern đã biết: burst, brute-force, sensitive-path probing, nhiều 4xx (`WEB-BRUTE-001`, `WEB-BURST-001`, `WEB-SCAN-001`).
-- **Rare Path** — URL/path hiếm gặp theo lịch sử; hiện chạy ở chế độ **shadow**, `severity: supporting`, `score_contribution: 0` — không tự quyết classification.
-- **Isolation Forest** — phát hiện bất thường thống kê, chạy như Stage-2 periodic worker độc lập ngoài Collector hot path; kết quả lưu `ip_ai_scores`.
-
-**Fast Detection correlation (Early Alert):** `IP → bounded window → threshold → preliminary alert`, có TTL + cooldown theo `(IP, rule)` để tránh alert storm. Chỉ tạo alert `preliminary`, không đổi Stage-2 score/classification/checkpoint.
-
-**Threat Intelligence:** Geo/ASN, Hosting, VPN, Proxy, Tor, FireHOL, abuse feeds — cung cấp _context/supporting evidence_, không tự kết luận malicious.
-
-- **Failure-isolated theo từng source** — 1 nguồn lỗi không chặn các nguồn khác
-### 6. Scoring & Classification
-
-|Nhóm|Ý nghĩa|Điểm|
-|---|---|--:|
-|**A — Behavior**|Request pattern, probing, burst, bot, lỗi HTTP|0–100|
-|**B — Network Identity**|Tor +15, Proxy +10, VPN +8, Hosting +5|tối đa +25|
-|**C — Trusted Network**|Mạng/tổ chức rõ ràng + hành vi thấp|−20|
-|**D — Conflict Context**|Chỉ dùng khi đã có hành vi đáng ngờ|+0 → +5|
-|**E — AI Anomaly**|Isolation Forest đủ mạnh|+8|
-|**F — Campaign Correlation**|Nhiều IP cùng ASN, hành vi/path tương đồng|+0 → +5|
-
-**Tier (lowercase trong code/API/DB: `unknown|good|low|medium|critical`):**
-
-```
-UNKNOWN   quá ít dữ liệu, chưa có behavior/network/AI signal
-GOOD      0–9
-LOW       10–29
-MEDIUM    30–59, hoặc AI anomaly đủ điều kiện
-CRITICAL  60–100, hoặc hard behavior (vd sensitive probing)
+```text
+deterministic detections + persisted evidence
+      → bounded CasePacket
+      → asynchronous PostgreSQL job
+      → local llama.cpp / Foundation-Sec
+      → strict schema + evidence grounding validation
+      → validated explanation or failed job
 ```
 
-Mỗi kết quả đi kèm **Evidence** giải thích tín hiệu nào góp phần → xem [Unified Evidence](#local-ai-reasoner).
+AI là **case explainer**, không phải nguồn authority cho classification/risk và không nằm trong collector ingest hot path.
 
-Behavior score dùng aggregation theo evidence family bằng family-max. V1 vẫn được
-tính để đo chênh lệch trên cùng `detections_recent`, nhưng không còn công tắc runtime
-để chuyển production về V1; rollback cần khôi phục code. Family-max chỉ thay
-aggregation của A; rule points, các thành phần B–E, ngưỡng, hard-sensitive Critical
-và confidence được giữ nguyên. Nếu thiếu `detections_recent`, classification tạm
-fallback sang V1 và ghi metric. Trong 128 lượt production family-max đã quan sát,
-delta đều bằng 0 và behavior score đều bằng 0; chưa có bằng chứng về accuracy hay
-trường hợp nhiều rule cùng family.
-
-### 7. Region / Market Intelligence
-
-Chấm điểm **tiềm năng thị trường theo quốc gia/khu vực/thành phố**, tách biệt hoàn toàn với security scoring.
-
-Traffic trong Potential Markets dùng cùng country-demand snapshot và cohort cho
-quốc gia lẫn phân rã tỉnh Việt Nam. `qualified_http_requests` đếm request HTTP
-được giữ lại theo eligibility hiện hành; các request không có province
-attribution rõ ràng được cộng vào `Unmapped / unknown city`. Tổng request theo
-tỉnh cộng Unmapped phải bằng tổng ở cấp Việt Nam. `Coverage` vẫn biểu thị độ
-bao phủ market evidence, không phải độ bao phủ địa lý.
-Đối với traffic Việt Nam, nhãn city/district của nguồn GeoIP được quy lên đơn
-vị tỉnh/thành chuẩn của ứng dụng qua trường admin parent (`state`), rồi mới
-gom vào hàng tỉnh. Vì vậy district của DB-IP như `Quan Binh Thanh` có thể được
-hiển thị dưới Hồ Chí Minh dù tên city khác GeoLite2; dữ liệu MMDB không bị sửa
-và nhãn gốc vẫn nằm trong candidate evidence. Parent thiếu, không nhận diện
-được hoặc các nguồn bất đồng thì traffic vẫn nằm ở `Unmapped / unknown city`.
-Đây là phân bổ traffic theo tỉnh/thành, không khẳng định city chính xác.
-
-```
-Economic Potential = 40% Market Capacity + 60% Industrial Fit   (World Bank WDI)
-Market Score       = 40% Economic Potential + 60% Machine Demand (UN Comtrade)
-```
+-   CasePacket có fingerprint và giới hạn evidence/request đại diện; inference view có token budget để chỉ gửi phần evidence được chọn.
+-   Job được dedupe theo `(case_id, evidence_fingerprint)` và lưu lifecycle `pending → running → completed/failed` trong PostgreSQL.
+-   Worker claim job bằng `FOR UPDATE SKIP LOCKED`; local inference concurrency hiện giới hạn ở một job tại một thời điểm.
+-   Provider gọi localhost HTTP, yêu cầu JSON Schema, kiểm tra response structure, enum/length, evidence ID có thuộc packet và grounding trước khi lưu kết quả.
+-   Timeout và max-token budget được cấu hình qua environment; giá trị local có thể là bounded experiment, không tự xem là production tuning đã được chứng minh.
+-   AI trigger tự động là chức năng riêng, có policy/dedupe/backlog controls và mặc định disabled; manual explain vẫn là luồng chính.
+-   Raw model output không được xem là evidence/source of truth; chỉ kết quả qua validation mới được đánh dấu completed/validated.
 
 
+## 12\. Workers, scheduler và vận hành
 
-### 8. FastAPI
+### Process roles
 
-```
-REST API  → traffic, IP profile, evidence, region data...
-SSE       → đẩy thay đổi realtime lên Dashboard
-```
+FastAPI lifecycle bật component theo `APP_ROLE`:
 
-IP Detail chỉ enrich lại khi state chưa hoàn tất hoặc user chủ động refresh; thiếu field không tự tạo vòng lặp enrichment.
+| Role | Trách nhiệm chính |
+| --- | --- |
+| `all` | Local compatibility mode, chạy các runtime role trong một process |
+| `api` | HTTP routes và PostgreSQL realtime listener |
+| `collector` | WebSocket collector |
+| `worker` | Classification watcher, coverage và enrichment queue |
+| `ai` | Isolation Forest AI runtime |
 
-### 9. Realtime Dashboard
+Data scheduler là process riêng; không dùng `APP_ROLE=scheduler` trong Uvicorn. `scripts/dev_run.sh` hỗ trợ local services/app nhưng không phải production supervisor.
 
-- **Overview:** donut phân loại (Low/Medium/Critical/Unclassified) + Top IPs + Top paths + System Health, dùng chung time window (mặc định 24h, đổi preset cập nhật đồng bộ cả 4 metric). Traffic timeline vẽ request theo Medium/Critical.
-- **Potential markets:** đổi kỳ 7d/30d/90d vẫn giữ scope quốc gia đang chọn; chọn Việt Nam tiếp tục hiển thị phân rã tỉnh theo kỳ đó.
-- **Global map** (`/map`, chỉ ở Overview): kết hợp market opportunity + security evidence theo quốc gia/thành phố; marker dùng tier cao nhất làm màu tâm, ring thể hiện tier còn lại; zoom load city aggregate thật.
-- **IP Intelligence / IP Detail:** bảng điều tra identity + evidence chi tiết + Explain (AI) thủ công.
-- **Raw Log Tail:** xem log thô dạng từng dòng, mở lịch sử 1h/6h/12h/24h, gợi ý IP theo prefix/status trong cửa sổ đang chọn, cuộn lên đầu khung để tự tải trang log cũ và nhận log mới ở cuối khung cuộn.
-- **Region Detail:** local opportunity + overlap theo area/city.
-- Trang khác: Rare Path Evidence, Threat Intelligence, Data Freshness, What Changed, Collector Health, [Alerts](#alerts).
+### Data refresh scheduler
 
----
+`scripts/ops/data_scheduler.py` điều phối provider/market/geography/intelligence/retention jobs. Mỗi source có due-state/freshness để invocation thường xuyên không đồng nghĩa mọi dữ liệu đều tải lại mỗi lần. Process lock ngăn scheduler runs chồng lấn.
 
-## Local AI Reasoner
+Trên macOS, `data_scheduler_launchd.py` tạo LaunchAgent. `RunAtLoad` chạy sau khi user login; `StartInterval` gọi scheduler theo chu kỳ. PostgreSQL/ClickHouse vẫn phải chạy cho các task phụ thuộc database. SAPICS và ip2region có lịch refresh riêng; lỗi download giữ last-good local dataset.
 
-```
-Detection → Structured Evidence (Unified Evidence) → Local AI → Explanation
-```
+### Metrics và health
 
-AI hỗ trợ **giải thích/tổng hợp**, không nằm trong ingest hot path, không tự đổi classification/risk, không điều khiển Web Server.
-- Foundation-Sec là bounded optional explainer, không phải dependency của detection, classification, risk scoring, alerts hay collector. Các quyết định security vẫn dựa trên pipeline deterministic và evidence hiện có khi AI unavailable hoặc abstain.
-- `LOCAL_REASONING_MAX_INPUT_TOKENS` là eligibility budget theo estimated prompt tokens: `0` (mặc định) fail-closed và abstain trước khi gọi model; giá trị dương `N` chỉ cho phép packet có estimate `<= N`. Ngưỡng production dương hiện **chưa được calibration**.
-- Trạng thái được giữ riêng: `too_large` nghĩa là vượt giới hạn context an toàn của model; `abstained` với `local_reasoning_budget_exceeded` nghĩa là không đủ eligibility theo ngân sách reasoning CPU; `timeout` nghĩa là model đã được gọi nhưng không trả lời trong thời hạn. Abstention không phải provider failure và không làm thay đổi detection/risk.
-- Provider gọi `llama-server` (Foundation-Sec GGUF) cục bộ qua HTTP; JSON-Schema constrained decoding, timeout hữu hạn, output budget mặc định 768 token, **không retry**. Evidence-view riêng cho inference có budget giới hạn (model không thể cite evidence bị loại khỏi budget).
-- Các công cụ offline có profile riêng để giới hạn chi phí chạy: `evaluate_cases.py` dùng server đã chạy sẵn, mặc định timeout 30 giây mỗi case và output budget thực của provider (768 token nếu không cấu hình); metadata context ghi cấu hình server (`FOUNDATION_SEC_CONTEXT_SIZE`, mặc định 8192), không phải provider safety fallback. `capture_case_review.py` khởi chạy server độc lập cho từng case và có fallback profile riêng: timeout 120 giây, 256 token, context 4096, tối đa 60 lần readiness check. Đây không phải cấu hình worker production; artifact ghi lại các giá trị đã resolve từ CLI/environment.
-- Job qua PostgreSQL: `pending → running → completed/failed/abstained`, dedupe theo `(case_id, evidence_fingerprint)`. Worker (`run_explain_worker`) claim job bằng `FOR UPDATE SKIP LOCKED`, concurrency = 1, không retry trong cùng job.
-- **Semantic auto-trigger:** đã có contract (PostgreSQL cursor, dedupe, backlog cap 100 IP) nhưng consumer **disabled by default** — chưa tự tạo AI job.
+Health endpoints tổng hợp trạng thái PostgreSQL, ClickHouse, collector, parser, archive, workload và workers. Request middleware ghi request ID và duration; metrics hiện có một phần process-local nên chưa đồng nghĩa với central metrics backend/HA observability.
 
----
+## 13\. Backup, restore và retention
 
-## Backup / Restore
+-   PostgreSQL backup dùng logical dump dạng custom và upload theo backup-set/manifest.
+-   ClickHouse backup dùng native backup flow; artifact được upload và verify checksum.
+-   Raw logs được archive immutable; có thể replay để tái dựng raw events và phần detection state hỗ trợ.
+-   Manifest/checksum giúp phát hiện artifact thiếu hoặc hỏng; local cleanup chỉ sau successful verification.
+-   Restore phải được kiểm tra thực tế; backup tạo thành công chưa đủ để kết luận restore-ready.
+-   PostgreSQL mutable analyst/alert/AI state không được tái tạo chính xác chỉ bằng raw replay.
+-   Retention của current state, event data, change history và archive là các policy riêng; cleanup có giới hạn/time budget và chạy ngoài ingest hot path.
+-   Snapshot intelligence dùng **delta history** cho added/changed/removed/reactivated thay vì ghi lại toàn snapshot mỗi lần. Identical refresh hướng tới zero current/history writes.
 
-Tất cả là **CLI thủ công**, không chạy trong FastAPI lifecycle. Secrets luôn qua env file ngoài repo, không log/print.
+## 14\. Security và ranh giới sản phẩm
 
-- **PostgreSQL:** `pg_dump --format=custom` stream thẳng lên Azure Block Blob (không ghi file dump đầy đủ ra local); retry = 0 ở giai đoạn đầu.
-- **ClickHouse:** `BACKUP ... TO File(...)` native (không fallback CSV/JSON) → upload + verify SHA-256 lên Azure; xoá local chỉ sau khi có manifest.
-- **Raw-First Recovery:** raw access-log được archive immutable, nén và upload Azure kèm checksum/manifest; khi cần khôi phục, hệ thống replay raw log để tái tạo ClickHouse events và detection state. PostgreSQL mutable state được bảo vệ bằng logical dump định kỳ trong backup set; không còn Continuous WAL/PITR.
-- **Recovery contract:** logical PostgreSQL dump mặc định có RPO theo chu kỳ backup (mục tiêu hằng ngày); raw replay không khôi phục chính xác các thay đổi mutable phát sinh sau dump gần nhất như analyst state, alert state hoặc AI job state. Raw archive phải được verify và replay idempotent trước khi coi là backup hợp lệ.
-- **Retention:** dry-run trước; giữ 7 ngày gần nhất + 4 tuần ISO + 3 tháng gần nhất (union); chỉ báo `KEEP / DELETE_CANDIDATE / PROTECTED`, không tự gọi Azure delete. Có bộ test synthetic riêng chạy trên prefix cô lập.
+-   Có trusted-host validation, configurable security headers, request ID và optional gzip.
+-   Khi bật auth, app tin identity/role headers chỉ từ trusted reverse proxy CIDR; API enforce role groups như Viewer/Analyst/Admin theo route/action.
+-   `/livez` là liveness surface tối giản; detailed health chịu auth khi auth bật.
+-   Production preflight kiểm tra cấu hình exposure như trusted hosts/proxy-auth/database settings; HTTPS/SSO thật vẫn là trách nhiệm deployment/reverse proxy.
+-   Input log, URL và telemetry là dữ liệu không tin cậy; frontend/API phải escape/validate trước khi trình bày hoặc xử lý.
+-   Không có chức năng block IP, đổi firewall, sửa cấu hình remote server, SSH, chạy lệnh hoặc remediation tự động.
+-   Không ghi secrets/token/cookie vào source, tài liệu, job result hoặc log.
 
----
+## 15\. Test và kiểm chứng
 
-## Alerts
+Test suite được chia theo hành vi: parser/normalization; rules/scoring/evidence; replay/checkpoint/lease; repositories/migrations; provider lifecycle; alert/API/UI; AI jobs/validation; country demand/market/geography; raw archive/backup/retention; health/security.
 
-`/alerts` — analyst inbox riêng (PostgreSQL), tách khỏi classification:
+Các kỹ thuật test được dùng:
 
-- Chỉ ghi các **chuyển severity có ý nghĩa** (lên `low/medium/critical`); không dùng Telegram outbox làm nguồn sự thật.
-- Disposition tự động: `NEW + Medium → MONITOR`, `NEW + Critical → INVESTIGATE`; `MONITOR + Critical → INVESTIGATE`. Medium tái diễn chỉ tạo alert `monitored_recurrence` và chuyển sang `INVESTIGATE` khi evidence fingerprint mới và đã qua cooldown 30 phút. `INVESTIGATE`, `ESCALATE`, `RESOLVED` không bị automation ghi đè; `ESCALATE` vẫn do analyst quản lý.
-- Filter theo severity/status, acknowledge/resolve, click mở IP Detail; poll khi trang đang mở.
-- Toggle tự động sinh AI explanation cho Critical mới — **mặc định tắt**, không replay sự kiện cũ, dùng chung AI worker (concurrency 1). Rate-limit 1 alert/IP/30 phút khi evidence thay đổi đáng kể; evidence giống hệt → dedupe.
+-   unit tests cho pure policy/parser/validator;
+-   fake repositories/connections để test SQL contract và worker transitions;
+-   failure injection ở các ranh giới commit để kiểm tra rollback/fencing/replay;
+-   synthetic data và disposable rows cho retention/market;
+-   native integration marker cho PostgreSQL/ClickHouse khi service khả dụng;
+-   browser contract/Playwright smoke khi app và browser harness được bật;
+-   benchmark/soak scripts cho API read path, SSE fan-out và ingest-to-browser latency.
+
+Unit pass không thay thế native DB integration, browser smoke, soak hay restore drill. Kết quả production readiness cần ghi rõ loại evidence và môi trường thực hiện.
+
